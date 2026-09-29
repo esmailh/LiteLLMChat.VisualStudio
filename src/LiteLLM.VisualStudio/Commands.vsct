@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable">
+  <Extern href="stdidcmd.h"/><Extern href="vsshlids.h"/>
+  <Commands package="guidLiteLLMPackage">
+    <Groups><Group guid="guidLiteLLMCommands" id="MainGroup" priority="0x0600"><Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS"/></Group><Group guid="guidLiteLLMCommands" id="EditorGroup" priority="0x0600"><Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_CODEWIN"/></Group></Groups>
+    <Buttons>
+      <Button guid="guidLiteLLMCommands" id="OpenChat" priority="0x0100" type="Button"><Parent guid="guidLiteLLMCommands" id="MainGroup"/><Strings><ButtonText>LiteLLM: Open Chat</ButtonText></Strings></Button>
+      <Button guid="guidLiteLLMCommands" id="OpenDashboard" priority="0x0110" type="Button"><Parent guid="guidLiteLLMCommands" id="MainGroup"/><Strings><ButtonText>LiteLLM: Open Dashboard</ButtonText></Strings></Button>
+      <Button guid="guidLiteLLMCommands" id="RefreshModels" priority="0x0120" type="Button"><Parent guid="guidLiteLLMCommands" id="MainGroup"/><Strings><ButtonText>LiteLLM: Refresh Models</ButtonText></Strings></Button>
+      <Button guid="guidLiteLLMCommands" id="TestConnection" priority="0x0130" type="Button"><Parent guid="guidLiteLLMCommands" id="MainGroup"/><Strings><ButtonText>LiteLLM: Test Connection</ButtonText></Strings></Button>
+      <Button guid="guidLiteLLMCommands" id="ClearChat" priority="0x0140" type="Button"><Parent guid="guidLiteLLMCommands" id="MainGroup"/><Strings><ButtonText>LiteLLM: Clear Chat</ButtonText></Strings></Button>
+      <Button guid="guidLiteLLMCommands" id="SendSelection" priority="0x0100" type="Button"><Parent guid="guidLiteLLMCommands" id="EditorGroup"/><Strings><ButtonText>Send to LiteLLM Chat</ButtonText></Strings></Button>
+    </Buttons>
+  </Commands>
+  <Symbols>
+    <GuidSymbol name="guidLiteLLMPackage" value="{7A065EF0-9E0D-4BBC-9C0F-06D899FDBBBB}"/>
+    <GuidSymbol name="guidLiteLLMCommands" value="{38BB4A85-6C8E-489E-9CA4-E08258489996}"><IDSymbol name="MainGroup" value="0x1000"/><IDSymbol name="EditorGroup" value="0x1001"/><IDSymbol name="OpenChat" value="0x0100"/><IDSymbol name="OpenDashboard" value="0x0101"/><IDSymbol name="RefreshModels" value="0x0102"/><IDSymbol name="TestConnection" value="0x0103"/><IDSymbol name="ClearChat" value="0x0104"/><IDSymbol name="SendSelection" value="0x0105"/></GuidSymbol>
+  </Symbols>
+</CommandTable>

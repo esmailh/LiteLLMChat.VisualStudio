@@ -1,0 +1,261 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:ui="clr-namespace:Microsoft.VisualStudio.PlatformUI;assembly=Microsoft.VisualStudio.Shell.15.0">
+  <!-- Styles only, and every colour in them is a Visual Studio theme token: the brushes are the shell's own, reached by
+       DynamicResource through the x:Static key, so a theme change is the shell swapping its dictionary and WPF
+       re-resolving these out of it — the same moment, and the same brushes, as the shell repaints its own chrome.
+       A colour of our own is not named here at all; VsTheme installs the three things Visual Studio publishes no token
+       for (the error colour, the selection wash and the text on it) and stands in for any token the shell does not
+       answer, because a DynamicResource that resolves to nothing leaves a brush at WPF's default white. -->
+
+  <ResourceDictionary.MergedDictionaries>
+    <ResourceDictionary Source="/LiteLLM.VisualStudio;component/VsControlStyles.xaml"/>
+  </ResourceDictionary.MergedDictionaries>
+
+  <Style TargetType="UserControl"><Setter Property="FontFamily" Value="Segoe UI Variable Text, Segoe UI"/><Setter Property="FontSize" Value="12"/><Setter Property="Foreground" Value="{DynamicResource {x:Static ui:EnvironmentColors.ToolWindowTextBrushKey}}"/></Style>
+  <Style TargetType="Window"><Setter Property="FontFamily" Value="Segoe UI Variable Text, Segoe UI"/><Setter Property="FontSize" Value="12"/><Setter Property="Foreground" Value="{DynamicResource {x:Static ui:EnvironmentColors.ToolWindowTextBrushKey}}"/><Setter Property="Background" Value="{DynamicResource {x:Static ui:EnvironmentColors.ToolWindowBackgroundBrushKey}}"/></Style>
+
+  <!-- Visual Studio's own tool-window scale: a heading is a shade larger and semi-bold, not a display size. -->
+  <Style x:Key="PageTitle" TargetType="TextBlock"><Setter Property="FontSize" Value="15"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="TextTrimming" Value="CharacterEllipsis"/></Style>
+  <Style x:Key="SectionTitle" TargetType="TextBlock"><Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="SemiBold"/></Style>
+  <Style x:Key="Caption" TargetType="TextBlock"><Setter Property="Foreground" Value="{DynamicResource {x:Static ui:CommonDocumentColors.SupportTextBrushKey}}"/><Setter Property="FontSize" Value="11"/></Style>
+
+  <!-- Buttons: Visual Studio's own button colours, and a squared 2px corner like the shell's, rather than a rounded
+       pill of our own. Each state is the shell's token for that state, so hover and press match the shell's buttons. -->
+  <Style TargetType="Button">
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonTextBrushKey}}"/>
+    <Setter Property="Background" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonBorderBrushKey}}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Padding" Value="10,4"/>
+    <Setter Property="MinHeight" Value="24"/>
+    <Setter Property="Margin" Value="4,0,0,0"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+      <Border x:Name="Chrome" CornerRadius="2" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+      </Border>
+      <ControlTemplate.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonHoverBrushKey}}"/>
+          <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonBorderHoverBrushKey}}"/>
+          <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonHoverTextBrushKey}}"/>
+        </Trigger>
+        <Trigger Property="IsPressed" Value="True">
+          <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonPressedBrushKey}}"/>
+          <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonBorderPressedBrushKey}}"/>
+          <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonPressedTextBrushKey}}"/>
+        </Trigger>
+        <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonBorderFocusedBrushKey}}"/></Trigger>
+        <Trigger Property="IsEnabled" Value="False">
+          <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonDisabledBrushKey}}"/>
+          <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonBorderDisabledBrushKey}}"/>
+          <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonDisabledTextBrushKey}}"/>
+        </Trigger>
+      </ControlTemplate.Triggers>
+    </ControlTemplate></Setter.Value></Setter>
+  </Style>
+
+  <!-- The primary action is Visual Studio's own default button: the shell's ButtonDefault pair is a face and a label
+       chosen to read against each other, which is what replaces the hard-coded white this used to carry. -->
+  <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+    <Setter Property="Background" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonDefaultBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonBorderDefaultBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonDefaultTextBrushKey}}"/>
+  </Style>
+  <Style x:Key="SubtleButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Setter Property="Background" Value="Transparent"/><Setter Property="BorderBrush" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/><Setter Property="Padding" Value="7,4"/></Style>
+  <Style x:Key="DangerButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}"><Setter Property="Foreground" Value="{DynamicResource DangerBrush}"/><Setter Property="Background" Value="Transparent"/><Setter Property="BorderBrush" Value="Transparent"/></Style>
+  <!-- The Auto button's two states are its outline, not its label. The label keeps the button's own foreground, so it
+       reads on every theme; an accent-coloured label is at the mercy of the theme's accent, and a theme whose accent
+       sits near its background paints the label away altogether. -->
+  <Style x:Key="AutoButtonOff" TargetType="Button" BasedOn="{StaticResource SubtleButton}"/>
+  <Style x:Key="AutoButtonOn" TargetType="Button" BasedOn="{StaticResource SubtleButton}">
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static ui:EnvironmentColors.AccentMediumBrushKey}}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+  </Style>
+
+  <Style TargetType="TextBox">
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:CommonControlsColors.TextBoxTextBrushKey}}"/>
+    <Setter Property="Background" Value="{DynamicResource {x:Static ui:CommonControlsColors.TextBoxBackgroundBrushKey}}"/>
+    <Setter Property="CaretBrush" Value="{DynamicResource {x:Static ui:CommonControlsColors.TextBoxTextBrushKey}}"/>
+    <Setter Property="SelectionBrush" Value="{DynamicResource SelectionBrush}"/>
+    <Setter Property="SelectionTextBrush" Value="{DynamicResource SelectionTextBrush}"/>
+    <Setter Property="SelectionOpacity" Value="0.6"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonControlsColors.TextBoxBorderBrushKey}}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Padding" Value="6,4"/>
+    <Setter Property="MinHeight" Value="24"/>
+  </Style>
+  <Style TargetType="PasswordBox">
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:CommonControlsColors.TextBoxTextBrushKey}}"/>
+    <Setter Property="Background" Value="{DynamicResource {x:Static ui:CommonControlsColors.TextBoxBackgroundBrushKey}}"/>
+    <Setter Property="CaretBrush" Value="{DynamicResource {x:Static ui:CommonControlsColors.TextBoxTextBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonControlsColors.TextBoxBorderBrushKey}}"/>
+    <Setter Property="Padding" Value="6,4"/>
+    <Setter Property="MinHeight" Value="24"/>
+  </Style>
+
+  <!-- The selection wash and the text on it are the one thing the shell publishes no token for. VsTheme derives them so
+       the wash stands off the page, the card and the code block it can be drawn on, and recolours the glyphs under it
+       rather than trusting the system's white highlight text, which is unreadable on a light wash. -->
+  <!-- The stock ComboBox template paints both its closed box and its whole drop-down from fixed system brushes and
+       ignores the Background set on the control, which is what left them Windows-white under a dark IDE. -->
+  <Style TargetType="ComboBox">
+    <Setter Property="MinHeight" Value="24"/>
+    <Setter Property="Padding" Value="6,3,22,3"/>
+    <Setter Property="Background" Value="{DynamicResource {x:Static ui:CommonControlsColors.ComboBoxBackgroundBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:CommonControlsColors.ComboBoxTextBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonControlsColors.ComboBoxBorderBrushKey}}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBox">
+      <Grid>
+        <ToggleButton x:Name="Toggle" Focusable="False" ClickMode="Press"
+                      Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
+                      IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+          <ToggleButton.Template><ControlTemplate TargetType="ToggleButton">
+            <Border x:Name="Chrome" CornerRadius="2" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" SnapsToDevicePixels="True">
+              <Path x:Name="Arrow" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,8,0" Data="M 0,0 L 4,4 L 8,0"
+                    Stroke="{DynamicResource {x:Static ui:CommonControlsColors.ComboBoxGlyphBrushKey}}" StrokeThickness="1.4" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource {x:Static ui:CommonControlsColors.ComboBoxBackgroundHoverBrushKey}}"/>
+                <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonControlsColors.ComboBoxBorderHoverBrushKey}}"/>
+                <Setter TargetName="Arrow" Property="Stroke" Value="{DynamicResource {x:Static ui:CommonControlsColors.ComboBoxGlyphHoverBrushKey}}"/>
+              </Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonControlsColors.ComboBoxBorderFocusedBrushKey}}"/>
+                <Setter TargetName="Arrow" Property="Stroke" Value="{DynamicResource {x:Static ui:CommonControlsColors.ComboBoxGlyphFocusedBrushKey}}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate></ToggleButton.Template>
+        </ToggleButton>
+        <!-- Stretched rather than left-aligned, so the closed box measures its entry against the width it actually has and
+             trims there the same way the open list does. Left-aligned, the entry took its natural width and a long name
+             was drawn past the border. -->
+        <ContentPresenter IsHitTestVisible="False" Margin="{TemplateBinding Padding}" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                          Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}"/>
+        <!-- The open list is the shell's own list colour, border and row highlight, so the drop-down matches a Visual
+             Studio drop-down rather than the system one. -->
+        <Popup x:Name="PART_Popup" Placement="Bottom" VerticalOffset="2" AllowsTransparency="True" Focusable="False" IsOpen="{TemplateBinding IsDropDownOpen}">
+          <!-- As wide as the box it drops from, not as wide as its longest entry. A conversation title can be far longer
+               than the header is wide, and sizing the list to it stretched the drop-down across the pane. The fixed width
+               is also what lets an entry trim: a vertical StackPanel hands each item the width it was given, so a TextBlock
+               ellipsizes only when there is a width to ellipsize against. That makes the item template the thing carrying
+               TextTrimming — the TextBlock DisplayMemberPath generates has none, and would hard-clip instead — so a
+               ComboBox in this extension brings its own (see SessionBox and ModelBox in ChatControl.xaml). -->
+          <Border Width="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}" MaxHeight="{TemplateBinding MaxDropDownHeight}" Padding="1"
+                  Background="{DynamicResource {x:Static ui:CommonControlsColors.ComboBoxListBackgroundBrushKey}}"
+                  BorderBrush="{DynamicResource {x:Static ui:CommonControlsColors.ComboBoxListBorderBrushKey}}" BorderThickness="1" CornerRadius="2" SnapsToDevicePixels="True">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+              <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+            </ScrollViewer>
+          </Border>
+        </Popup>
+      </Grid>
+      <ControlTemplate.Triggers><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value=".55"/></Trigger></ControlTemplate.Triggers>
+    </ControlTemplate></Setter.Value></Setter>
+  </Style>
+  <!-- The stock ComboBoxItem paints its highlight from the system highlight brush and its selected label white, which is
+       unreadable on a light theme's list. Both states come from the shell's own list-row pair instead. -->
+  <Style TargetType="ComboBoxItem">
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:CommonControlsColors.ComboBoxListItemTextBrushKey}}"/>
+    <Setter Property="Padding" Value="7,4"/>
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ComboBoxItem">
+      <Border x:Name="Bd" Background="Transparent" CornerRadius="2" Margin="1" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True"><ContentPresenter/></Border>
+      <ControlTemplate.Triggers>
+        <Trigger Property="IsHighlighted" Value="True">
+          <Setter TargetName="Bd" Property="Background" Value="{DynamicResource {x:Static ui:CommonControlsColors.ComboBoxListItemBackgroundHoverBrushKey}}"/>
+          <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonControlsColors.ComboBoxListItemBorderHoverBrushKey}}"/>
+          <Setter TargetName="Bd" Property="BorderThickness" Value="1"/>
+          <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:CommonControlsColors.ComboBoxListItemTextHoverBrushKey}}"/>
+        </Trigger>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter TargetName="Bd" Property="Background" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemBackgroundSelectedBrushKey}}"/>
+          <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemTextSelectedBrushKey}}"/>
+        </Trigger>
+      </ControlTemplate.Triggers>
+    </ControlTemplate></Setter.Value></Setter>
+  </Style>
+
+  <!-- The stock ProgressBar template already takes its track and indicator from Background and Foreground; it was only
+       ever the colours that were wrong. This keeps the shell's own indeterminate animation. -->
+  <Style TargetType="ProgressBar">
+    <Setter Property="Background" Value="{DynamicResource {x:Static ui:ProgressBarColors.BackgroundBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:ProgressBarColors.IndicatorFillBrushKey}}"/>
+    <Setter Property="BorderThickness" Value="0"/>
+  </Style>
+
+  <Style TargetType="ToolTip">
+    <Setter Property="Background" Value="{DynamicResource {x:Static ui:EnvironmentColors.ToolTipBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:EnvironmentColors.ToolTipTextBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static ui:EnvironmentColors.ToolTipBorderBrushKey}}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Padding" Value="6,4"/>
+    <Setter Property="FontSize" Value="11"/>
+  </Style>
+
+  <!-- Menus render in their own popup tree, so they do not inherit the root foreground the way the rest does. The
+       highlight band comes from the shell's list-row tokens, which VsTheme installs over the system brushes the stock
+       MenuItem template reaches for — Visual Studio publishes no menu-specific brush of its own. -->
+  <Style TargetType="ContextMenu">
+    <Setter Property="Background" Value="{DynamicResource {x:Static ui:CommonControlsColors.ComboBoxListBackgroundBrushKey}}"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemTextBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonControlsColors.ComboBoxListBorderBrushKey}}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Padding" Value="1"/>
+  </Style>
+  <Style TargetType="MenuItem">
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemTextBrushKey}}"/>
+    <Setter Property="Padding" Value="6,3"/>
+  </Style>
+
+  <!-- A list row is the shell's list row: transparent until the pointer is over it, then the shell's hover band, and the
+       shell's selection band when it is the current item. -->
+  <Style TargetType="ListBox"><Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/><Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled"/><Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/></Style>
+  <Style TargetType="ListBoxItem">
+    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+    <Setter Property="Padding" Value="4,5"/>
+    <Setter Property="Margin" Value="0"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemTextBrushKey}}"/>
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem">
+      <Border x:Name="Bd" Background="Transparent" BorderBrush="Transparent" BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+        <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"/>
+      </Border>
+      <ControlTemplate.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter TargetName="Bd" Property="Background" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemBackgroundHoverBrushKey}}"/>
+          <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemBorderBrushKey}}"/>
+          <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemTextHoverBrushKey}}"/>
+        </Trigger>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter TargetName="Bd" Property="Background" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemBackgroundSelectedBrushKey}}"/>
+          <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemTextSelectedBrushKey}}"/>
+        </Trigger>
+        <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value=".55"/></Trigger>
+      </ControlTemplate.Triggers>
+    </ControlTemplate></Setter.Value></Setter>
+  </Style>
+
+  <!-- Panels. Flat and squared like the shell's own surfaces, with the shell's border colour. -->
+  <Style x:Key="Card" TargetType="Border">
+    <Setter Property="Background" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemBackgroundBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonBorderBrushKey}}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="2"/>
+    <Setter Property="Padding" Value="12"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+  </Style>
+  <Style x:Key="ComposerCard" TargetType="Border" BasedOn="{StaticResource Card}"><Setter Property="Padding" Value="4"/></Style>
+  <!-- The small label that used to be an accent-filled pill: now a flat tag in the shell's colours. -->
+  <Style x:Key="Tag" TargetType="Border">
+    <Setter Property="Background" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemBackgroundHoverBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemBorderBrushKey}}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="2"/>
+    <Setter Property="Padding" Value="6,2"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+  </Style>
+</ResourceDictionary>

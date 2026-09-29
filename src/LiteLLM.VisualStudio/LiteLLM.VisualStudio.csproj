@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework><UseWPF>true</UseWPF><GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <!-- Keep in step with Identity/@Version in source.extension.vsixmanifest, so the installed DLL can be told apart
+         from an older one by its file version alone. -->
+    <Version>1.6.5</Version>
+    <RootNamespace>LiteLLM.VisualStudio</RootNamespace><IncludeAssemblyInVSIXContainer>true</IncludeAssemblyInVSIXContainer><CreateVsixContainer>true</CreateVsixContainer>
+    <CopyBuildOutputToOutputDirectory>true</CopyBuildOutputToOutputDirectory><GeneratePkgDefFile>true</GeneratePkgDefFile>
+    <RegisterWithCodebase>true</RegisterWithCodebase>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System.Design" />
+    <Reference Include="System.Net.Http" />
+    <ProjectReference Include="..\LiteLLM.Core\LiteLLM.Core.csproj" />
+    <PackageReference Include="Microsoft.VisualStudio.SDK" Version="17.12.40392" ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.VSSDK.BuildTools" Version="17.12.2069" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup>
+    <VSCTCompile Include="Commands.vsct">
+      <ResourceName>Menus.ctmenu</ResourceName>
+    </VSCTCompile>
+    <Content Include="source.extension.vsixmanifest"><IncludeInVSIX>true</IncludeInVSIX></Content>
+    <!-- No VSIXSubPath: for a Content item the packaging target fills it in from the item's own directory, so this one
+         lands at Resources\Icon.png without being told, which is the path source.extension.vsixmanifest names it by. -->
+    <Content Include="Resources\Icon.png"><IncludeInVSIX>true</IncludeInVSIX></Content>
+    <Content Include="$(MSBuildProjectDirectory)\..\..\README.md">
+      <Link>README.md</Link>
+      <IncludeInVSIX>true</IncludeInVSIX>
+      <VSIXSubPath></VSIXSubPath>
+    </Content>
+    <VSIXSourceItem Include="$(MSBuildProjectDirectory)\..\LiteLLM.Core\bin\$(Configuration)\net48\LiteLLM.Core.dll" />
+    <VSIXSourceItem Include="$(NuGetPackageRoot)newtonsoft.json\13.0.3\lib\net45\Newtonsoft.Json.dll" />
+  </ItemGroup>
+  <Target Name="EmbedVsctCommandTable" AfterTargets="VSCTCompile" BeforeTargets="CoreCompile">
+    <ItemGroup>
+      <EmbeddedResource Include="$(IntermediateOutputPath)Commands.cto">
+        <LogicalName>Menus.ctmenu</LogicalName>
+      </EmbeddedResource>
+    </ItemGroup>
+  </Target>
+  <Import Project="$(VSToolsPath)\VSSDK\Microsoft.VsSDK.targets" Condition="Exists('$(VSToolsPath)\VSSDK\Microsoft.VsSDK.targets')" />
+</Project>
