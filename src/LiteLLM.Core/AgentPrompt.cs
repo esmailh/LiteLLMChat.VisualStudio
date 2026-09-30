@@ -16,6 +16,9 @@ namespace LiteLLM.Core;
 /// written to answer.</summary>
 public static class AgentPrompt
 {
+    public static List<ChatMessage> Build(IEnumerable<ChatMessage> history, IReadOnlyList<ChatContextItem>? attachments, bool toolCalling, bool fileEditing) =>
+        Build(history, attachments, "agent", toolCalling, fileEditing, false);
+
     /// <summary>Ceiling on everything the instruction block plus the attachments may add to one request. The
     /// attachments are the user's own doing, so they are allowed to be large; they are not allowed to be unbounded.</summary>
     private const int MaxAttachmentChars = 24000;
@@ -24,9 +27,9 @@ public static class AgentPrompt
     /// that can read them. Shared across the attachments of one message, so ten files cannot add up to a novel.</summary>
     private const int MaxInlineFileChars = 8000;
 
-    public static List<ChatMessage> Build(IEnumerable<ChatMessage> history, IReadOnlyList<ChatContextItem>? attachments, bool toolCalling, bool fileEditing)
+    public static List<ChatMessage> Build(IEnumerable<ChatMessage> history, IReadOnlyList<ChatContextItem>? attachments, string mode, bool toolCalling, bool fileEditing, bool terminalTools = false)
     {
-        var messages = new List<ChatMessage> { new ChatMessage { Role = "system", Content = Instructions(toolCalling, fileEditing) } };
+        var messages = new List<ChatMessage> { new ChatMessage { Role = "system", Content = Instructions(mode, toolCalling, fileEditing, terminalTools) } };
         messages.AddRange(history.Where(m => m != null).Select(ChatStateLimits.CopyMessage));
 
         var attached = (attachments ?? new List<ChatContextItem>()).Where(a => a != null && a.Label.Length > 0).ToList();
@@ -101,7 +104,9 @@ public static class AgentPrompt
         return text.ToString();
     }
 
-    public static string Instructions(bool toolCalling, bool fileEditing)
+    public static string Instructions(bool toolCalling, bool fileEditing) => Instructions("agent", toolCalling, fileEditing, false);
+
+    public static string Instructions(string mode, bool toolCalling, bool fileEditing, bool terminalTools = false)
     {
         var text = new StringBuilder();
         text.Append(@"You are an AI assistant working inside Visual Studio at the user's side, in the solution they have open.
@@ -120,7 +125,17 @@ file you cannot see, ask for it by name rather than guessing at what is in it.")
 
 Reply in the same language the user writes in. Keep the reply short and concrete: say what you did and what you found,
 not what you are about to do.");
+        if (mode == "ask") text.Append("\n\nYou are in Ask mode. Answer directly; do not inspect or modify workspace files.");
+        else if (mode == "plan") text.Append("\n\nYou are in Plan mode. Investigate as needed, then provide a numbered plan. Do not modify files or claim changes were made; wait for confirmation.");
+        else text.Append("\n\nYou are in Agent mode. Work autonomously using available tools, implement the request, verify it, and report briefly.");
         if (!toolCalling) return text.ToString();
+
+        if (terminalTools) text.Append(@"
+
+    Command execution
+    - Use run_powershell or run_cmd when a real command is needed to build, test, package, or inspect the workspace.
+    - Commands run from the solution directory. Inspect their exit code and output; never claim a command succeeded unless its result says so.
+    - Prefer non-interactive, bounded commands. Do not start servers, watchers, shells, or programs that wait for user input.");
 
         if (!fileEditing)
         {

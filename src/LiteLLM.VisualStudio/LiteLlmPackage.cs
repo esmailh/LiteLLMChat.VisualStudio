@@ -20,7 +20,13 @@ public sealed class LiteLlmPackage : AsyncPackage
     internal ExtensionServices Services { get; private set; } = null!;
     protected override async Task InitializeAsync(CancellationToken cancellationToken, IProgress<ServiceProgressData> progress)
     {
-        Instance = this; Services = new ExtensionServices(this); await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        Instance = this;
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+
+        // ExtensionServices reads the DialogPage through AsyncPackage.GetDialogPage.
+        // Visual Studio shell services and DialogPage creation are UI-thread-affine.
+        Services = new ExtensionServices(this);
+        Services.ApplyOptions();
         if (await GetServiceAsync(typeof(IMenuCommandService)) is OleMenuCommandService commands)
         {
             Add(commands, 0x0100, async () => await ShowAsync(typeof(ChatToolWindow)));

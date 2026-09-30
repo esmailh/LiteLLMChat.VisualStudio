@@ -24,12 +24,21 @@ public sealed class UserSettings
     public double Temperature { get; set; } = .2;
     public bool ShowReasoning { get; set; } = true;
     public bool EnableToolCalling { get; set; } = true;
+    /// <summary>Approval policy selected in the chat composer. "default" observes the individual edit and command
+    /// confirmation settings; "allowAll" permits all enabled tools without approval.</summary>
+    public string PermissionMode { get; set; } = "default";
     /// <summary>Whether the agent may change files. On by default: a chat that can read a solution but never correct
     /// it answers every request to fix something with a snippet to paste, which is the report this setting answers.</summary>
     public bool EnableFileEditing { get; set; } = true;
     /// <summary>Ask before each edit instead of applying it. Off by default, matching Visual Studio Code, which writes
     /// an ordinary workspace file without asking and leaves the editor's undo stack to take it back.</summary>
     public bool ConfirmEachEdit { get; set; }
+    /// <summary>Allow the agent to run PowerShell and CMD commands from the open solution.</summary>
+    public bool EnableTerminalTools { get; set; } = true;
+    /// <summary>Ask before every command. Enabled by default because commands can affect resources outside files.</summary>
+    public bool ConfirmEachCommand { get; set; } = true;
+    /// <summary>Maximum duration of one command before its process is terminated.</summary>
+    public int CommandTimeoutSeconds { get; set; } = 120;
     /// <summary>Tool-calling rounds allowed before the chat asks whether to continue.</summary>
     public int MaxToolRounds { get; set; } = ChatStateLimits.DefaultToolRounds;
     /// <summary>Whether the file open in the editor rides along with every message, the way Visual Studio Code keeps

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using EnvDTE;
 using LiteLLM.Core;
@@ -51,13 +52,19 @@ internal static class ContextTools
         Define("get_project_name", "Project containing the active document.", null)
     };
 
-    internal static async Task<ToolResult> ExecuteAsync(AsyncPackage package, string name, string arguments)
+    internal static async Task<ToolResult> ExecuteAsync(AsyncPackage package, string name, string arguments, CancellationToken token)
     {
         await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
         var dte = (DTE?)await package.GetServiceAsync(typeof(DTE));
         var args = Parse(arguments);
         var active = Try(() => dte?.ActiveDocument?.FullName) ?? "";
         var root = SolutionRoot(dte);
+
+        if (TerminalTools.Handles(name))
+        {
+            if (root == null) return Fail("No solution or active document is available for the command working directory.", "command · no working directory");
+            return await TerminalTools.ExecuteAsync(root, name, args, LiteLlmPackage.Instance.Services.Settings.CommandTimeoutSeconds, token).ConfigureAwait(true);
+        }
 
         // The edit tools are named differently but resolved, confined and applied the same way, and the caller is one
         // switch statement that should not have to know which half a tool lives in.

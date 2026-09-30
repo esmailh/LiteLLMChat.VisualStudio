@@ -90,6 +90,9 @@ if (part.StartsWith("`") && part.EndsWith("`") && part.Length >= 2)
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             Document = new FlowDocument(block) { PagePadding = new Thickness(0) }
         };
+        // Keep the whole answer RTL, including answers that start/end with English.
+        // Inline code is still explicitly rendered with its own LTR surface below.
+        view.FlowDirection = FlowDirection.RightToLeft;
         // The shell's own tool-window text colour, by its own key. This is what the answer itself is drawn in, so a key
         // the theme dictionary does not answer leaves every reply in WPF's default black — which is invisible on a dark
         // theme, and was.

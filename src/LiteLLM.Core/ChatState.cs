@@ -39,6 +39,15 @@ public sealed class ChatSessionState
     public int Version { get; set; } = 1;
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Title { get; set; } = "New chat";
+    [JsonIgnore]
+    public string DisplayTitle
+    {
+        get
+        {
+            var title = string.IsNullOrWhiteSpace(Title) ? "New chat" : Title;
+            return title.Length <= 20 ? title : title.Substring(0, 20);
+        }
+    }
     public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedUtc { get; set; } = DateTime.UtcNow;
     public string SelectedModelKey { get; set; } = "";

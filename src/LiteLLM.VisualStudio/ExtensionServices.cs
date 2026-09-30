@@ -17,20 +17,41 @@ internal sealed class ExtensionServices : IDisposable
     private readonly SettingsStore _store = new SettingsStore();
     private readonly LiteLlmClient _client = new LiteLlmClient();
     internal readonly ModelCatalog Catalog = new ModelCatalog();
-    internal readonly ChatSessionStore SessionStore = new ChatSessionStore();
+    internal ChatSessionStore SessionStore { get; private set; } = new ChatSessionStore(ChatSessionStore.ScopedPath(""));
+    private string _sessionScope = "";
     internal UserSettings Settings { get; private set; }
     internal ChatSessionDocument Sessions { get; private set; }
     internal event EventHandler? ModelsChanged;
     internal event EventHandler? SessionsChanged;
-    internal ExtensionServices(AsyncPackage package) { _package = package; Settings = _store.Load(); Sessions = SessionStore.Load(); ApplyOptions(); }
+    internal ExtensionServices(AsyncPackage package)
+    {
+        _package = package;
+        Settings = _store.Load();
+        Sessions = SessionStore.Load();
+    }
+
+    /// <summary>Switches the conversation document to the solution currently open in Visual Studio. The full solution
+    /// path is used only to derive a stable local filename; it is never written into the conversation file.</summary>
+    internal async Task RefreshSessionScopeAsync()
+    {
+        await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+        var dte = (DTE?)await _package.GetServiceAsync(typeof(DTE));
+        var scope = dte?.Solution?.FullName ?? "";
+        if (string.Equals(scope, _sessionScope, StringComparison.OrdinalIgnoreCase)) return;
+        _sessionScope = scope;
+        SessionStore = new ChatSessionStore(ChatSessionStore.ScopedPath(scope));
+        Sessions = SessionStore.Load();
+        SessionsChanged?.Invoke(this, EventArgs.Empty);
+    }
     internal IReadOnlyList<ModelInfo> Models => Catalog.GetAll(Settings.Servers.Where(s => s.Enabled).Select(s => s.Id)).Where(m => !Settings.DisabledModelKeys.Contains(m.Key)).ToList();
     /// <summary>The last raw round trip, for the chat's copy commands.</summary>
     internal HttpExchange? LastExchange => _client.LastExchange;
     internal void ApplyOptions()
     {
         var o = (LiteLlmOptionsPage)_package.GetDialogPage(typeof(LiteLlmOptionsPage));
-        Settings.RequestTimeoutSeconds = o.RequestTimeoutSeconds; Settings.EnableStreaming = o.EnableStreaming; Settings.MaxTokens = o.MaxTokens; Settings.Temperature = o.Temperature; Settings.ShowReasoning = o.ShowReasoning; Settings.EnableToolCalling = o.EnableToolCalling; Settings.MaxToolRounds = o.MaxToolRounds; Settings.LoggingLevel = o.LoggingLevel;
+        Settings.RequestTimeoutSeconds = o.RequestTimeoutSeconds; Settings.EnableStreaming = o.EnableStreaming; Settings.MaxTokens = o.MaxTokens; Settings.Temperature = o.Temperature; Settings.ShowReasoning = o.ShowReasoning; Settings.EnableToolCalling = o.EnableToolCalling; Settings.PermissionMode = o.PermissionMode; Settings.MaxToolRounds = o.MaxToolRounds; Settings.LoggingLevel = o.LoggingLevel;
         Settings.EnableFileEditing = o.EnableFileEditing; Settings.ConfirmEachEdit = o.ConfirmEachEdit;
+        Settings.EnableTerminalTools = o.EnableTerminalTools; Settings.ConfirmEachCommand = o.ConfirmEachCommand; Settings.CommandTimeoutSeconds = o.CommandTimeoutSeconds;
     }
     internal void Save() { ApplyOptions(); _store.Save(Settings); }
     internal void SaveSessions() { SessionStore.Save(Sessions); SessionsChanged?.Invoke(this, EventArgs.Empty); }
@@ -59,9 +80,17 @@ internal sealed class ExtensionServices : IDisposable
     /// <summary>The tools the agent is offered, and the instructions that go with them. Tool calling off means no tools
     /// at all; file editing off keeps the read tools but drops the writing ones, and the instructions stop promising
     /// an edit tool that is not there — which is what stops the model printing a diff and calling it done.</summary>
-    internal IReadOnlyList<ToolDefinition> Tools => Settings.EnableToolCalling
-        ? (Settings.EnableFileEditing ? ContextTools.Definitions.Concat(EditTools.Definitions).ToList() : ContextTools.Definitions)
-        : (IReadOnlyList<ToolDefinition>)Array.Empty<ToolDefinition>();
+    internal IReadOnlyList<ToolDefinition> Tools
+    {
+        get
+        {
+            if (!Settings.EnableToolCalling) return Array.Empty<ToolDefinition>();
+            IEnumerable<ToolDefinition> tools = ContextTools.Definitions;
+            if (Settings.EnableFileEditing) tools = tools.Concat(EditTools.Definitions);
+            if (Settings.EnableTerminalTools) tools = tools.Concat(TerminalTools.Definitions);
+            return tools.ToList();
+        }
+    }
 
     internal Task StreamAsync(ModelInfo model, IReadOnlyList<ChatMessage> messages, Func<StreamUpdate, Task> update, CancellationToken token)
     {

@@ -41,6 +41,7 @@ public partial class ChatControl : UserControl
     private DateTime _started;
     private int _streamed;
     private string _phase = "Thinking";
+    private string _mode = "agent";
     private bool _follow = true;
     private bool _narrow;
     private ChatTurnState? _activeTurn;
@@ -78,8 +79,8 @@ public partial class ChatControl : UserControl
         // Narrow keeps the row inside the one star column rather than spanning the Auto column beside it: a child that
         // spans into an Auto column is measured against the whole pane instead of the column, so the row came out wider
         // than the window it was in.
-        Grid.SetRow(HeaderTools, narrow ? 1 : 0); Grid.SetColumn(HeaderTools, narrow ? 1 : 2); Grid.SetColumnSpan(HeaderTools, 1);
-        HeaderTools.Margin = narrow ? new Thickness(0, 10, 0, 0) : new Thickness(0);
+        Grid.SetRow(HeaderTools, 1); Grid.SetColumn(HeaderTools, 1); Grid.SetColumnSpan(HeaderTools, 2);
+        HeaderTools.Margin = new Thickness(0, 10, 0, 0);
         SessionBox.MaxWidth = narrow ? available : 180;
         ModelBox.MaxWidth = narrow ? available : 200;
 
@@ -87,7 +88,7 @@ public partial class ChatControl : UserControl
         // line of its own under it when there is not, where it has the whole pane to wrap into rather than being cut
         // off at the right edge. It stays in the star column for the same reason the header row does.
         Grid.SetRow(ComposerTools, narrow ? 1 : 0);
-        Grid.SetColumn(ComposerTools, narrow ? 0 : 1);
+        Grid.SetColumn(ComposerTools, 0);
         Grid.SetColumnSpan(ComposerTools, 1);
         ComposerTools.Margin = narrow ? new Thickness(0, 4, 0, 0) : new Thickness(0);
 
@@ -107,7 +108,10 @@ public partial class ChatControl : UserControl
         // The edit tools ask the chat, rather than a modal dialog, because the question belongs in the conversation
         // where the change it is asking about is already on screen.
         EditTools.Confirm = AskToApplyEditAsync;
+        TerminalTools.Confirm = AskToRunCommandAsync;
+        await Services.RefreshSessionScopeAsync();
         ReloadSessions(); RenderSession(); ReloadModels();
+        ReloadPermissionMode();
         RefreshAutoContextButton();
         await WatchEditorAsync();
         if (Services.Models.Count == 0) await SafeRefreshAsync();
@@ -182,7 +186,7 @@ public partial class ChatControl : UserControl
                 var context = Services.Settings.EnableToolCalling
                     ? _activeTurn?.Context
                     : AgentPrompt.InlineFiles(_activeTurn?.Context, ReadAttachedText);
-                var request = AgentPrompt.Build(history, context, Services.Settings.EnableToolCalling, Services.Settings.EnableFileEditing);
+                var request = AgentPrompt.Build(history, context, _mode, Services.Settings.EnableToolCalling, Services.Settings.EnableFileEditing, Services.Settings.EnableTerminalTools);
 
                 var view = AddAssistantBubble(round == 1 ? "Thinking" : "Reading the tool results");
                 _streamed = 0; _phase = round == 1 ? "Thinking" : "Reading the tool results";
@@ -219,7 +223,7 @@ public partial class ChatControl : UserControl
                     // The revision count says whether this call produced an edit, which is what puts the diff and the
                     // undo on this row rather than on the previous one.
                     var revisions = EditTools.Revisions;
-                    var result = await ContextTools.ExecuteAsync(LiteLlmPackage.Instance, call.Name, call.Arguments).ConfigureAwait(true);
+                    var result = await ContextTools.ExecuteAsync(LiteLlmPackage.Instance, call.Name, call.Arguments, token).ConfigureAwait(true);
                     var toolMessage = new ChatMessage { Role = "tool", ToolCallId = call.Id, ToolName = call.Name, Content = result.Content };
                     _history.Add(toolMessage);
                     _activeTurn?.Messages.Add(ChatStateLimits.CopyMessage(toolMessage));
@@ -350,6 +354,7 @@ public partial class ChatControl : UserControl
     /// Allow — a confirmation that only offers a way forward is not a confirmation.</summary>
     private async Task<bool> AskToApplyEditAsync(EditProposal proposal)
     {
+        if (AllowAllPermissions) return true;
         if (!Services.Settings.ConfirmEachEdit) return true;
 
         var body = new StackPanel();
@@ -389,6 +394,26 @@ public partial class ChatControl : UserControl
         }
         finally { answered = true; Messages.Children.Remove(card); }
         return apply;
+    }
+
+    private async Task<bool> AskToRunCommandAsync(CommandProposal proposal)
+    {
+        if (AllowAllPermissions) return true;
+        if (!Services.Settings.ConfirmEachCommand) return true;
+        var body = new StackPanel();
+        body.Children.Add(new TextBlock { Text = "Run " + proposal.Shell + " command?", FontWeight = FontWeights.SemiBold });
+        body.Children.Add(new TextBox { Text = proposal.Command, IsReadOnly = true, AcceptsReturn = true, FontFamily = new FontFamily("Consolas, Courier New"), MaxHeight = 260, Margin = new Thickness(0, 8, 0, 0), VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, TextWrapping = TextWrapping.NoWrap });
+        var skip = new Button { Content = "Skip" };
+        var allow = new Button { Content = "Run", Style = (Style)FindResource("PrimaryButton") };
+        body.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0), Children = { skip, allow } });
+        var card = new Border { Style = (Style)FindResource("Card"), HorizontalAlignment = HorizontalAlignment.Left, MaxWidth = 900, Child = body, Margin = new Thickness(0, 0, 0, 12) };
+        card.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.AccentMediumBrushKey);
+        var source = new TaskCompletionSource<bool>();
+        skip.Click += (s, e) => source.TrySetResult(false);
+        allow.Click += (s, e) => source.TrySetResult(true);
+        Messages.Children.Add(card); ScrollIfFollowing();
+        try { using ((_generation?.Token ?? CancellationToken.None).Register(() => source.TrySetResult(false))) return await source.Task.ConfigureAwait(true); }
+        finally { Messages.Children.Remove(card); }
     }
 
     private Border AddMessage(string author, string content, bool assistant)
@@ -482,9 +507,9 @@ public partial class ChatControl : UserControl
     private static string Describe(ChatMessage? message)
     {
         if (message == null) return "";
-        if (message.ToolCalls.Count == 0) return message.Content;
-        var calls = string.Join("\n", message.ToolCalls.Select(c => c.Name + "(" + c.Arguments + ")"));
-        return (message.Content.Length > 0 ? message.Content + "\n\n" : "") + "Tool calls:\n" + calls;
+        // Tool calls are protocol metadata, not part of the assistant's answer.  Showing the
+        // serialized JSON in the chat made a normal response look like a broken transcript.
+        return message.Content;
     }
 
     private string Transcript()
@@ -510,10 +535,15 @@ public partial class ChatControl : UserControl
             Item("Copy request (JSON)", () => Copy(_lastExchange?.RequestBody, "Request"), _lastExchange != null),
             Item("Copy response (JSON)", () => Copy(_lastExchange?.ResponseBody, "Response"), _lastExchange != null),
             Item("Copy whole conversation", () => Copy(Transcript(), "Conversation"), _history.Count > 0));
-        menu.PlacementTarget = CopyButton; menu.Placement = PlacementMode.Top; menu.IsOpen = true;
+        menu.PlacementTarget = HamburgerButton; menu.Placement = PlacementMode.Top; menu.IsOpen = true;
     }
 
-    private static FrameworkElement Directed(string text) { var rendered = MarkdownRenderer.Render(text); return rendered; }
+    private static FrameworkElement Directed(string text)
+    {
+        var rendered = MarkdownRenderer.Render(text);
+        rendered.FlowDirection = FlowDirection.RightToLeft;
+        return rendered;
+    }
 
     /// <summary>Replaces the bubble's content, keeping the author line and any live status panel at the foot.</summary>
     private void SetContent(Bubble bubble, ChatMessage message)
@@ -552,11 +582,8 @@ public partial class ChatControl : UserControl
 
     private void SetBusy(bool value)
     {
-        SendButton.IsEnabled = !value; StopButton.IsEnabled = value; ModelBox.IsEnabled = !value; SessionBox.IsEnabled = !value;
+        StopButton.IsEnabled = value; ModelBox.IsEnabled = !value; SessionBox.IsEnabled = !value;
         RefreshDeleteButton(value);
-        SendLabel.Text = value ? "Working…" : "Send  →";
-        SendProgress.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
-        if (value) SendProgress.IsIndeterminate = true;
         if (value) StateText.Text = "Generating…";
     }
     /// <summary>Starts a new conversation. Everything belonging to the message being written goes with it: a draft and
@@ -698,7 +725,20 @@ public partial class ChatControl : UserControl
         catch (Exception) { /* no DTE — design time, or a shell with no solution: the composer simply carries no chip */ }
     }
 
-    private void OnWindowActivated(EnvDTE.Window gotFocus, EnvDTE.Window lostFocus) => _ = RefreshActiveFileAsync();
+    private void OnWindowActivated(EnvDTE.Window gotFocus, EnvDTE.Window lostFocus)
+    {
+        _ = RefreshActiveFileAsync();
+        _ = RefreshSessionScopeAndRenderAsync();
+    }
+
+    private async Task RefreshSessionScopeAndRenderAsync()
+    {
+        var previous = Services.Sessions;
+        await Services.RefreshSessionScopeAsync();
+        if (ReferenceEquals(previous, Services.Sessions)) return;
+        RenderSession();
+        ReloadModels();
+    }
 
     private void AutoContext_Click(object sender, RoutedEventArgs e) => SetAutoContext(!Services.Settings.AutoAttachActiveDocument);
 
@@ -712,14 +752,24 @@ public partial class ChatControl : UserControl
     private void RefreshAutoContextButton()
     {
         var on = Services.Settings.AutoAttachActiveDocument;
-        AutoContextButton.Content = on ? "◎ Auto" : "○ Auto";
-        // The state is shown by the button's surface, never by its foreground. The label keeps the foreground every other
-        // button in the row has, so it reads whatever the theme's accent happens to be; the accent rides on the wash and
-        // the outline, where being close to the card colour only makes the button plainer, not its text unreadable.
-        AutoContextButton.Style = (Style)FindResource(on ? "AutoButtonOn" : "AutoButtonOff");
-        AutoContextButton.ToolTip = on
-            ? "The file open in the editor is attached to every message. Click to stop."
-            : "Attach the file open in the editor to every message.";
+        HamburgerButton.ToolTip = on
+            ? "Chat actions · Auto context ON: the active editor file is included with every message"
+            : "Chat actions · Auto context OFF";
+    }
+
+    private void Hamburger_Click(object sender, RoutedEventArgs e)
+    {
+        var auto = Item((Services.Settings.AutoAttachActiveDocument ? "✓ " : "") + "Auto context — attach active editor file", () => SetAutoContext(!Services.Settings.AutoAttachActiveDocument));
+        auto.ToolTip = "When enabled, the file currently open in the editor is automatically included with every message.";
+        var menu = Menu(
+            auto,
+            Item("Add context…", ShowContextMenu),
+            Item("Copy…", () => Copy_Click(sender, e)),
+            null,
+            Item("Refresh models", async () => await SafeRefreshAsync()));
+        menu.PlacementTarget = HamburgerButton;
+        menu.Placement = PlacementMode.Top;
+        menu.IsOpen = true;
     }
 
     /// <summary>Rebuilds the automatic chip from whatever the editor has open now. Cheap enough to run on every window
@@ -808,7 +858,7 @@ public partial class ChatControl : UserControl
                 "Terminal Selection" => "The Visual Studio terminal is not wired up in this build.",
                 _ => "The agent already reaches the whole solution with search_files and list_files."
             };
-        menu.PlacementTarget = ContextButton; menu.Placement = PlacementMode.Top; menu.IsOpen = true;
+        menu.PlacementTarget = HamburgerButton; menu.Placement = PlacementMode.Top; menu.IsOpen = true;
     }
 
     private async Task PickFilesAsync()
@@ -940,6 +990,26 @@ public partial class ChatControl : UserControl
     }
     private async void Composer_PreviewKeyDown(object sender, KeyEventArgs e) { if (e.Key == Key.Enter && Keyboard.Modifiers != ModifierKeys.Shift) { e.Handled = true; await SendAsync(); } }
     private void ModelBox_SelectionChanged(object sender, SelectionChangedEventArgs e) { if (ModelBox.SelectedItem is ModelInfo m) { Services.Settings.SelectedModelKey = m.Key; Services.ActiveSession.SelectedModelKey = m.Key; Services.Save(); Services.SaveSessions(); } }
+    private void ModeBox_SelectionChanged(object sender, SelectionChangedEventArgs e) { if (ModeBox.SelectedItem is ComboBoxItem item && item.Tag is string mode) _mode = mode; }
+
+    private bool AllowAllPermissions => string.Equals(Services.Settings.PermissionMode, "allowAll", StringComparison.OrdinalIgnoreCase);
+
+    private void ReloadPermissionMode()
+    {
+        var mode = Services.Settings.PermissionMode;
+        PermissionBox.SelectedIndex = string.Equals(mode, "allowAll", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+    }
+
+    private void PermissionBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!(PermissionBox.SelectedItem is ComboBoxItem item) || !(item.Tag is string mode)) return;
+        if (string.Equals(Services.Settings.PermissionMode, mode, StringComparison.OrdinalIgnoreCase)) return;
+        Services.Settings.PermissionMode = mode;
+        var options = (LiteLlmOptionsPage)LiteLlmPackage.Instance.GetDialogPage(typeof(LiteLlmOptionsPage));
+        options.PermissionMode = mode;
+        Services.Save();
+        StateText.Text = mode == "allowAll" ? "Allow all enabled — tool approvals are automatic." : "Default permissions enabled.";
+    }
     private void ConversationScroll_ScrollChanged(object sender, ScrollChangedEventArgs e) { if (e.ExtentHeightChange == 0) _follow = ConversationScroll.VerticalOffset >= ConversationScroll.ScrollableHeight - 12; }
     private void ScrollIfFollowing() { if (_follow) ConversationScroll.ScrollToEnd(); }
 }

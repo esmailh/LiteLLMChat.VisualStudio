@@ -15,7 +15,10 @@ internal static class TextDirection
         foreach (var c in text)
             if (IsRightToLeftLetter(c)) rtl++;
             else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) ltr++;
-        return rtl > 0 && rtl >= ltr;   // a tie means the sentence is carried by its RTL words, e.g. "LiteLLM را باز کن"
+        // A single Persian word must establish the paragraph direction too.  Comparing the
+        // number of Latin and RTL letters makes an English-heavy Persian sentence jump to
+        // LTR, which is especially confusing when punctuation and code are present.
+        return rtl > 0;
     }
 
     private static bool IsRightToLeftLetter(char c)

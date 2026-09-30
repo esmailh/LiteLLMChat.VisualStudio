@@ -21,6 +21,18 @@ public sealed class ChatSessionStore
         _path = path ?? System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LiteLLM.VisualStudio", "chat-sessions.json");
     }
 
+    public static string ScopedPath(string scope)
+    {
+        var root = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LiteLLM.VisualStudio", "chat-sessions");
+        if (string.IsNullOrWhiteSpace(scope)) return System.IO.Path.Combine(root, "no-solution.json");
+        using (var sha = System.Security.Cryptography.SHA256.Create())
+        {
+            var normalized = scope.Trim().ToUpperInvariant();
+            var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(normalized));
+            return System.IO.Path.Combine(root, BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant() + ".json");
+        }
+    }
+
     public string Path => _path;
 
     public ChatSessionDocument Load()
