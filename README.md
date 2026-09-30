@@ -1,33 +1,15 @@
 # LiteLLM Chat for Visual Studio 2022
 
+See [MARKETPLACE.md](MARKETPLACE.md) for the complete user-facing feature guide, setup instructions, privacy notes, and troubleshooting information.
+
 A native WPF VSIX for chatting with any OpenAI-compatible LiteLLM gateway without leaving Visual Studio. It supports multiple servers, model discovery, streaming, reasoning display, read and edit tools, VS Code–style context attachments, diagnostics, DPAPI-protected API keys, and a local conversation history.
 
 ## Requirements
 
 - Windows and Visual Studio 2022 17.x with the **Visual Studio extension development** workload
 - .NET Framework 4.8 targeting pack
-- A LiteLLM/OpenAI-compatible endpoint exposing `/v1/models` and `/v1/chat/completions`
-
-## Build and test
-
-Open `LiteLLM.VisualStudio.sln` in Visual Studio and build Release, or from a Developer Command Prompt:
-
-```powershell
-msbuild LiteLLM.VisualStudio.sln /restore /p:Configuration=Release
-dotnet test tests\LiteLLM.Core.Tests\LiteLLM.Core.Tests.csproj -c Release
-```
 
 The VSIX is produced below `src\LiteLLM.VisualStudio\bin\Release`. Run it to install, then restart Visual Studio. F5 from the extension project launches the experimental instance.
-
-## Configure
-
-1. Open **Tools > LiteLLM: Open Dashboard**.
-2. Add a name, absolute base URL (for example `http://localhost:4000`), and optional API key.
-3. Test the connection and refresh models.
-4. Enable/disable servers and individual models as needed.
-5. Open **Tools > Options > LiteLLM > General** for timeout, streaming, token, temperature, reasoning, tool, file-editing, and logging settings.
-
-API keys are encrypted for the current Windows user using DPAPI. Settings are stored at `%LOCALAPPDATA%\LiteLLM.VisualStudio\settings.json`; plaintext keys are never written or logged. Conversation history is stored separately at `%LOCALAPPDATA%\LiteLLM.VisualStudio\chat-sessions.json` and contains bounded transcript/context data only.
 
 ## Use
 
