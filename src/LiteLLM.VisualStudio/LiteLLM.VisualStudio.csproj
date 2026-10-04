@@ -3,7 +3,7 @@
     <TargetFramework>net48</TargetFramework><UseWPF>true</UseWPF><GenerateAssemblyInfo>true</GenerateAssemblyInfo>
     <!-- Keep in step with Identity/@Version in source.extension.vsixmanifest, so the installed DLL can be told apart
          from an older one by its file version alone. -->
-    <Version>1.6.5</Version>
+    <Version>1.6.7</Version>
     <RootNamespace>LiteLLM.VisualStudio</RootNamespace><IncludeAssemblyInVSIXContainer>true</IncludeAssemblyInVSIXContainer><CreateVsixContainer>true</CreateVsixContainer>
     <CopyBuildOutputToOutputDirectory>true</CopyBuildOutputToOutputDirectory><GeneratePkgDefFile>true</GeneratePkgDefFile>
     <RegisterWithCodebase>true</RegisterWithCodebase>

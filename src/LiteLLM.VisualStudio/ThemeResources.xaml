@@ -154,7 +154,13 @@
           </Border>
         </Popup>
       </Grid>
-      <ControlTemplate.Triggers><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value=".55"/></Trigger></ControlTemplate.Triggers>
+      <ControlTemplate.Triggers>
+        <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value=".55"/></Trigger>
+        <Trigger Property="Tag" Value="DropUp">
+          <Setter TargetName="PART_Popup" Property="Placement" Value="Top"/>
+          <Setter TargetName="PART_Popup" Property="VerticalOffset" Value="-2"/>
+        </Trigger>
+      </ControlTemplate.Triggers>
     </ControlTemplate></Setter.Value></Setter>
   </Style>
   <!-- The stock ComboBoxItem paints its highlight from the system highlight brush and its selected label white, which is
@@ -248,7 +254,49 @@
     <Setter Property="Padding" Value="12"/>
     <Setter Property="SnapsToDevicePixels" Value="True"/>
   </Style>
-  <Style x:Key="ComposerCard" TargetType="Border" BasedOn="{StaticResource Card}"><Setter Property="Padding" Value="4"/></Style>
+  <!-- Keep the prompt composer visibly blue in every Visual Studio theme. AccentMedium may resolve to a neutral
+       colour in custom themes, so use Visual Studio's canonical blue for this user-requested outline. -->
+  <Style x:Key="ComposerCard" TargetType="Border" BasedOn="{StaticResource Card}">
+    <Setter Property="Background" Value="{DynamicResource {x:Static ui:EnvironmentColors.ToolWindowBackgroundBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="#007ACC"/>
+    <Setter Property="BorderThickness" Value="2"/>
+    <Setter Property="CornerRadius" Value="8"/>
+    <Setter Property="Padding" Value="10,8,10,6"/>
+  </Style>
+
+  <!-- Copilot's transcript: the user's turn is a soft bubble held to the right, the assistant's turn is plain text
+       beside a small round avatar. The assistant's answer is the one that gets copied, scrolled and read at length,
+       so it is drawn on the page itself rather than boxed into a card the way the user's short prompt is. -->
+  <Style x:Key="MessageUser" TargetType="Border">
+    <Setter Property="Background" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemBackgroundHoverBrushKey}}"/>
+    <Setter Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemBorderBrushKey}}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="CornerRadius" Value="8"/>
+    <Setter Property="Padding" Value="12,9"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+  </Style>
+  <Style x:Key="MessageAssistant" TargetType="Border">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="Padding" Value="0"/>
+  </Style>
+  <Style x:Key="Avatar" TargetType="Border">
+    <Setter Property="Width" Value="26"/><Setter Property="Height" Value="26"/>
+    <Setter Property="CornerRadius" Value="13"/>
+    <Setter Property="Background" Value="{DynamicResource {x:Static ui:EnvironmentColors.AccentMediumBrushKey}}"/>
+    <Setter Property="VerticalAlignment" Value="Top"/>
+  </Style>
+  <!-- Hidden until the pointer is over the message, the way Copilot reveals its copy and retry row. -->
+  <Style x:Key="GhostAction" TargetType="Button" BasedOn="{StaticResource SubtleButton}">
+    <Setter Property="Opacity" Value="0"/>
+    <Setter Property="Padding" Value="6,2"/>
+    <Setter Property="FontSize" Value="11"/>
+    <Style.Triggers>
+      <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=Border}}" Value="True">
+        <Setter Property="Opacity" Value="1"/>
+      </DataTrigger>
+    </Style.Triggers>
+  </Style>
   <!-- The small label that used to be an accent-filled pill: now a flat tag in the shell's colours. -->
   <Style x:Key="Tag" TargetType="Border">
     <Setter Property="Background" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemBackgroundHoverBrushKey}}"/>

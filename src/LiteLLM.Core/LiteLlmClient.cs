@@ -129,9 +129,23 @@ public sealed class LiteLlmClient : IDisposable
     private HttpRequestMessage CreateRequest(ServerConfiguration server, HttpMethod method, string relative, JObject? payload)
     {
         if (!Uri.TryCreate(server.BaseUrl.TrimEnd('/') + "/", UriKind.Absolute, out var baseUri) || (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps)) throw new LiteLlmException("The server URL is invalid.", server.BaseUrl);
-        var request = new HttpRequestMessage(method, new Uri(baseUri, relative));
+        var isAzure = string.Equals(server.Provider, "Azure OpenAI", StringComparison.OrdinalIgnoreCase);
+        var requestPath = relative;
+        if (isAzure && relative == "v1/chat/completions")
+        {
+            if (string.IsNullOrWhiteSpace(server.Deployment)) throw new LiteLlmException("Azure deployment is required.", "Set a deployment name for this Azure OpenAI connection.");
+            requestPath = "openai/deployments/" + Uri.EscapeDataString(server.Deployment) + "/chat/completions";
+        }
+        var requestUri = new Uri(baseUri, requestPath);
+        if (isAzure && !string.IsNullOrWhiteSpace(server.ApiVersion))
+            requestUri = new Uri(requestUri.AbsoluteUri + (requestUri.Query.Length == 0 ? "?" : "&") + "api-version=" + Uri.EscapeDataString(server.ApiVersion));
+        var request = new HttpRequestMessage(method, requestUri);
         var key = _protector.Unprotect(server.ProtectedApiKey);
-        if (!string.IsNullOrWhiteSpace(key)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
+        if (!string.IsNullOrWhiteSpace(key))
+        {
+            if (isAzure) request.Headers.TryAddWithoutValidation("api-key", key);
+            else request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
+        }
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         if (payload != null) request.Content = new StringContent(payload.ToString(Formatting.None), Encoding.UTF8, "application/json");
         return request;

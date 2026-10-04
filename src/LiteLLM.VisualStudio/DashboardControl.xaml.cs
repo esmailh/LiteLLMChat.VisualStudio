@@ -32,8 +32,26 @@ public partial class DashboardControl : UserControl
         if (Models == null || Search == null || ServerFilter == null) return; var query = Search.Text ?? ""; var server = ServerFilter.SelectedItem as string;
         Models.ItemsSource = Services.Catalog.GetAll(Services.Settings.Servers.Where(s => s.Enabled).Select(s => s.Id)).Where(m => (string.IsNullOrEmpty(query) || m.Id.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0) && (string.IsNullOrEmpty(server) || server == "All servers" || m.ServerName == server)).Select(m => new ModelRow(m, !Services.Settings.DisabledModelKeys.Contains(m.Key))).ToList();
     }
-    private void Add_Click(object sender, RoutedEventArgs e) { var server = new ServerConfiguration(); if (new ServerDialog(server) { Owner = Window.GetWindow(this) }.ShowDialog() == true) { Services.Settings.Servers.Add(server); Services.Save(); Reload(); } }
-    private void Edit_Click(object sender, RoutedEventArgs e) { if (Servers.SelectedItem is ServerConfiguration server && new ServerDialog(server) { Owner = Window.GetWindow(this) }.ShowDialog() == true) { Services.Save(); Reload(); } }
+    private void Add_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var server = new ServerConfiguration();
+            var dialog = new ServerDialog(server) { Owner = Window.GetWindow(this) };
+            if (dialog.ShowDialog() == true) { Services.Settings.Servers.Add(server); Services.Save(); Reload(); }
+        }
+        catch (Exception ex) { Services.Log("Add connection failed: " + ex); MessageBox.Show("Could not open or save the connection.\n\n" + ex.Message, "AI provider", MessageBoxButton.OK, MessageBoxImage.Error); }
+    }
+    private void Edit_Click(object sender, RoutedEventArgs e)
+    {
+        if (!(Servers.SelectedItem is ServerConfiguration server)) return;
+        try
+        {
+            var dialog = new ServerDialog(server) { Owner = Window.GetWindow(this) };
+            if (dialog.ShowDialog() == true) { Services.Save(); Reload(); }
+        }
+        catch (Exception ex) { Services.Log("Edit connection failed: " + ex); MessageBox.Show("Could not edit the connection.\n\n" + ex.Message, "AI provider", MessageBoxButton.OK, MessageBoxImage.Error); }
+    }
     private void Remove_Click(object sender, RoutedEventArgs e) { if (Servers.SelectedItem is ServerConfiguration server && MessageBox.Show("Remove " + server.Name + "?", "LiteLLM", MessageBoxButton.YesNo) == MessageBoxResult.Yes) { Services.Settings.Servers.Remove(server); Services.Save(); Reload(); } }
     private async void Refresh_Click(object sender, RoutedEventArgs e) { await Services.RefreshAsync(CancellationToken.None); }
     private async void Test_Click(object sender, RoutedEventArgs e) { if (Servers.SelectedItem is ServerConfiguration server) try { await Services.TestAsync(server, CancellationToken.None); MessageBox.Show("Connected. Models were discovered successfully.", "LiteLLM"); } catch (Exception ex) { Services.Log(ex.ToString()); MessageBox.Show(ex.Message, "LiteLLM connection", MessageBoxButton.OK, MessageBoxImage.Warning); } }

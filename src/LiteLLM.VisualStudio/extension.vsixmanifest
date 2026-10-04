@@ -3,14 +3,14 @@
     <!-- Bump this on every build that is installed. Visual Studio keys upgrades on this version: while it stays the
          same it treats each VSIX as a different extension, leaves the older folders under
          %LOCALAPPDATA%\Microsoft\VisualStudio\<instance>\Extensions alone, and loads whichever it finds first. -->
-    <Identity Id="LiteLLM.VisualStudio.7a065ef0-9e0d-4bbc-9c0f-06d899fdbbbb" Version="1.6.6" Language="en-US" Publisher="EsmaeilHatami" />
+    <Identity Id="LiteLLM.VisualStudio.7a065ef0-9e0d-4bbc-9c0f-06d899fdbbbb" Version="1.6.13" Language="en-US" Publisher="EsmaeilHatami" />
     <DisplayName>LiteLLM Chat for Visual Studio</DisplayName>
     <!-- The Publisher above is the name the extension list credits; this is what the details pane says about the work. It
          is plain sentences in the order someone meeting the extension would want to know things, and with no indentation
          on the continuation lines so that a reader which keeps the line breaks and one that collapses them both read
          cleanly. Bullet characters are avoided for the same reason: in a pane that collapses whitespace a list marker
          would run into the sentence before it. The schema caps this element at 1000 characters, so it is budgeted rather
-         than free — the numbers are the feature list, and Detail belongs in the README the package ships. -->
+         than free â€” the numbers are the feature list, and Detail belongs in the README the package ships. -->
     <Description xml:space="preserve">Chat with any OpenAI-compatible LiteLLM gateway without leaving Visual Studio: multiple servers with per-model enable/disable, model discovery across them, streaming replies with reasoning display, markdown and fenced code blocks with Copy Code, and a local conversation history you can switch or delete.
 
 Context attachments work as in VS Code: the file open in the editor rides along by itself, and the paperclip button or a typed # attaches a selection or files.

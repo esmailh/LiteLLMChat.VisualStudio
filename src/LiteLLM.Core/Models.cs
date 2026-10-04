@@ -12,6 +12,11 @@ public sealed class ServerConfiguration
     public string BaseUrl { get; set; } = "http://localhost:4000";
     public bool Enabled { get; set; } = true;
     public string ProtectedApiKey { get; set; } = "";
+    /// <summary>Transport used by this connection. Existing settings are OpenAI-compatible.</summary>
+    public string Provider { get; set; } = "OpenAI Compatible";
+    public string Organization { get; set; } = "";
+    public string Deployment { get; set; } = "";
+    public string ApiVersion { get; set; } = "";
 }
 public sealed class UserSettings
 {
@@ -53,6 +58,7 @@ public sealed class ModelInfo
     public string ServerName { get; set; } = "";
     public string OwnedBy { get; set; } = "";
     public string Key => ServerId.ToString("N") + ":" + Id;
+    public string ShortId => Id.Length <= 16 ? Id : Id.Substring(0, 15) + "…";
     public override string ToString() => Id + " · " + ServerName;
 }
 public sealed class ChatMessage

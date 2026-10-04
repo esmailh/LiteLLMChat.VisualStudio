@@ -19,6 +19,22 @@ Write-Host "MSBuild: $msbuild"
 $generated = Join-Path $root 'src\LiteLLM.VisualStudio\extension.vsixmanifest'
 if (Test-Path $generated) { Remove-Item $generated -Force }
 
+# The container is filled from the *referenced project's* output folder, and both the Core project and the extension
+# project write a copy of it. An up-to-date check that decides Core is unchanged leaves the previous DLL in both
+# places, the package then ships a Core the extension was not compiled against, and the installed build fails at the
+# first call into a member that moved — which surfaces as "method not found" in a dialog, not as a build error.
+# Deleting the Core output first makes the rebuild unconditional.
+foreach ($stale in @(
+    (Join-Path $root 'src\LiteLLM.Core\bin\Release\net48\LiteLLM.Core.dll'),
+    (Join-Path $root 'src\LiteLLM.VisualStudio\bin\Release\net48\LiteLLM.Core.dll'))) {
+  if (Test-Path $stale) { Remove-Item $stale -Force }
+}
+
+# Build the referenced project into its normal output directory first. The packaging invocation below overrides the
+# extension OutDir, and the SDK otherwise assumes the referenced DLL already exists at the source project's path.
+& $msbuild (Join-Path $root 'src\LiteLLM.Core\LiteLLM.Core.csproj') -p:Configuration=Release -v:q -nologo
+if ($LASTEXITCODE -ne 0) { throw "core build failed with exit code $LASTEXITCODE" }
+
 & $msbuild $proj `
   '-t:Build;GeneratePkgDef;CreateVsixContainer' `
   -p:Configuration=Release `

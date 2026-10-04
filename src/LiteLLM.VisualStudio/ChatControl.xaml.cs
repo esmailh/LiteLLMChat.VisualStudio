@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -128,7 +128,7 @@ public partial class ChatControl : UserControl
     private void ModelsChanged(object sender, EventArgs e) => Dispatcher.Invoke(ReloadModels);
     private void SessionsChanged(object sender, EventArgs e) => Dispatcher.Invoke(ReloadSessions);
     private void ReloadSessions() { SessionBox.ItemsSource = null; SessionBox.ItemsSource = Services.Sessions.Sessions; SessionBox.SelectedValuePath = "Id"; SessionBox.SelectedValue = Services.Sessions.ActiveSessionId; RefreshDeleteButton(false); }
-    private void ReloadModels() { var selected = Services.ActiveSession.SelectedModelKey.Length > 0 ? Services.ActiveSession.SelectedModelKey : Services.Settings.SelectedModelKey; ModelBox.ItemsSource = null; ModelBox.ItemsSource = Services.Models; ModelBox.SelectedItem = Services.Models.FirstOrDefault(m => m.Key == selected) ?? Services.Models.FirstOrDefault(); StateText.Text = Services.Models.Count == 0 ? "Configure a server in the Dashboard" : "Ready"; }
+    private void ReloadModels() { var selected = Services.ActiveSession.SelectedModelKey.Length > 0 ? Services.ActiveSession.SelectedModelKey : Services.Settings.SelectedModelKey; ModelBox.ItemsSource = null; ModelBox.ItemsSource = Services.Models; ModelBox.SelectedItem = Services.Models.FirstOrDefault(m => m.Key == selected) ?? Services.Models.FirstOrDefault(); if (ModelBox.SelectedItem is ModelInfo model) ModelBox.ToolTip = model.Id; StateText.Text = Services.Models.Count == 0 ? "Configure a server in the Dashboard" : string.Empty; }
     private void RenderSession()
     {
         Messages.Children.Clear(); Messages.Children.Add(EmptyState); _history.Clear();
@@ -148,6 +148,7 @@ public partial class ChatControl : UserControl
     private async Task SendAsync()
     {
         var input = Composer.Text.Trim(); if (input.Length == 0 || !(ModelBox.SelectedItem is ModelInfo model) || _generation != null) return;
+        ComposerHint.Visibility = Visibility.Collapsed;
         Composer.Clear(); EmptyState.Visibility = Visibility.Collapsed;
         _history.Add(new ChatMessage { Role = "user", Content = input }); AddMessage("You", input, false);
         _turnStart = _history.Count - 1;
@@ -255,7 +256,7 @@ public partial class ChatControl : UserControl
             }
             else if (!stopped && finish == "length") AddToolNote("", "The reply was cut off at the " + Services.Settings.MaxTokens + "-token limit.", false);
             if (_activeTurn != null) { _activeTurn.Status = ChatTurnStatus.Complete; _activeTurn.CompletedUtc = DateTime.UtcNow; }
-            SaveSession(); StateText.Text = "Ready";
+            SaveSession(); StateText.Text = string.Empty;
         }
         catch (OperationCanceledException) { if (_activeTurn != null) { _activeTurn.Status = ChatTurnStatus.Cancelled; _activeTurn.CompletedUtc = DateTime.UtcNow; } SaveSession(); StateText.Text = "Stopped"; }
         catch (Exception ex)
@@ -447,18 +448,69 @@ public partial class ChatControl : UserControl
     private Bubble CreateBubble(string author, bool assistant)
     {
         var body = new StackPanel();
-        body.Children.Add(new TextBlock { Text = author, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 5) });
-        var border = new Border { Style = (Style)FindResource("Card"), Child = body, HorizontalAlignment = assistant ? HorizontalAlignment.Stretch : HorizontalAlignment.Right, MaxWidth = 900, MinWidth = 90, Margin = new Thickness(0, 0, 0, 12) };
+        var border = new Border { MaxWidth = 900, MinWidth = 90, Margin = new Thickness(0, 0, 0, assistant ? 18 : 10) };
+        StackPanel? actions = null;
+        if (assistant)
+        {
+            // The answer is read at length, so it sits on the page beside a small round avatar rather than inside a box,
+            // and its copy / retry row is revealed on hover like the one Visual Studio Code shows under a response.
+            border.Style = (Style)FindResource("MessageAssistant");
+            border.HorizontalAlignment = HorizontalAlignment.Stretch;
+            var icon = new Border { Style = (Style)FindResource("Avatar") };
+            icon.Child = new TextBlock
+            {
+                Text = "✦",
+                FontSize = 13,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Foreground = (Brush)FindResource(CommonControlsColors.ButtonDefaultTextBrushKey)
+            };
+            var content = new StackPanel { Margin = new Thickness(10, 0, 0, 0) };
+            content.Children.Add(new TextBlock { Text = author, FontSize = 11, FontWeight = FontWeights.SemiBold, Opacity = .85, Margin = new Thickness(0, 3, 0, 6) });
+            content.Children.Add(body);
+            actions = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(-6, 4, 0, 0) };
+            content.Children.Add(actions);
+            var grid = new Grid();
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            Grid.SetColumn(icon, 0); Grid.SetColumn(content, 1);
+            grid.Children.Add(icon); grid.Children.Add(content);
+            border.Child = grid;
+        }
+        else
+        {
+            // Keep the prompt in its soft right-aligned card, with the same hover actions available on an answer.
+            border.HorizontalAlignment = HorizontalAlignment.Right;
+            var card = new Border { Style = (Style)FindResource("MessageUser"), Child = body };
+            actions = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 4, -6, 0) };
+            var content = new StackPanel();
+            content.Children.Add(card); content.Children.Add(actions);
+            border.Child = content;
+        }
         var bubble = new Bubble { Border = border, Body = body };
+        Action retryAction = assistant ? (Action)RetryLatest : () => RetryRequest(bubble.Message?.Content);
         border.ContextMenu = Menu(
             Item("Copy message", () => Copy(Describe(bubble.Message), "Message")),
-            Item("Retry response", RetryLatest, assistant),
+            Item(assistant ? "Retry response" : "Retry request", retryAction),
             null,
             Item("Copy request (JSON)", () => Copy(bubble.Exchange?.RequestBody, "Request"), bubble.Exchange != null),
             Item("Copy response (JSON)", () => Copy(bubble.Exchange?.ResponseBody, "Response"), bubble.Exchange != null));
+        if (actions != null)
+        {
+            // Wired after the bubble exists because both buttons read the live transcript entry rather than a copy of it.
+            var copy = Ghost("⧉ Copy");
+            copy.Click += (s, e) => Copy(Describe(bubble.Message), "Message");
+            var retry = Ghost("↻ Retry");
+            retry.Click += (s, e) => retryAction();
+            actions.Children.Add(copy); actions.Children.Add(retry);
+        }
         Messages.Children.Add(border);
         return bubble;
     }
+
+    /// <summary>A quiet label-sized button for the row under a message; the GhostAction style keeps it invisible until
+    /// the pointer is over the message.</summary>
+    private Button Ghost(string label) => new Button { Content = label, Style = (Style)FindResource("GhostAction") };
 
     // ------------------------------------------------------------------ copying things out
 
@@ -583,6 +635,11 @@ public partial class ChatControl : UserControl
     private void SetBusy(bool value)
     {
         StopButton.IsEnabled = value; ModelBox.IsEnabled = !value; SessionBox.IsEnabled = !value;
+        // One slot, two meanings, the way the chat view in Visual Studio Code swaps its send button for a stop button
+        // rather than leaving two of them side by side and asking the reader which one applies.
+        StopButton.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
+        SendButton.Visibility = value ? Visibility.Collapsed : Visibility.Visible;
+        SendButton.IsEnabled = !value && Composer.Text.Trim().Length > 0;
         RefreshDeleteButton(value);
         if (value) StateText.Text = "Generating…";
     }
@@ -597,7 +654,7 @@ public partial class ChatControl : UserControl
         Services.NewSession();   // fires SessionsChanged, which is what reloads the session list
         Messages.Children.Clear(); Messages.Children.Add(EmptyState); EmptyState.Visibility = Visibility.Visible;
         Composer.Clear(); ClearAttachments();
-        StateText.Text = "Ready";
+        StateText.Text = string.Empty;
         ReloadModels();   // last, because it has the more important thing to say when no server is configured
         Composer.Focus();
     }
@@ -626,21 +683,11 @@ public partial class ChatControl : UserControl
         Composer.Focus();
     }
 
-    private void ClearInput_Click(object sender, RoutedEventArgs e)
+    private void RefreshComposerState()
     {
-        // Sitting in a chat window, "Clear" is read as "clear the conversation" — but that is the header's New chat.
-        // What it can clear is the draft, and with an empty composer that was nothing at all, which is why it looked
-        // dead. It now empties the composer and the attachments together and says which it did.
-        var hadDraft = Composer.Text.Trim().Length > 0;
-        var hadContext = _attachments.Count > 0;
-        Composer.Clear(); ClearAttachments(); Composer.Focus();
-        StateText.Text = !hadDraft && !hadContext ? "Nothing to clear"
-            : hadDraft && hadContext ? "Draft and attachments cleared"
-            : hadDraft ? "Draft cleared" : "Attachments cleared";
-        RefreshClearButton();
+        if (ComposerHint != null) ComposerHint.Visibility = Composer.Text.Length > 0 ? Visibility.Collapsed : Visibility.Visible;
+        if (SendButton != null && _generation == null) SendButton.IsEnabled = Composer.Text.Trim().Length > 0;
     }
-    /// <summary>Kept truthful rather than always enabled, so the button can never be the silent no-op it was.</summary>
-    private void RefreshClearButton() => ClearInput.IsEnabled = Composer.Text.Length > 0 || _attachments.Count > 0;
     private void SessionBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (SessionBox.SelectedValue is Guid id && id != Services.Sessions.ActiveSessionId && _generation == null) { Services.ActivateSession(id); RenderSession(); ReloadModels(); }
@@ -679,7 +726,7 @@ public partial class ChatControl : UserControl
         if (_activeFileContext != null) ContextBar.Children.Add(Chip(_activeFileContext, true));
         foreach (var item in _attachments) ContextBar.Children.Add(Chip(item, false));
         ContextBar.Visibility = _activeFileContext != null || _attachments.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-        RefreshClearButton();
+        RefreshComposerState();
     }
 
     /// <summary>One attachment. The label opens the file it names; the × takes it off the message. The full path lives
@@ -749,22 +796,23 @@ public partial class ChatControl : UserControl
         _ = RefreshActiveFileAsync();
     }
 
-    private void RefreshAutoContextButton()
-    {
-        var on = Services.Settings.AutoAttachActiveDocument;
-        HamburgerButton.ToolTip = on
-            ? "Chat actions · Auto context ON: the active editor file is included with every message"
-            : "Chat actions · Auto context OFF";
-    }
+    private void RefreshAutoContextButton() => RefreshPermissionToolTip();
 
     private void Hamburger_Click(object sender, RoutedEventArgs e)
     {
         var auto = Item((Services.Settings.AutoAttachActiveDocument ? "✓ " : "") + "Auto context — attach active editor file", () => SetAutoContext(!Services.Settings.AutoAttachActiveDocument));
         auto.ToolTip = "When enabled, the file currently open in the editor is automatically included with every message.";
+        var defaultPermissions = Item((AllowAllPermissions ? "" : "✓ ") + "Default permissions", () => SetPermissionMode("default"));
+        defaultPermissions.ToolTip = "Ask before protected actions according to the current settings.";
+        var allowAll = Item((AllowAllPermissions ? "✓ " : "") + "Allow all", () => SetPermissionMode("allowAll"));
+        allowAll.ToolTip = "Allow all enabled tools without approval.";
         var menu = Menu(
             auto,
             Item("Add context…", ShowContextMenu),
             Item("Copy…", () => Copy_Click(sender, e)),
+            null,
+            defaultPermissions,
+            allowAll,
             null,
             Item("Refresh models", async () => await SafeRefreshAsync()));
         menu.PlacementTarget = HamburgerButton;
@@ -947,9 +995,21 @@ public partial class ChatControl : UserControl
         return ContextTools.SolutionRoot(dte);
     }
     private void Retry_Click(object sender, RoutedEventArgs e) => RetryLatest();
+    private void RetryRequest(string? prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt) || _generation != null) return;
+        var turn = Services.ActiveSession.Turns.LastOrDefault(t =>
+            string.Equals(t.Messages.FirstOrDefault(m => m.Role == "user")?.Content, prompt, StringComparison.Ordinal));
+        RetryTurn(turn);
+    }
     private void RetryLatest()
     {
-        var session = Services.ActiveSession; var turn = session.Turns.LastOrDefault(t => t.Messages.Any(m => m.Role == "user") && (t.Status == ChatTurnStatus.Failed || t.Status == ChatTurnStatus.Complete)); var prompt = turn?.Messages.FirstOrDefault(m => m.Role == "user")?.Content; if (string.IsNullOrWhiteSpace(prompt) || _generation != null) return;
+        var turn = Services.ActiveSession.Turns.LastOrDefault(t => t.Messages.Any(m => m.Role == "user") && (t.Status == ChatTurnStatus.Failed || t.Status == ChatTurnStatus.Complete));
+        RetryTurn(turn);
+    }
+    private void RetryTurn(ChatTurnState? turn)
+    {
+        var session = Services.ActiveSession; var prompt = turn?.Messages.FirstOrDefault(m => m.Role == "user")?.Content; if (string.IsNullOrWhiteSpace(prompt) || _generation != null) return;
         while (session.Turns.Count > 0 && session.Turns[session.Turns.Count - 1] != turn) session.Turns.RemoveAt(session.Turns.Count - 1); if (turn != null) session.Turns.Remove(turn);
         RenderSession();
         // What the turn was asked with goes back into the composer with the words, so a retry asks the same question
@@ -968,11 +1028,22 @@ public partial class ChatControl : UserControl
     private async void Refresh_Click(object sender, RoutedEventArgs e) => await SafeRefreshAsync();
     private async Task SafeRefreshAsync() { try { StateText.Text = "Refreshing models…"; await Services.RefreshAsync(CancellationToken.None); } catch (Exception ex) { StateText.Text = ex.Message; } }
     private void Clear_Click(object sender, RoutedEventArgs e) => Clear(); private void Stop_Click(object sender, RoutedEventArgs e) => _generation?.Cancel();
+    /// <summary>A starter prompt in the empty state, the way the chat view offers one before the first message. It is a
+    /// real send rather than a filled draft, because a suggestion the reader has to press Enter on is a suggestion
+    /// that just cost them a step.</summary>
+    private void Suggestion_Click(object sender, RoutedEventArgs e)
+    {
+        if (!((sender as Button)?.Tag is string prompt)) return;
+        _picking = true;
+        try { Composer.Text = prompt; Composer.CaretIndex = prompt.Length; RefreshComposerState(); }
+        finally { _picking = false; }
+        _ = SendAsync();
+    }
 
     private async void Composer_TextChanged(object sender, TextChangedEventArgs e)
     {
         Composer.FlowDirection = TextDirection.For(Composer.Text);
-        RefreshClearButton();
+        RefreshComposerState();
         if (_picking) return;
 
         // '#' at the start of a word is Visual Studio Code's gesture for "attach something". The character is taken
@@ -989,27 +1060,36 @@ public partial class ChatControl : UserControl
         await PickIntoAsync(root);
     }
     private async void Composer_PreviewKeyDown(object sender, KeyEventArgs e) { if (e.Key == Key.Enter && Keyboard.Modifiers != ModifierKeys.Shift) { e.Handled = true; await SendAsync(); } }
-    private void ModelBox_SelectionChanged(object sender, SelectionChangedEventArgs e) { if (ModelBox.SelectedItem is ModelInfo m) { Services.Settings.SelectedModelKey = m.Key; Services.ActiveSession.SelectedModelKey = m.Key; Services.Save(); Services.SaveSessions(); } }
+    private void ModelBox_SelectionChanged(object sender, SelectionChangedEventArgs e) { if (ModelBox.SelectedItem is ModelInfo m) { ModelBox.ToolTip = m.Id; Services.Settings.SelectedModelKey = m.Key; Services.ActiveSession.SelectedModelKey = m.Key; Services.Save(); Services.SaveSessions(); } }
     private void ModeBox_SelectionChanged(object sender, SelectionChangedEventArgs e) { if (ModeBox.SelectedItem is ComboBoxItem item && item.Tag is string mode) _mode = mode; }
 
     private bool AllowAllPermissions => string.Equals(Services.Settings.PermissionMode, "allowAll", StringComparison.OrdinalIgnoreCase);
 
-    private void ReloadPermissionMode()
-    {
-        var mode = Services.Settings.PermissionMode;
-        PermissionBox.SelectedIndex = string.Equals(mode, "allowAll", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
-    }
+    private void ReloadPermissionMode() => RefreshPermissionToolTip();
 
-    private void PermissionBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void SetPermissionMode(string mode)
     {
-        if (!(PermissionBox.SelectedItem is ComboBoxItem item) || !(item.Tag is string mode)) return;
         if (string.Equals(Services.Settings.PermissionMode, mode, StringComparison.OrdinalIgnoreCase)) return;
         Services.Settings.PermissionMode = mode;
         var options = (LiteLlmOptionsPage)LiteLlmPackage.Instance.GetDialogPage(typeof(LiteLlmOptionsPage));
         options.PermissionMode = mode;
+        // Permission mode is intentionally independent from tool availability. Switching back from Allow all must
+        // only restore approvals; it must not disable file editing, terminal tools, or tool calling themselves.
         Services.Save();
+        RefreshPermissionToolTip();
         StateText.Text = mode == "allowAll" ? "Allow all enabled — tool approvals are automatic." : "Default permissions enabled.";
+    }
+
+    private void RefreshPermissionToolTip()
+    {
+        HamburgerButton.ToolTip = (Services.Settings.AutoAttachActiveDocument
+            ? "Chat actions · Auto context ON"
+            : "Chat actions · Auto context OFF") + (AllowAllPermissions
+            ? " · Allow all permissions"
+            : " · Default permissions");
     }
     private void ConversationScroll_ScrollChanged(object sender, ScrollChangedEventArgs e) { if (e.ExtentHeightChange == 0) _follow = ConversationScroll.VerticalOffset >= ConversationScroll.ScrollableHeight - 12; }
     private void ScrollIfFollowing() { if (_follow) ConversationScroll.ScrollToEnd(); }
 }
+
+
