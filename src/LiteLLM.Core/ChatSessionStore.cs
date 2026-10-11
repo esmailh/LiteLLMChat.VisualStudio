@@ -84,6 +84,8 @@ public sealed class ChatSessionStore
         document.Sessions ??= new List<ChatSessionState>();
         foreach (var session in document.Sessions)
         {
+            session.ExecutionBackend = string.Equals(session.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase) ? "claude" : "litellm";
+            session.ClaudeSessionId = session.ClaudeSessionId ?? "";
             session.Turns ??= new List<ChatTurnState>();
             // Laid out as a row of the history drop-down, so it is shaped as one line here rather than at each place that
             // shows it — including the titles already on disk, which is what repairs a conversation an older build

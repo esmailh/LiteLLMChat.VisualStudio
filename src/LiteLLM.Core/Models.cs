@@ -23,6 +23,9 @@ public sealed class UserSettings
     public List<ServerConfiguration> Servers { get; set; } = new List<ServerConfiguration>();
     public List<string> DisabledModelKeys { get; set; } = new List<string>();
     public string SelectedModelKey { get; set; } = "";
+    public string ClaudeExecutable { get; set; } = "claude";
+    public string ClaudeAllowedTools { get; set; } = "Read,Glob,Grep";
+    public string ClaudeDisallowedTools { get; set; } = "WebFetch,WebSearch";
     public int RequestTimeoutSeconds { get; set; } = 120;
     public bool EnableStreaming { get; set; } = true;
     public int MaxTokens { get; set; } = 8192;

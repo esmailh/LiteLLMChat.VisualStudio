@@ -56,7 +56,11 @@ public partial class ChatControl : UserControl
     /// off" rather than "forget the file until the next click". Null while the setting is off or no file is open.</summary>
     private ChatContextItem? _activeFileContext;
     private DTE? _dte;
+    private bool _eventSubscriptionsActive;
+    private int _loadVersion;
     private WindowEvents? _windowEvents;
+    private int _slashTokenStart;
+    private int _slashTokenLength;
 
     internal ChatControl() { InitializeComponent(); VsTheme.Apply(this); Current = this; Loaded += OnLoaded; Unloaded += OnUnloaded; SizeChanged += OnSizeChanged; }
     /// <summary>Below this the whole header row of controls cannot sit beside the brand any more.</summary>
@@ -103,27 +107,42 @@ public partial class ChatControl : UserControl
     private static bool _themeReported;
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
+        var loadVersion = ++_loadVersion;
+        Current = this;
         if (!_themeReported) { _themeReported = true; Services.Log(VsTheme.Describe()); }
-        Services.ModelsChanged += ModelsChanged; Services.SessionsChanged += SessionsChanged;
+        if (!_eventSubscriptionsActive)
+        {
+            Services.ModelsChanged += ModelsChanged; Services.SessionsChanged += SessionsChanged;
+            _eventSubscriptionsActive = true;
+        }
         // The edit tools ask the chat, rather than a modal dialog, because the question belongs in the conversation
         // where the change it is asking about is already on screen.
         EditTools.Confirm = AskToApplyEditAsync;
         TerminalTools.Confirm = AskToRunCommandAsync;
         await Services.RefreshSessionScopeAsync();
+        if (!IsLoaded || loadVersion != _loadVersion) return;
         ReloadSessions(); RenderSession(); ReloadModels();
         ReloadPermissionMode();
         RefreshAutoContextButton();
-        await WatchEditorAsync();
+        await WatchEditorAsync(loadVersion);
+        if (!IsLoaded || loadVersion != _loadVersion) return;
         if (Services.Models.Count == 0) await SafeRefreshAsync();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
-        // A tool window can be closed and reopened, and each reopen builds a new control. Dropping the DTE event here
-        // is what stops the closed ones from being kept alive by the editor and refreshing a tree nobody can see.
-        if (_windowEvents == null) return;
-        try { _windowEvents.WindowActivated -= OnWindowActivated; } catch (Exception) { }
+        ++_loadVersion;
+        _generation?.Cancel();
+        if (_eventSubscriptionsActive)
+        {
+            Services.ModelsChanged -= ModelsChanged; Services.SessionsChanged -= SessionsChanged;
+            _eventSubscriptionsActive = false;
+        }
+        try { if (_windowEvents != null) _windowEvents.WindowActivated -= OnWindowActivated; } catch (Exception) { }
         _windowEvents = null; _dte = null;
+        if (ReferenceEquals(EditTools.Confirm?.Target, this)) EditTools.Confirm = null;
+        if (ReferenceEquals(TerminalTools.Confirm?.Target, this)) TerminalTools.Confirm = null;
+        if (ReferenceEquals(Current, this)) Current = null;
     }
     private void ModelsChanged(object sender, EventArgs e) => Dispatcher.Invoke(ReloadModels);
     private void SessionsChanged(object sender, EventArgs e) => Dispatcher.Invoke(ReloadSessions);
@@ -131,6 +150,7 @@ public partial class ChatControl : UserControl
     private void ReloadModels() { var selected = Services.ActiveSession.SelectedModelKey.Length > 0 ? Services.ActiveSession.SelectedModelKey : Services.Settings.SelectedModelKey; ModelBox.ItemsSource = null; ModelBox.ItemsSource = Services.Models; ModelBox.SelectedItem = Services.Models.FirstOrDefault(m => m.Key == selected) ?? Services.Models.FirstOrDefault(); if (ModelBox.SelectedItem is ModelInfo model) ModelBox.ToolTip = model.Id; StateText.Text = Services.Models.Count == 0 ? "Configure a server in the Dashboard" : string.Empty; }
     private void RenderSession()
     {
+        ReloadBackend();
         Messages.Children.Clear(); Messages.Children.Add(EmptyState); _history.Clear();
         foreach (var turn in Services.ActiveSession.Turns)
             foreach (var message in turn.Messages)
@@ -142,12 +162,95 @@ public partial class ChatControl : UserControl
             }
         EmptyState.Visibility = _history.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
-    private void SaveSession() { var session = Services.ActiveSession; session.UpdatedUtc = DateTime.UtcNow; session.SelectedModelKey = (ModelBox.SelectedItem as ModelInfo)?.Key ?? session.SelectedModelKey; if (session.HasMessages && session.Title == "New chat") { var first = session.Turns.SelectMany(t => t.Messages).FirstOrDefault(m => m.Role == "user"); if (first != null) session.Title = ChatStateLimits.OneLine(first.Content, 42); } Services.SaveSessions(); }
+    private void SaveSession() => SaveSession(Services.ActiveSession, (ModelBox.SelectedItem as ModelInfo)?.Key);
+    private void SaveSession(ChatSessionState session, string? selectedModelKey = null) { session.UpdatedUtc = DateTime.UtcNow; session.SelectedModelKey = selectedModelKey ?? session.SelectedModelKey; if (session.HasMessages && session.Title == "New chat") { var first = session.Turns.SelectMany(t => t.Messages).FirstOrDefault(m => m.Role == "user"); if (first != null) session.Title = ChatStateLimits.OneLine(first.Content, 42); } Services.SaveSessions(); }
     private async void Send_Click(object sender, RoutedEventArgs e) => await SendAsync();
+
+    private async Task SendClaudeAsync(string input)
+    {
+        Services.ApplyOptions();
+        var settings = Services.Settings;
+        var policy = new ClaudeToolPolicyOptions
+        {
+            EnableFileEditing = settings.EnableFileEditing,
+            ConfirmEachEdit = settings.ConfirmEachEdit,
+            EnableTerminalTools = settings.EnableTerminalTools,
+            ConfirmEachCommand = settings.ConfirmEachCommand
+        };
+        try { policy.Validate(settings.ClaudeAllowedTools); }
+        catch (Exception ex)
+        {
+            StateText.Text = ex.Message;
+            Services.Log(ex.ToString());
+            Composer.Focus();
+            return;
+        }
+        ComposerHint.Visibility = Visibility.Collapsed;
+        Composer.Clear(); EmptyState.Visibility = Visibility.Collapsed;
+        _history.Add(new ChatMessage { Role = "user", Content = input }); AddMessage("You", input, false);
+        _turnStart = _history.Count - 1;
+        var pendingContext = PendingContext(); ClearAttachments();
+        var session = Services.ActiveSession;
+        var turn = new ChatTurnState { ModelKey = "claude-code", Status = ChatTurnStatus.Streaming, StartedUtc = DateTime.UtcNow, Context = pendingContext.ToList() };
+        _activeTurn = turn;
+        turn.Messages.Add(new ChatMessage { Role = "user", Content = input });
+        session.Turns.Add(turn); SaveSession(session, "claude-code");
+        SetBusy(true); var generation = new CancellationTokenSource(); _generation = generation; var token = generation.Token; StartTicker();
+        var assistant = new ChatMessage { Role = "assistant" }; _history.Add(assistant);
+        var view = AddAssistantBubble("Thinking");
+        try
+        {
+            var runner = new ClaudeCodeRunner();
+            var context = input.StartsWith("/", StringComparison.Ordinal) ? "" : AgentPrompt.AttachmentBlock(pendingContext, true);
+            var prompt = context.Length == 0 ? input : context + "\n\n" + input;
+            var workingDirectory = await SolutionRootAsync();
+            if (string.IsNullOrWhiteSpace(workingDirectory) || !Directory.Exists(workingDirectory))
+                throw new InvalidOperationException("Open a solution or project with a valid local root before using Claude Code.");
+            workingDirectory = Path.GetFullPath(workingDirectory);
+            var result = await runner.RunAsync(settings.ClaudeExecutable, prompt, session.ClaudeSessionId,
+                settings.ClaudeAllowedTools, settings.ClaudeDisallowedTools, workingDirectory, text =>
+                {
+                    assistant.Content = text;
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        if (ReferenceEquals(_activeTurn, turn) && ReferenceEquals(Services.ActiveSession, session))
+                        { _streamed = text.Length; _phase = text.Length > 0 ? "Writing" : "Thinking"; SetContent(view, assistant); }
+                    }));
+                }, id =>
+                {
+                    if (string.IsNullOrWhiteSpace(id)) return;
+                    // Persist synchronously on the UI thread before cancellation can discard the result.
+                    Dispatcher.Invoke(new Action(() =>
+                    {
+                        if (!string.IsNullOrWhiteSpace(session.ClaudeSessionId)) return;
+                        session.ClaudeSessionId = id;
+                        SaveSession(session, "claude-code");
+                    }));
+                }, policy, token).ConfigureAwait(true);
+            assistant.Content = result.Text;
+            if (ReferenceEquals(_activeTurn, turn) && ReferenceEquals(Services.ActiveSession, session)) { SetContent(view, assistant); FinishStatus(view); }
+            if (string.IsNullOrWhiteSpace(session.ClaudeSessionId) && !string.IsNullOrWhiteSpace(result.SessionId)) session.ClaudeSessionId = result.SessionId;
+            turn.Status = ChatTurnStatus.Complete; turn.CompletedUtc = DateTime.UtcNow;
+            if (assistant.Content.Length > 0) turn.Messages.Add(ChatStateLimits.CopyMessage(assistant));
+            SaveSession(session, "claude-code");
+            if (ReferenceEquals(Services.ActiveSession, session)) StateText.Text = string.Empty;
+        }
+        catch (OperationCanceledException) { if (assistant.Content.Length > 0) turn.Messages.Add(ChatStateLimits.CopyMessage(assistant)); turn.Status = ChatTurnStatus.Cancelled; turn.CompletedUtc = DateTime.UtcNow; SaveSession(session, "claude-code"); if (ReferenceEquals(Services.ActiveSession, session)) StateText.Text = "Stopped"; }
+        catch (Exception ex) { if (assistant.Content.Length > 0) turn.Messages.Add(ChatStateLimits.CopyMessage(assistant)); turn.Status = ChatTurnStatus.Failed; turn.Error = ex.Message; turn.CompletedUtc = DateTime.UtcNow; SaveSession(session, "claude-code"); if (ReferenceEquals(Services.ActiveSession, session)) { AddToolNote("error", ex.Message, false, null, ex.ToString()); StateText.Text = ex.Message; } Services.Log(ex.ToString()); }
+        finally { if (ReferenceEquals(_generation, generation)) { _ticker?.Stop(); _ticker = null; if (_live != null) FinishStatus(_live); _live = null; _generation = null; SetBusy(false); } generation.Dispose(); if (ReferenceEquals(_activeTurn, turn)) _activeTurn = null; Composer.Focus(); }
+    }
 
     private async Task SendAsync()
     {
-        var input = Composer.Text.Trim(); if (input.Length == 0 || !(ModelBox.SelectedItem is ModelInfo model) || _generation != null) return;
+        var input = Composer.Text;
+        if (string.IsNullOrWhiteSpace(input) || _generation != null) return;
+        if (string.Equals(Services.ActiveSession.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase))
+        {
+            await SendClaudeAsync(input);
+            return;
+        }
+        if (!(ModelBox.SelectedItem is ModelInfo model)) return;
+        input = input.Trim();
         ComposerHint.Visibility = Visibility.Collapsed;
         Composer.Clear(); EmptyState.Visibility = Visibility.Collapsed;
         _history.Add(new ChatMessage { Role = "user", Content = input }); AddMessage("You", input, false);
@@ -634,7 +737,8 @@ public partial class ChatControl : UserControl
 
     private void SetBusy(bool value)
     {
-        StopButton.IsEnabled = value; ModelBox.IsEnabled = !value; SessionBox.IsEnabled = !value;
+        StopButton.IsEnabled = value; BackendBox.IsEnabled = !value; ModeBox.IsEnabled = !value; SessionBox.IsEnabled = !value;
+        ModelBox.IsEnabled = !value && !string.Equals(Services.ActiveSession.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase);
         // One slot, two meanings, the way the chat view in Visual Studio Code swaps its send button for a stop button
         // rather than leaving two of them side by side and asking the reader which one applies.
         StopButton.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
@@ -757,15 +861,18 @@ public partial class ChatControl : UserControl
 
     /// <summary>Hooks the editor's window events so the current file follows the user from tab to tab, the way Visual
     /// Studio Code keeps the active editor in the chat's context.</summary>
-    private async Task WatchEditorAsync()
+    private async Task WatchEditorAsync(int loadVersion)
     {
         if (_windowEvents != null) return;   // Loaded can fire more than once; a second handler would double every refresh
         await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
         try
         {
-            _dte = (DTE?)await LiteLlmPackage.Instance.GetServiceAsync(typeof(DTE));
-            if (_dte == null) return;
-            _windowEvents = _dte.Events.WindowEvents;
+            var dte = (DTE?)await LiteLlmPackage.Instance.GetServiceAsync(typeof(DTE));
+            if (!IsLoaded || loadVersion != _loadVersion || dte == null) return;
+            var windowEvents = dte.Events.WindowEvents;
+            if (!IsLoaded || loadVersion != _loadVersion) return;
+            _dte = dte;
+            _windowEvents = windowEvents;
             _windowEvents.WindowActivated += OnWindowActivated;
             await RefreshActiveFileAsync();
         }
@@ -1042,8 +1149,9 @@ public partial class ChatControl : UserControl
 
     private async void Composer_TextChanged(object sender, TextChangedEventArgs e)
     {
-        Composer.FlowDirection = TextDirection.For(Composer.Text);
+        Composer.FlowDirection = FlowDirection.LeftToRight;
         RefreshComposerState();
+        RefreshSlashCommands();
         if (_picking) return;
 
         // '#' at the start of a word is Visual Studio Code's gesture for "attach something". The character is taken
@@ -1059,8 +1167,75 @@ public partial class ChatControl : UserControl
         if (root == null) { StateText.Text = "Open a solution first"; return; }
         await PickIntoAsync(root);
     }
-    private async void Composer_PreviewKeyDown(object sender, KeyEventArgs e) { if (e.Key == Key.Enter && Keyboard.Modifiers != ModifierKeys.Shift) { e.Handled = true; await SendAsync(); } }
+    private async void Composer_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (SlashCommandPopup.IsOpen)
+        {
+            if (e.Key == Key.Down || e.Key == Key.Up)
+            {
+                var count = SlashCommandList.Items.Count;
+                if (count > 0)
+                {
+                    var delta = e.Key == Key.Down ? 1 : -1;
+                    SlashCommandList.SelectedIndex = (SlashCommandList.SelectedIndex + delta + count) % count;
+                    SlashCommandList.ScrollIntoView(SlashCommandList.SelectedItem);
+                }
+                e.Handled = true; return;
+            }
+            if ((e.Key == Key.Enter && Keyboard.Modifiers != ModifierKeys.Shift) || e.Key == Key.Tab)
+            { e.Handled = true; InsertSelectedSlashCommand(); return; }
+            if (e.Key == Key.Escape) { SlashCommandPopup.IsOpen = false; e.Handled = true; return; }
+        }
+        if (e.Key == Key.Enter && Keyboard.Modifiers != ModifierKeys.Shift) { e.Handled = true; await SendAsync(); }
+    }
+
+    private void RefreshSlashCommands()
+    {
+        var claude = string.Equals(Services.ActiveSession.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase);
+        string filter;
+        if (!claude || !ClaudeSlashCommands.TryGetFilter(Composer.Text, Composer.CaretIndex, out _slashTokenStart, out _slashTokenLength, out filter))
+        { SlashCommandPopup.IsOpen = false; return; }
+
+        var commands = ClaudeSlashCommands.Filter(filter);
+        SlashCommandList.ItemsSource = commands;
+        SlashCommandList.SelectedIndex = commands.Count > 0 ? 0 : -1;
+        SlashCommandPopup.IsOpen = commands.Count > 0;
+    }
+
+    private void InsertSelectedSlashCommand()
+    {
+        if (!(SlashCommandList.SelectedItem is ClaudeSlashCommand command)) return;
+        _picking = true;
+        try
+        {
+            Composer.Text = ClaudeSlashCommands.ReplaceToken(Composer.Text, _slashTokenStart, _slashTokenLength, command.Name);
+            Composer.CaretIndex = Math.Min(Composer.Text.Length, _slashTokenStart + command.Name.Length + 1);
+            SlashCommandPopup.IsOpen = false;
+        }
+        finally { _picking = false; }
+        Composer.Focus();
+    }
+
+    private void SlashCommandList_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    { if (SlashCommandList.SelectedItem != null) { e.Handled = true; InsertSelectedSlashCommand(); } }
+
     private void ModelBox_SelectionChanged(object sender, SelectionChangedEventArgs e) { if (ModelBox.SelectedItem is ModelInfo m) { ModelBox.ToolTip = m.Id; Services.Settings.SelectedModelKey = m.Key; Services.ActiveSession.SelectedModelKey = m.Key; Services.Save(); Services.SaveSessions(); } }
+    private void ReloadBackend()
+    {
+        if (BackendBox == null) return;
+        var backend = Services.ActiveSession.ExecutionBackend;
+        BackendBox.SelectedItem = BackendBox.Items.OfType<ComboBoxItem>().FirstOrDefault(i => string.Equals(i.Tag as string, backend, StringComparison.OrdinalIgnoreCase)) ?? BackendBox.Items[0];
+        ModelBox.IsEnabled = _generation == null && !string.Equals(backend, "claude", StringComparison.OrdinalIgnoreCase);
+    }
+    private void BackendBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_generation != null || !(BackendBox.SelectedItem is ComboBoxItem item) || !(item.Tag is string backend)) return;
+        var normalized = string.Equals(backend, "claude", StringComparison.OrdinalIgnoreCase) ? "claude" : "litellm";
+        if (!string.Equals(Services.ActiveSession.ExecutionBackend, normalized, StringComparison.Ordinal)) { Services.ActiveSession.ExecutionBackend = normalized; SaveSession(); }
+        ModelBox.IsEnabled = normalized == "litellm";
+        SlashCommandPopup.IsOpen = false;
+        if (normalized == "claude") RefreshSlashCommands();
+    }
     private void ModeBox_SelectionChanged(object sender, SelectionChangedEventArgs e) { if (ModeBox.SelectedItem is ComboBoxItem item && item.Tag is string mode) _mode = mode; }
 
     private bool AllowAllPermissions => string.Equals(Services.Settings.PermissionMode, "allowAll", StringComparison.OrdinalIgnoreCase);

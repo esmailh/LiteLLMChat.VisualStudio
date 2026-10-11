@@ -52,6 +52,7 @@ internal sealed class ExtensionServices : IDisposable
         Settings.RequestTimeoutSeconds = o.RequestTimeoutSeconds; Settings.EnableStreaming = o.EnableStreaming; Settings.MaxTokens = o.MaxTokens; Settings.Temperature = o.Temperature; Settings.ShowReasoning = o.ShowReasoning; Settings.EnableToolCalling = o.EnableToolCalling; Settings.PermissionMode = o.PermissionMode; Settings.MaxToolRounds = o.MaxToolRounds; Settings.LoggingLevel = o.LoggingLevel;
         Settings.EnableFileEditing = o.EnableFileEditing; Settings.ConfirmEachEdit = o.ConfirmEachEdit;
         Settings.EnableTerminalTools = o.EnableTerminalTools; Settings.ConfirmEachCommand = o.ConfirmEachCommand; Settings.CommandTimeoutSeconds = o.CommandTimeoutSeconds;
+        Settings.ClaudeExecutable = o.ClaudeExecutable; Settings.ClaudeAllowedTools = o.ClaudeAllowedTools; Settings.ClaudeDisallowedTools = o.ClaudeDisallowedTools;
     }
     internal void Save() { ApplyOptions(); _store.Save(Settings); }
     internal void SaveSessions() { SessionStore.Save(Sessions); SessionsChanged?.Invoke(this, EventArgs.Empty); }

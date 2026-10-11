@@ -166,4 +166,233 @@ public sealed class CoreTests
         try { File.WriteAllText(file, "{\"Temperature\":0.5}"); Assert.Equal(ChatStateLimits.DefaultToolRounds, new SettingsStore(file).Load().MaxToolRounds); }
         finally { if (File.Exists(file)) File.Delete(file); }
     }
+
+    [Fact] public void ClaudeArguments_ContainMandatoryPolicyAndConditionalResume()
+    {
+        var args = ClaudeCodeArguments.Build("session 1", "Read,Glob", "WebFetch");
+        Assert.Contains("-p --output-format stream-json --verbose --permission-mode dontAsk", args);
+        Assert.Contains("--allowedTools Read,Glob", args); Assert.Contains("--disallowedTools WebFetch", args);
+        Assert.Contains("--resume \"session 1\"", args);
+        Assert.DoesNotContain("/review exact text", args); // prompts travel verbatim over stdin, never the process command line
+        Assert.DoesNotContain("--resume", ClaudeCodeArguments.Build("", "", ""));
+    }
+
+    [Theory]
+    [InlineData("", "\"\"")]
+    [InlineData("plain", "plain")]
+    [InlineData("two words", "\"two words\"")]
+    [InlineData("a\\\"b", "\"a\\\\\\\"b\"")]
+    [InlineData("trail\\", "trail\\")]
+    public void ClaudeArguments_QuoteUsesWindowsCommandLineRules(string value, string expected) => Assert.Equal(expected, ClaudeCodeArguments.Quote(value));
+
+    [Fact] public void ClaudeStreamParser_ToleratesNoiseReadsAllTextAndCapturesExplicitSession()
+    {
+        var parser = new ClaudeStreamParser();
+        parser.Accept("not-json"); parser.Accept("");
+        parser.Accept("{\"type\":\"assistant\",\"session_id\":\"opaque-id\",\"message\":{\"content\":[{\"type\":\"thinking\",\"text\":\"hidden\"},{\"type\":\"text\",\"text\":\"hello \"},{\"type\":\"text\",\"text\":\"world\"}]}}");
+        parser.Accept("{\"type\":\"unknown\",\"value\":1}");
+        parser.Accept("{\"type\":\"result\",\"result\":\"hello world\"}");
+        Assert.True(parser.HasRecognizedRecord);
+        Assert.Equal("opaque-id", parser.SessionId); Assert.Equal("hello world", parser.Text);
+    }
+
+    [Fact] public void ClaudeStreamParser_NoProtocolRecordsRemainUnrecognized()
+    {
+        var parser = new ClaudeStreamParser();
+        Assert.False(parser.Accept("not-json")); Assert.False(parser.Accept("{\"type\":\"unknown\"}"));
+        Assert.False(parser.HasRecognizedRecord); Assert.Equal("", parser.Text);
+    }
+
+    [Fact] public void ClaudeStreamParser_ReportsOnlyTextChanges()
+    {
+        var parser = new ClaudeStreamParser();
+        Assert.False(parser.Accept("{\"type\":\"system\",\"session_id\":\"id\"}"));
+        Assert.True(parser.Accept("{\"type\":\"result\",\"result\":\"answer\"}"));
+        Assert.False(parser.Accept("{\"type\":\"result\",\"result\":\"answer\"}"));
+    }
+
+    [Fact] public async Task ClaudeRunner_RejectsInvalidWorkingDirectoriesBeforeLaunch()
+    {
+        var runner = new ClaudeCodeRunner();
+        var policy = new ClaudeToolPolicyOptions();
+        await Assert.ThrowsAsync<ArgumentException>(() => runner.RunAsync("missing.exe", "p", "", "", "", " ", _ => { }, null, policy, CancellationToken.None));
+        var missing = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        await Assert.ThrowsAsync<DirectoryNotFoundException>(() => runner.RunAsync("missing.exe", "p", "", "", "", missing, _ => { }, null, policy, CancellationToken.None));
+    }
+
+    [Fact] public void ClaudeExecutable_UsesPathThenPathExtOrder()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "claude resolver " + Guid.NewGuid().ToString("N"));
+        var first = Path.Combine(root, "first"); var second = Path.Combine(root, "second");
+        try
+        {
+            Directory.CreateDirectory(first); Directory.CreateDirectory(second);
+            var cmd = Path.Combine(first, "claude.cmd"); File.WriteAllText(cmd, "");
+            File.WriteAllText(Path.Combine(second, "claude.exe"), "");
+            var comSpec = Environment.GetEnvironmentVariable("ComSpec");
+            var resolved = ClaudeCodeExecutable.Resolve("claude", first + Path.PathSeparator + second, ".CMD;.EXE", comSpec);
+            Assert.Equal(comSpec, resolved.FileName);
+            Assert.True(resolved.ArgumentPrefix.IndexOf(cmd, StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [Fact] public void ClaudeExecutable_DirectExeRemainsDirect()
+    {
+        var file = Path.Combine(Path.GetTempPath(), "claude resolver " + Guid.NewGuid().ToString("N") + ".exe");
+        try
+        {
+            File.WriteAllText(file, "");
+            var resolved = ClaudeCodeExecutable.Resolve(file, "", ".CMD;.EXE", "missing-cmd.exe");
+            Assert.Equal(file, resolved.FileName); Assert.Equal("", resolved.ArgumentPrefix);
+        }
+        finally { if (File.Exists(file)) File.Delete(file); }
+    }
+
+    [Fact] public void ClaudeExecutable_QuotesScriptPathAndArgumentsThroughComSpec()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "claude resolver " + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(root); var script = Path.Combine(root, "claude tool.cmd"); File.WriteAllText(script, "");
+            var comSpec = Path.Combine(root, "Command Shell", "cmd.exe"); Directory.CreateDirectory(Path.GetDirectoryName(comSpec)); File.WriteAllText(comSpec, "");
+            var resolved = ClaudeCodeExecutable.Resolve(script, "", ".EXE;.CMD", comSpec);
+            Assert.Equal(comSpec, resolved.FileName);
+            var commandLine = resolved.BuildArguments("--permission-mode dontAsk");
+            Assert.Equal("/d /s /c \"\"" + script + "\" --permission-mode dontAsk\"", commandLine);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [Theory]
+    [InlineData("&")]
+    [InlineData("|")]
+    [InlineData("%PATH%")]
+    [InlineData("^")]
+    public void ClaudeExecutable_CommandScriptRejectsCmdSyntax(string unsafeValue)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "claude resolver " + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(root);
+            var script = Path.Combine(root, "script.cmd"); File.WriteAllText(script, "");
+            var comSpec = Path.Combine(root, "cmd.exe"); File.WriteAllText(comSpec, "");
+            var executable = ClaudeCodeExecutable.Resolve(script, "", ".CMD", comSpec);
+            var error = Assert.Throws<ArgumentException>(() => executable.BuildArguments("--session-id " + unsafeValue));
+            Assert.Contains("native claude.exe", error.Message);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [Fact] public void ClaudeExecutable_NpmShimLaunchesNodeDirectlyWithScopedTools()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "claude npm shim " + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(root);
+            var node = Path.Combine(root, "node.exe"); File.WriteAllText(node, "");
+            var cli = Path.Combine(root, "node_modules", "@anthropic-ai", "claude-code", "cli.js");
+            Directory.CreateDirectory(Path.GetDirectoryName(cli)); File.WriteAllText(cli, "");
+            var shim = Path.Combine(root, "claude.cmd");
+            File.WriteAllText(shim, "@ECHO off\r\nSETLOCAL\r\nSET \"_prog=%dp0%\\node.exe\"\r\n\"%_prog%\" \"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js\" %*\r\n");
+
+            var resolved = ClaudeCodeExecutable.Resolve(shim, "", ".CMD;.EXE", Path.Combine(root, "cmd.exe"));
+            Assert.Equal(node, resolved.FileName);
+            var arguments = resolved.BuildArguments("--allowedTools \"Bash(git status),Edit(src folder/**),Write(output folder/**)\"");
+            Assert.Contains("\"" + cli + "\"", arguments);
+            Assert.Contains("Bash(git status),Edit(src folder/**),Write(output folder/**)", arguments);
+            Assert.DoesNotContain(" /c ", arguments, StringComparison.OrdinalIgnoreCase);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [Fact] public async Task ClaudeRunner_EnforcesPolicyBeforeExecutableResolution()
+    {
+        var runner = new ClaudeCodeRunner();
+        var policy = new ClaudeToolPolicyOptions { EnableTerminalTools = false };
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => runner.RunAsync(
+            "missing.exe", "p", "", "Bash(git status)", "", Path.GetTempPath(), _ => { }, null, policy, CancellationToken.None));
+        Assert.Contains("Enable terminal tools", error.Message);
+    }
+
+    [Fact] public void ClaudeExecutable_MissingCommandReportsCandidates()
+    {
+        var root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
+        try
+        {
+            var error = Assert.Throws<FileNotFoundException>(() => ClaudeCodeExecutable.Resolve("claude", root, ".EXE;.CMD", "cmd.exe"));
+            Assert.Contains("claude.exe", error.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(root, error.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Fact] public void ClaudeToolPolicy_ParsesRulesAcrossSeparatorsCaseInsensitively()
+    {
+        var names = ClaudeToolPolicy.ParseAllowedToolNames("Read, edit(src/**)\nBASH(git status)\tNotebookEdit(cell)");
+        Assert.Contains(names, x => string.Equals(x, "Edit", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(names, x => string.Equals(x, "Bash", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(names, x => string.Equals(x, "NotebookEdit", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(4, names.Count);
+        Assert.DoesNotContain(names, x => x.IndexOf("status", StringComparison.OrdinalIgnoreCase) >= 0);
+    }
+
+    [Theory]
+    [InlineData("Edit")]
+    [InlineData("write(src/**)")]
+    [InlineData("NotebookEdit(cell)")]
+    public void ClaudeToolPolicy_FileWritesRequireEditingAndNoConfirmation(string tool)
+    {
+        Assert.Contains("Enable file editing", Assert.Throws<InvalidOperationException>(() =>
+            ClaudeToolPolicy.Validate(tool, false, false, true, false)).Message);
+        Assert.Contains("explicitly disable Confirm before each edit", Assert.Throws<InvalidOperationException>(() =>
+            ClaudeToolPolicy.Validate(tool, true, true, true, false)).Message);
+        ClaudeToolPolicy.Validate(tool, true, false, true, false);
+    }
+
+    [Fact] public void ClaudeToolPolicy_BashRequiresTerminalAndNoConfirmation()
+    {
+        Assert.Contains("Enable terminal tools", Assert.Throws<InvalidOperationException>(() =>
+            ClaudeToolPolicy.Validate("bAsH(*)", true, false, false, false)).Message);
+        Assert.Contains("explicitly disable Confirm before each command", Assert.Throws<InvalidOperationException>(() =>
+            ClaudeToolPolicy.Validate("Bash", true, false, true, true)).Message);
+        ClaudeToolPolicy.Validate("Bash(*)", true, false, true, false);
+    }
+
+    [Fact] public void ClaudeToolPolicy_ReadOnlyDefaultsRemainAllowed()
+    {
+        ClaudeToolPolicy.Validate("Read, Glob Grep", false, true, false, true);
+    }
+
+    [Theory]
+    [InlineData("/", 1, "")]
+    [InlineData("  /rev", 6, "rev")]
+    [InlineData("question\n/re", 12, "re")]
+    public void ClaudeSlashCommands_DetectsCommandAtStartOfLine(string text, int caret, string expected)
+    {
+        Assert.True(ClaudeSlashCommands.TryGetFilter(text, caret, out var start, out var length, out var filter));
+        Assert.Equal(expected, filter);
+        Assert.Equal('/', text[start]);
+        Assert.Equal(caret - start, length);
+    }
+
+    [Theory]
+    [InlineData("hello /rev")]
+    [InlineData("/review now")]
+    [InlineData("plain text")]
+    public void ClaudeSlashCommands_RejectsNonTriggeringText(string text)
+    {
+        Assert.False(ClaudeSlashCommands.TryGetFilter(text, text.Length, out _, out _, out _));
+    }
+
+    [Fact] public void ClaudeSlashCommands_FiltersAndOmitsTerminalOnlyCommands()
+    {
+        Assert.Equal("/review", Assert.Single(ClaudeSlashCommands.Filter("rev")).Name);
+        Assert.DoesNotContain(ClaudeSlashCommands.All, x => x.Name == "/help" || x.Name == "/clear" || x.Name == "/resume");
+    }
+
+    [Fact] public void ClaudeSlashCommands_ReplacesOnlyActiveToken()
+    {
+        Assert.Equal("  /review rest", ClaudeSlashCommands.ReplaceToken("  /re rest", 2, 3, "/review"));
+    }
 }

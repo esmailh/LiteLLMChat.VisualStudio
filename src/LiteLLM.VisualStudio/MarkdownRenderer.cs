@@ -50,7 +50,9 @@ if (part.StartsWith("`") && part.EndsWith("`") && part.Length >= 2)
     private static FrameworkElement CodeBlock(string code, string language)
     {
         var copy = new Button { Content = "Copy code", HorizontalAlignment = HorizontalAlignment.Right, Padding = new Thickness(6, 2, 6, 2), ToolTip = "Copy code to clipboard" }; copy.Click += (s, e) => Clipboard.SetText(code);
-        var body = Selectable(new Paragraph(new Run(code) { FontFamily = MonoFont })); body.Margin = new Thickness(6);
+        var body = Selectable(new Paragraph(new Run(code) { FontFamily = MonoFont }));
+        body.FlowDirection = FlowDirection.LeftToRight;
+        body.Margin = new Thickness(6);
         var dock = new DockPanel(); DockPanel.SetDock(copy, Dock.Top); dock.Children.Add(copy); dock.Children.Add(body);
         var surface = new Border { Child = dock, CornerRadius = new CornerRadius(4), Margin = new Thickness(0, 5, 0, 5), FlowDirection = FlowDirection.LeftToRight };
         // Visual Studio's own code-block surface, so a block reads as a block on every theme instead of as one more

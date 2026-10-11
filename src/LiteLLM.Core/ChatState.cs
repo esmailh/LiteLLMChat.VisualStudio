@@ -51,6 +51,10 @@ public sealed class ChatSessionState
     public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedUtc { get; set; } = DateTime.UtcNow;
     public string SelectedModelKey { get; set; } = "";
+    /// <summary>Execution transport, independent of Ask/Agent/Plan. Missing values from older files mean LiteLLM.</summary>
+    public string ExecutionBackend { get; set; } = "litellm";
+    /// <summary>Opaque id emitted by Claude Code. Never synthesized from the extension conversation id.</summary>
+    public string ClaudeSessionId { get; set; } = "";
     public List<ChatTurnState> Turns { get; set; } = new List<ChatTurnState>();
 
     [JsonIgnore]
