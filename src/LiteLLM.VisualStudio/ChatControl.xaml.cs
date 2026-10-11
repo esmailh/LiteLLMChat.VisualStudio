@@ -61,6 +61,17 @@ public partial class ChatControl : UserControl
     private WindowEvents? _windowEvents;
     private int _slashTokenStart;
     private int _slashTokenLength;
+    private bool _fileMentionMode;
+    private int _suggestionRefreshVersion;
+    private string? _mentionRoot;
+    private IReadOnlyList<FileMentionEntry> _mentionFiles = Array.Empty<FileMentionEntry>();
+
+    private sealed class FileMentionEntry
+    {
+        internal string FullPath = "";
+        public string Name { get; set; } = "";
+        public string Description { get; set; } = "File";
+    }
 
     internal ChatControl() { InitializeComponent(); VsTheme.Apply(this); Current = this; Loaded += OnLoaded; Unloaded += OnUnloaded; SizeChanged += OnSizeChanged; }
     /// <summary>Below this the whole header row of controls cannot sit beside the brand any more.</summary>
@@ -1151,7 +1162,7 @@ public partial class ChatControl : UserControl
     {
         Composer.FlowDirection = FlowDirection.LeftToRight;
         RefreshComposerState();
-        RefreshSlashCommands();
+        await RefreshComposerSuggestionsAsync();
         if (_picking) return;
 
         // '#' at the start of a word is Visual Studio Code's gesture for "attach something". The character is taken
@@ -1183,16 +1194,38 @@ public partial class ChatControl : UserControl
                 e.Handled = true; return;
             }
             if ((e.Key == Key.Enter && Keyboard.Modifiers != ModifierKeys.Shift) || e.Key == Key.Tab)
-            { e.Handled = true; InsertSelectedSlashCommand(); return; }
+            { e.Handled = true; InsertSelectedSuggestion(); return; }
             if (e.Key == Key.Escape) { SlashCommandPopup.IsOpen = false; e.Handled = true; return; }
         }
         if (e.Key == Key.Enter && Keyboard.Modifiers != ModifierKeys.Shift) { e.Handled = true; await SendAsync(); }
     }
 
-    private void RefreshSlashCommands()
+    private async Task RefreshComposerSuggestionsAsync()
     {
-        var claude = string.Equals(Services.ActiveSession.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase);
+        var refreshVersion = ++_suggestionRefreshVersion;
         string filter;
+        if (FileMentions.TryGetFilter(Composer.Text, Composer.CaretIndex, out _slashTokenStart, out _slashTokenLength, out filter))
+        {
+            _fileMentionMode = true;
+            var root = await SolutionRootAsync();
+            if (root == null) { SlashCommandPopup.IsOpen = false; return; }
+            if (!string.Equals(root, _mentionRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                _mentionRoot = root;
+                _mentionFiles = await Task.Run(() => ReadMentionFiles(root));
+            }
+            if (refreshVersion != _suggestionRefreshVersion ||
+                !FileMentions.TryGetFilter(Composer.Text, Composer.CaretIndex, out _, out _, out var currentFilter) ||
+                !string.Equals(filter, currentFilter, StringComparison.Ordinal)) return;
+            var matches = _mentionFiles.Where(f => filter.Length == 0 || f.Name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0).Take(100).ToList();
+            SlashCommandList.ItemsSource = matches;
+            SlashCommandList.SelectedIndex = matches.Count > 0 ? 0 : -1;
+            SlashCommandPopup.IsOpen = matches.Count > 0;
+            return;
+        }
+
+        _fileMentionMode = false;
+        var claude = string.Equals(Services.ActiveSession.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase);
         if (!claude || !ClaudeSlashCommands.TryGetFilter(Composer.Text, Composer.CaretIndex, out _slashTokenStart, out _slashTokenLength, out filter))
         { SlashCommandPopup.IsOpen = false; return; }
 
@@ -1202,22 +1235,57 @@ public partial class ChatControl : UserControl
         SlashCommandPopup.IsOpen = commands.Count > 0;
     }
 
-    private void InsertSelectedSlashCommand()
+    private static IReadOnlyList<FileMentionEntry> ReadMentionFiles(string root)
     {
-        if (!(SlashCommandList.SelectedItem is ClaudeSlashCommand command)) return;
-        _picking = true;
+        var files = new List<FileMentionEntry>();
         try
         {
-            Composer.Text = ClaudeSlashCommands.ReplaceToken(Composer.Text, _slashTokenStart, _slashTokenLength, command.Name);
-            Composer.CaretIndex = Math.Min(Composer.Text.Length, _slashTokenStart + command.Name.Length + 1);
-            SlashCommandPopup.IsOpen = false;
+            foreach (var path in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+            {
+                if (ContextTools.IsNoise(path) || Array.IndexOf(ContextTools.ScannableExtensions, Path.GetExtension(path).ToLowerInvariant()) < 0) continue;
+                files.Add(new FileMentionEntry { FullPath = path, Name = ContextTools.Relative(root, path).Replace('\\', '/') });
+                if (files.Count >= 6000) break;
+            }
         }
-        finally { _picking = false; }
+        catch (Exception) { }
+        return files.OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private void InsertSelectedSuggestion()
+    {
+        if (_fileMentionMode)
+        {
+            if (!(SlashCommandList.SelectedItem is FileMentionEntry file)) return;
+            _picking = true;
+            try
+            {
+                Composer.Text = FileMentions.RemoveToken(Composer.Text, _slashTokenStart, _slashTokenLength);
+                Composer.CaretIndex = Math.Min(Composer.Text.Length, _slashTokenStart);
+                Attach(new ChatContextItem { Label = file.Name, Kind = "file", Preview = file.FullPath });
+                StateText.Text = "File attached";
+                SlashCommandPopup.IsOpen = false;
+            }
+            finally { _picking = false; }
+        }
+        else
+        {
+            if (!(SlashCommandList.SelectedItem is ClaudeSlashCommand command)) return;
+            _picking = true;
+            try
+            {
+                Composer.Text = ClaudeSlashCommands.ReplaceToken(Composer.Text, _slashTokenStart, _slashTokenLength, command.Name);
+                Composer.CaretIndex = Math.Min(Composer.Text.Length, _slashTokenStart + command.Name.Length + 1);
+                SlashCommandPopup.IsOpen = false;
+            }
+            finally { _picking = false; }
+        }
         Composer.Focus();
     }
 
+    private void RefreshSlashCommands() => _ = RefreshComposerSuggestionsAsync();
+
     private void SlashCommandList_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
-    { if (SlashCommandList.SelectedItem != null) { e.Handled = true; InsertSelectedSlashCommand(); } }
+    { if (SlashCommandList.SelectedItem != null) { e.Handled = true; InsertSelectedSuggestion(); } }
 
     private void ModelBox_SelectionChanged(object sender, SelectionChangedEventArgs e) { if (ModelBox.SelectedItem is ModelInfo m) { ModelBox.ToolTip = m.Id; Services.Settings.SelectedModelKey = m.Key; Services.ActiveSession.SelectedModelKey = m.Key; Services.Save(); Services.SaveSessions(); } }
     private void ReloadBackend()

@@ -12,6 +12,23 @@ using Xunit;
 namespace LiteLLM.Core.Tests;
 public sealed class CoreTests
 {
+    [Theory]
+    [InlineData("@", 1, 0, 1, "")]
+    [InlineData("inspect @src/App.cs", 19, 8, 11, "src/App.cs")]
+    [InlineData("mail@example.com", 16, -1, -1, null)]
+    public void FileMentions_ParsesOnlyWordStartingMentions(string text, int caret, int expectedStart, int expectedLength, string? expectedFilter)
+    {
+        var found = FileMentions.TryGetFilter(text, caret, out var start, out var length, out var filter);
+        Assert.Equal(expectedStart >= 0, found);
+        if (!found) return;
+        Assert.Equal(expectedStart, start);
+        Assert.Equal(expectedLength, length);
+        Assert.Equal(expectedFilter, filter);
+    }
+
+    [Fact] public void FileMentions_RemovesSelectedTokenWithoutChangingPrompt()
+        => Assert.Equal("review  please", FileMentions.RemoveToken("review @src/a.cs please", 7, 9));
+
     [Fact] public async Task SseParser_HandlesCommentsMultilineAndFinalEvent()
     {
         var values = new List<string>(); var input = ": keepalive\r\ndata: first\r\ndata: second\r\n\r\ndata: last";

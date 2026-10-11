@@ -29,7 +29,7 @@ Configure the executable and least-privilege allowed/disallowed tool lists under
 
 ## Context attachments
 
-Attach things to a message the way VS Code does. The 📎 button in the composer opens **Add context**, and typing `#` at the start of a word opens the same picker:
+Attach things to a message the way VS Code does. Type `@` at the start of a word for a keyboard-first, incrementally filtered list of solution files; use Up/Down, Enter or Tab, Escape, or the mouse to choose a file. The selected path becomes an attachment chip rather than remaining in the prompt. The 📎 button opens **Add context**, and typing `#` at the start of a word opens the full multi-select picker:
 
 | Menu item | What it does |
 | --- | --- |

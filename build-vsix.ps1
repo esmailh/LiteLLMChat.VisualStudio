@@ -1,7 +1,7 @@
 # Packages the LiteLLM extension into a VSIX that Visual Studio will actually load.
 # Every property below works around a specific failure; see the notes in the file's history.
 $ErrorActionPreference = 'Stop'
-$root = 'F:\New folder (3)'
+$root = $PSScriptRoot
 $proj = Join-Path $root 'src\LiteLLM.VisualStudio\LiteLLM.VisualStudio.csproj'
 $bin  = Join-Path $root 'src\LiteLLM.VisualStudio\bin\Release\net48'
 $tools = Join-Path $env:USERPROFILE '.nuget\packages\microsoft.vssdk.buildtools\17.12.2069\tools'

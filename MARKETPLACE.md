@@ -12,6 +12,7 @@ Bring an OpenAI-compatible AI assistant into Visual Studio without leaving your 
 - **Streaming responses** with optional reasoning display.
 - **Markdown rendering**, fenced code blocks, inline code, and Copy Code.
 - **Solution-aware context**: active file, selected text, files, folders, and Problems from the Error List.
+- **`@` file mentions** that search the solution as you type and attach the file you pick.
 - **Workspace tools** for reading, searching, listing, opening, and editing solution files.
 - **Safe editing workflow** with optional confirmation, visible diffs, Undo, and Visual Studio integration.
 - **Conversation history** with multiple sessions, rename-from-first-prompt, delete, retry, and cancellation.
@@ -69,7 +70,9 @@ The composer supports VS Code-style context attachment:
 - **Selection**: sends the current editor selection.
 - **Problems**: sends available errors and warnings from Visual Studio's Error List.
 
-Use the paperclip/context button or type `#` at the beginning of a word. Attached files are represented by compact chips above the composer. Click a chip to open its file or use `×` to remove it.
+Type `@` at the start of a word to search the solution's files from the keyboard. The list narrows as you type, Up/Down moves through it, and Enter or Tab chooses a file. The file is attached as a chip and the `@` text is taken out of your prompt, so the message reads as you wrote it.
+
+Use the paperclip/context button or type `#` at the beginning of a word to open the full multi-select picker. Attached files are represented by compact chips above the composer. Click a chip to open its file or use `×` to remove it.
 
 When tool calling is enabled, file contents are read on demand. When tool calling is disabled, bounded file excerpts are included only for the current request. Conversation history stores bounded context data rather than an unbounded copy of the workspace.
 
