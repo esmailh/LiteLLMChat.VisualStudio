@@ -111,6 +111,14 @@ public sealed class ChatSessionStore
                     Label = ChatStateLimits.Clip(c.Label, 240),
                     Preview = ChatStateLimits.Clip(c.Preview, ChatStateLimits.MaxContextPreviewChars)
                 }).ToList();
+                // A build log arrives from the Error List, which is unbounded, so it is bounded here the way the
+                // context is: the counts and the summary are what the row shows, and the detail only fills the
+                // tooltip and the model's note.
+                if (turn.Build != null)
+                {
+                    turn.Build.Detail = ChatStateLimits.Clip(turn.Build.Detail ?? "", BuildDiagnostics.MaxDetailChars);
+                    turn.Build.Summary = ChatStateLimits.OneLine(turn.Build.Summary, 200);
+                }
                 if (turn.Status == ChatTurnStatus.Pending || turn.Status == ChatTurnStatus.Streaming)
                 {
                     turn.Status = ChatTurnStatus.Cancelled;

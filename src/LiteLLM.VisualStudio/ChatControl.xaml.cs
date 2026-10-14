@@ -164,6 +164,7 @@ public partial class ChatControl : UserControl
         ReloadBackend();
         Messages.Children.Clear(); Messages.Children.Add(EmptyState); _history.Clear();
         foreach (var turn in Services.ActiveSession.Turns)
+        {
             foreach (var message in turn.Messages)
             {
                 if (message.Role == "user") AddMessage("You", message.Content, false);
@@ -171,6 +172,11 @@ public partial class ChatControl : UserControl
                 else if (message.Role == "tool") AddToolNote(message.ToolName, "Tool result · " + message.ToolName, true);
                 _history.Add(ChatStateLimits.CopyMessage(message));
             }
+            // The build row is not one of the messages — the note behind it is a user-role message the model was
+            // sent, and replaying that would put words in the user's mouth. It is stored on the turn instead and
+            // drawn back from there.
+            if (turn.Build != null) AddToolNote("build", turn.Build.Summary, turn.Build.Errors == 0, null, turn.Build.Detail);
+        }
         EmptyState.Visibility = _history.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
     private void SaveSession() => SaveSession(Services.ActiveSession, (ModelBox.SelectedItem as ModelInfo)?.Key);
@@ -282,7 +288,7 @@ public partial class ChatControl : UserControl
             // Copilot Chat treats the round budget as a setting and asks before spending more rather than dying
             // at a fixed count. Clamp after ApplyOptions so a mid-session change still takes effect this turn.
             var limit = ChatStateLimits.ClampToolRounds(Services.Settings.MaxToolRounds);
-            var stopped = false; ChatMessage? last = null; var finish = "";
+            var stopped = false; ChatMessage? last = null; var finish = ""; var builds = 0;
             for (var round = 1; ; round++)
             {
                 var assistant = new ChatMessage { Role = "assistant" };
@@ -331,6 +337,7 @@ public partial class ChatControl : UserControl
 
                 if (assistant.ToolCalls.Count == 0) { SaveSession(); break; }
 
+                var revisionsAtRoundStart = EditTools.Revisions;
                 foreach (var call in assistant.ToolCalls)
                 {
                     token.ThrowIfCancellationRequested();
@@ -343,6 +350,29 @@ public partial class ChatControl : UserControl
                     _history.Add(toolMessage);
                     _activeTurn?.Messages.Add(ChatStateLimits.CopyMessage(toolMessage));
                     AddToolNote(call.Name, result.Summary, result.Ok, null, null, EditTools.Revisions > revisions ? EditTools.Latest : null);
+                }
+
+                // The build check is what stops an edit that does not compile from being reported as a success: it
+                // runs once the round's edits are in, on the whole solution, and only when a file actually changed —
+                // a round that only read files has nothing to verify. Capped per turn, because each build costs the
+                // user real time and a model that keeps failing must not build forever; the round budget below is
+                // what finally ends the turn.
+                if (Services.Settings.VerifyBuildAfterEdits && _mode == "agent" && Services.Settings.EnableFileEditing
+                    && EditTools.Revisions > revisionsAtRoundStart && builds < 3)
+                {
+                    builds++;
+                    _phase = "Building the solution";
+                    var listed = await SolutionBuild.VerifyAsync(token).ConfigureAwait(true);
+                    if (listed != null)   // null is "could not verify", which is not the same as "no errors"
+                    {
+                        var report = BuildDiagnostics.Summarize(listed);
+                        if (_activeTurn != null) _activeTurn.Build = report;
+                        AddToolNote("build", report.Summary, report.Errors == 0, null, report.Detail);
+                        // Handed back as a user message rather than a tool result: a tool result answers a call the
+                        // assistant announced, and this one answers nothing, so ChatStateLimits.Sanitize would drop
+                        // it before the model ever saw it.
+                        if (report.Errors > 0) _history.Add(new ChatMessage { Role = "user", Content = BuildDiagnostics.ToModelNote(report) });
+                    }
                 }
                 SaveSession();   // once per round, not per tool: each save re-serializes the whole document
 
@@ -1075,36 +1105,9 @@ public partial class ChatControl : UserControl
         StateText.Text = "Problems attached";
     }
 
-    /// <summary>The Error List's window kind. The ErrorList/ErrorItem automation types are not in the interop assembly
-    /// this project compiles against, so the window is found by GUID and read late-bound.</summary>
-    private const string ErrorListKind = "{34E76E81-EE4A-11D0-AE2E-00A0C90FFFC3}";
-
-    private async Task<string> ProblemsAsync()
-    {
-        await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-        try
-        {
-            var dte = (DTE?)await LiteLlmPackage.Instance.GetServiceAsync(typeof(DTE));
-            var window = dte?.Windows.Item(ErrorListKind)?.Object;
-            if (window == null) return "";
-            if (window.GetType().InvokeMember("ErrorItems", BindingFlags.GetProperty, null, window, null) is not System.Collections.IEnumerable items) return "";
-
-            var text = new System.Text.StringBuilder();
-            foreach (var item in items)
-            {
-                if (text.Length >= 12000) break;
-                var type = item.GetType();
-                string Read(string name) { try { return type.InvokeMember(name, BindingFlags.GetProperty, null, item, null)?.ToString() ?? ""; } catch (Exception) { return ""; } }
-
-                text.Append(Read("ErrorLevel").Replace("vsErrorType", "").ToLowerInvariant()).Append(": ").Append(Read("Description"));
-                var file = Read("FileName");
-                if (file.Length > 0) text.Append(" — ").Append(file).Append(':').Append(Read("Line"));
-                text.Append('\n');
-            }
-            return text.ToString().TrimEnd('\n');
-        }
-        catch (Exception) { return ""; }   // no build has run, or the Error List is not available yet
-    }
+    /// <summary>The Error List, as text. The reader lives beside the build that fills it, so the Problems
+    /// entry and the automatic post-edit verification cannot drift into two different readings of it.</summary>
+    private Task<string> ProblemsAsync() => SolutionBuild.ReadErrorListAsync();
 
     private static async Task<string?> SolutionRootAsync()
     {

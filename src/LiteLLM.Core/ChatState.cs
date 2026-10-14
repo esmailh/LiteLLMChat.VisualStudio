@@ -32,6 +32,10 @@ public sealed class ChatTurnState
     public string Error { get; set; } = "";
     public List<ChatContextItem> Context { get; set; } = new List<ChatContextItem>();
     public List<ChatMessage> Messages { get; set; } = new List<ChatMessage>();
+    /// <summary>The last automatic post-edit build for this turn, or null when none ran. Kept beside the
+    /// messages rather than as one of them: the note the model is sent is a user-role message, and storing
+    /// it as a message would render it back as something the user typed.</summary>
+    public BuildReport? Build { get; set; }
 }
 
 public sealed class ChatSessionState

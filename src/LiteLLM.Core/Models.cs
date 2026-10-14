@@ -41,6 +41,11 @@ public sealed class UserSettings
     /// <summary>Ask before each edit instead of applying it. Off by default, matching Visual Studio Code, which writes
     /// an ordinary workspace file without asking and leaves the editor's undo stack to take it back.</summary>
     public bool ConfirmEachEdit { get; set; }
+    /// <summary>Build the solution after the agent edits files, and hand any errors back to it to fix. On by
+    /// default because an edit that does not compile is the failure users notice last: without this the chat
+    /// reports success and the breakage surfaces at the next manual build. Agent mode only, and it uses Visual
+    /// Studio's own build so a solution of any project type is built the way its project system expects.</summary>
+    public bool VerifyBuildAfterEdits { get; set; } = true;
     /// <summary>Allow the agent to run PowerShell and CMD commands from the open solution.</summary>
     public bool EnableTerminalTools { get; set; } = true;
     /// <summary>Ask before every command. Enabled by default because commands can affect resources outside files.</summary>

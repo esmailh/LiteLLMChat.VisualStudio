@@ -15,6 +15,7 @@ Bring an OpenAI-compatible AI assistant into Visual Studio without leaving your 
 - **`@` file mentions** that search the solution as you type and attach the file you pick.
 - **Workspace tools** for reading, searching, listing, opening, and editing solution files.
 - **Safe editing workflow** with optional confirmation, visible diffs, Undo, and Visual Studio integration.
+- **Automatic build verification** after edits, with errors handed back to the assistant to fix — for any project type.
 - **Conversation history** with multiple sessions, rename-from-first-prompt, delete, retry, and cancellation.
 - **Right-to-left chat rendering**, including mixed Persian/Arabic and English text.
 - **Visual Studio theme integration** for light, dark, and high-contrast environments.
@@ -99,6 +100,7 @@ Open **Tools > Options > LiteLLM** to configure tool calling and file editing.
 - Enable **Confirm before each edit** to review a proposed diff before it is applied.
 - Use **Allow** or **Skip** for each proposed edit.
 - Use Visual Studio **Undo** or the edit row's **Undo this edit** command to revert an applied change.
+- After the assistant changes a file, the solution is built automatically and the result appears as its own row in the chat. Any errors are handed straight back to the assistant, which fixes them and is built again — up to three times in a turn. This is on by default in Agent mode as **Verify the build after edits**, and it runs Visual Studio's own **Build Solution**, so a solution of any project type is built the way its project system expects rather than by a compiler-specific command.
 - Set a maximum tool-round budget to prevent an agent turn from continuing indefinitely. When the limit is reached, the chat offers a Continue or Stop checkpoint.
 
 ## Conversations and controls

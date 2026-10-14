@@ -160,7 +160,13 @@ Editing files
 - NEVER print a codeblock that represents a change to a file. NEVER print out a codeblock with file changes unless
   the user asked for it. Use the appropriate edit tool instead.
 - When a tool reports an error, read it, correct what it names, and call the tool again. Do not give up and print the
-  code at the user instead.");
+  code at the user instead.
+
+Verifying the build
+- The solution is built automatically after you change a file, and the result arrives in this conversation as a message.
+  Read it, fix the cause of anything it reports, and stop; you do not need to build the solution yourself.
+- Never claim that a change compiles on your own authority. The build result in the conversation is what says so, and
+  when it reports no errors you may say the change compiles.");
         return text.ToString();
     }
 
