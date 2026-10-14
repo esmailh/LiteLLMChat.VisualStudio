@@ -133,9 +133,10 @@ not what you are about to do.");
         if (terminalTools) text.Append(@"
 
     Command execution
-    - Use run_powershell or run_cmd when a real command is needed to build, test, package, or inspect the workspace.
+    - Use run_git for every Git operation, including commit, merge, pull, and push. It supports all Git arguments and can open GitHub/GitLab browser login when authentication is required, then retry once.
+    - Use run_powershell or run_cmd when another real command is needed to build, test, package, or inspect the workspace.
     - Commands run from the solution directory. Inspect their exit code and output; never claim a command succeeded unless its result says so.
-    - Prefer non-interactive, bounded commands. Do not start servers, watchers, shells, or programs that wait for user input.");
+    - Prefer non-interactive, bounded commands. Browser-based Git authentication is the exception; do not start other servers, watchers, shells, or programs that wait for user input.");
 
         if (!fileEditing)
         {

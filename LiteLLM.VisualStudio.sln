@@ -11,6 +11,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiteLLM.Core.Tests", "tests
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiteLLM.Cli", "..\LiteLLM.CrossPlatform\src\LiteLLM.Cli\LiteLLM.Cli.csproj", "{2F70C4A5-BB0C-4F0C-BC8A-05F3A105C64A}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{827E0CD3-B72D-47B6-A68D-7590B98EB39B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LiteLLM.GitWrapper", "src\LiteLLM.GitWrapper\LiteLLM.GitWrapper.csproj", "{EFE80FE5-61E1-452D-9D42-91E2962DB79B}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -69,8 +73,23 @@ Global
 		{2F70C4A5-BB0C-4F0C-BC8A-05F3A105C64A}.Release|x64.Build.0 = Release|Any CPU
 		{2F70C4A5-BB0C-4F0C-BC8A-05F3A105C64A}.Release|x86.ActiveCfg = Release|Any CPU
 		{2F70C4A5-BB0C-4F0C-BC8A-05F3A105C64A}.Release|x86.Build.0 = Release|Any CPU
+		{EFE80FE5-61E1-452D-9D42-91E2962DB79B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EFE80FE5-61E1-452D-9D42-91E2962DB79B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EFE80FE5-61E1-452D-9D42-91E2962DB79B}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{EFE80FE5-61E1-452D-9D42-91E2962DB79B}.Debug|x64.Build.0 = Debug|Any CPU
+		{EFE80FE5-61E1-452D-9D42-91E2962DB79B}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{EFE80FE5-61E1-452D-9D42-91E2962DB79B}.Debug|x86.Build.0 = Debug|Any CPU
+		{EFE80FE5-61E1-452D-9D42-91E2962DB79B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EFE80FE5-61E1-452D-9D42-91E2962DB79B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EFE80FE5-61E1-452D-9D42-91E2962DB79B}.Release|x64.ActiveCfg = Release|Any CPU
+		{EFE80FE5-61E1-452D-9D42-91E2962DB79B}.Release|x64.Build.0 = Release|Any CPU
+		{EFE80FE5-61E1-452D-9D42-91E2962DB79B}.Release|x86.ActiveCfg = Release|Any CPU
+		{EFE80FE5-61E1-452D-9D42-91E2962DB79B}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{EFE80FE5-61E1-452D-9D42-91E2962DB79B} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal

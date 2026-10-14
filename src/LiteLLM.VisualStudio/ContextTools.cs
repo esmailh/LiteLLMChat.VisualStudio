@@ -65,6 +65,11 @@ internal static class ContextTools
             if (root == null) return Fail("No solution or active document is available for the command working directory.", "command · no working directory");
             return await TerminalTools.ExecuteAsync(root, name, args, LiteLlmPackage.Instance.Services.Settings.CommandTimeoutSeconds, token).ConfigureAwait(true);
         }
+        if (name == "run_git")
+        {
+            if (root == null) return Fail("No solution or active document is available for the Git working directory.", "git · no working directory");
+            return await GitTools.ExecuteAsync(root, args, LiteLlmPackage.Instance.Services.Settings.CommandTimeoutSeconds, token).ConfigureAwait(true);
+        }
 
         // The edit tools are named differently but resolved, confined and applied the same way, and the caller is one
         // switch statement that should not have to know which half a tool lives in.

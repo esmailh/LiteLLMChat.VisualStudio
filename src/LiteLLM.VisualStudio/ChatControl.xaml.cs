@@ -224,6 +224,9 @@ public partial class ChatControl : UserControl
             if (string.IsNullOrWhiteSpace(workingDirectory) || !Directory.Exists(workingDirectory))
                 throw new InvalidOperationException("Open a solution or project with a valid local root before using Claude Code.");
             workingDirectory = Path.GetFullPath(workingDirectory);
+            var wrapperPath = Path.Combine(Path.GetDirectoryName(typeof(ChatControl).Assembly.Location) ?? "", "LiteLLM.GitWrapper.exe");
+            if (!File.Exists(wrapperPath)) throw new FileNotFoundException("The packaged LiteLLM Git wrapper was not found.", wrapperPath);
+            prompt = "For Git operations, use only the approved LiteLLM.GitWrapper executable. It performs confirmations and authentication; do not invoke git, gh, or glab directly.\n\n" + prompt;
             var result = await runner.RunAsync(settings.ClaudeExecutable, prompt, session.ClaudeSessionId,
                 settings.ClaudeAllowedTools, settings.ClaudeDisallowedTools, workingDirectory, text =>
                 {
@@ -243,7 +246,7 @@ public partial class ChatControl : UserControl
                         session.ClaudeSessionId = id;
                         SaveSession(session, "claude-code");
                     }));
-                }, policy, token).ConfigureAwait(true);
+                }, policy, token, wrapperPath).ConfigureAwait(true);
             assistant.Content = result.Text;
             if (ReferenceEquals(_activeTurn, turn) && ReferenceEquals(Services.ActiveSession, session)) { SetContent(view, assistant); FinishStatus(view); }
             if (string.IsNullOrWhiteSpace(session.ClaudeSessionId) && !string.IsNullOrWhiteSpace(result.SessionId)) session.ClaudeSessionId = result.SessionId;
@@ -289,6 +292,8 @@ public partial class ChatControl : UserControl
             // at a fixed count. Clamp after ApplyOptions so a mid-session change still takes effect this turn.
             var limit = ChatStateLimits.ClampToolRounds(Services.Settings.MaxToolRounds);
             var stopped = false; ChatMessage? last = null; var finish = ""; var builds = 0;
+            var unresolvedBuildFailure = false;
+            var buildRepairReminders = 0;
             for (var round = 1; ; round++)
             {
                 var assistant = new ChatMessage { Role = "assistant" };
@@ -335,7 +340,22 @@ public partial class ChatControl : UserControl
                 _activeTurn?.Messages.Add(ChatStateLimits.CopyMessage(assistant));
                 FinishStatus(view);
 
-                if (assistant.ToolCalls.Count == 0) { SaveSession(); break; }
+                if (assistant.ToolCalls.Count == 0)
+                {
+                    // A prose answer does not resolve a failed verification build. Give the model one explicit
+                    // correction round instead of accepting a false-success answer, but keep the retry bounded so
+                    // a model that refuses to edit cannot spin forever.
+                    if (unresolvedBuildFailure && buildRepairReminders++ == 0)
+                    {
+                        var reminder = new ChatMessage { Role = "user", Content = BuildDiagnostics.RepairReminder };
+                        _history.Add(reminder);
+                        _activeTurn?.Messages.Add(ChatStateLimits.CopyMessage(reminder));
+                        SaveSession();
+                        if (round < limit) continue;
+                    }
+                    SaveSession();
+                    break;
+                }
 
                 var revisionsAtRoundStart = EditTools.Revisions;
                 foreach (var call in assistant.ToolCalls)
@@ -370,8 +390,16 @@ public partial class ChatControl : UserControl
                         AddToolNote("build", report.Summary, report.Errors == 0, null, report.Detail);
                         // Handed back as a user message rather than a tool result: a tool result answers a call the
                         // assistant announced, and this one answers nothing, so ChatStateLimits.Sanitize would drop
-                        // it before the model ever saw it.
-                        if (report.Errors > 0) _history.Add(new ChatMessage { Role = "user", Content = BuildDiagnostics.ToModelNote(report) });
+                        // it before the model ever saw it. Persist it on the active turn as well: _history is rebuilt
+                        // from turn messages after a reload/continuation, and losing this note loses the repair task.
+                        unresolvedBuildFailure = report.Errors > 0;
+                        if (unresolvedBuildFailure)
+                        {
+                            var buildNote = new ChatMessage { Role = "user", Content = BuildDiagnostics.ToModelNote(report) };
+                            _history.Add(buildNote);
+                            _activeTurn?.Messages.Add(ChatStateLimits.CopyMessage(buildNote));
+                            buildRepairReminders = 0;
+                        }
                     }
                 }
                 SaveSession();   // once per round, not per tool: each save re-serializes the whole document
@@ -734,10 +762,11 @@ public partial class ChatControl : UserControl
         menu.PlacementTarget = HamburgerButton; menu.Placement = PlacementMode.Top; menu.IsOpen = true;
     }
 
-    private static FrameworkElement Directed(string text)
+    private FrameworkElement Directed(string text)
     {
-        var rendered = MarkdownRenderer.Render(text);
-        rendered.FlowDirection = FlowDirection.RightToLeft;
+        var rendered = MarkdownRenderer.Render(text, reference =>
+            ThreadHelper.JoinableTaskFactory.RunAsync(async () => await OpenReferenceAsync(reference)));
+        rendered.FlowDirection = TextDirection.For(text);
         return rendered;
     }
 
@@ -1031,6 +1060,31 @@ public partial class ChatControl : UserControl
         if (File.Exists(path)) ((DTE?)await LiteLlmPackage.Instance.GetServiceAsync(typeof(DTE)))?.ItemOperations.OpenFile(path);
     }
 
+    private async Task OpenReferenceAsync(FileReference reference)
+    {
+        try
+        {
+            var root = await SolutionRootAsync();
+            if (root == null) { StateText.Text = "Open a solution first"; return; }
+            var path = PathGuard.Resolve(root, reference.Path);
+            if (!File.Exists(path)) { StateText.Text = "Referenced file was not found"; return; }
+
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            var dte = (DTE?)await LiteLlmPackage.Instance.GetServiceAsync(typeof(DTE));
+            var window = dte?.ItemOperations.OpenFile(path);
+            if (window == null) { StateText.Text = "Could not open referenced file"; return; }
+            window.Activate();
+            var selection = dte?.ActiveDocument?.Selection as TextSelection;
+            if (selection != null && reference.Line.HasValue)
+            {
+                if (reference.Column.HasValue) selection.MoveToLineAndOffset(reference.Line.Value, reference.Column.Value, false);
+                else selection.GotoLine(reference.Line.Value, false);
+            }
+        }
+        catch (ArgumentException) { StateText.Text = "Referenced file is outside the solution"; }
+        catch (Exception ex) { StateText.Text = "Could not open referenced file"; Services.Log(ex.ToString()); }
+    }
+
     /// <summary>VS Code's Add Context menu. What cannot be done here is still listed, greyed, with the reason in the
     /// tooltip — a menu missing half its entries looks like a different menu, not a smaller one.</summary>
     private void AddContext_Click(object sender, RoutedEventArgs e) => ShowContextMenu();
@@ -1163,7 +1217,7 @@ public partial class ChatControl : UserControl
 
     private async void Composer_TextChanged(object sender, TextChangedEventArgs e)
     {
-        Composer.FlowDirection = FlowDirection.LeftToRight;
+        Composer.FlowDirection = TextDirection.For(Composer.Text);
         RefreshComposerState();
         await RefreshComposerSuggestionsAsync();
         if (_picking) return;

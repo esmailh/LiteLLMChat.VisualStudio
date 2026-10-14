@@ -35,6 +35,9 @@ foreach ($stale in @(
 & $msbuild (Join-Path $root 'src\LiteLLM.Core\LiteLLM.Core.csproj') -p:Configuration=Release -v:q -nologo
 if ($LASTEXITCODE -ne 0) { throw "core build failed with exit code $LASTEXITCODE" }
 
+& $msbuild (Join-Path $root 'src\LiteLLM.GitWrapper\LiteLLM.GitWrapper.csproj') -p:Configuration=Release -v:q -nologo
+if ($LASTEXITCODE -ne 0) { throw "Git wrapper build failed with exit code $LASTEXITCODE" }
+
 & $msbuild $proj `
   '-t:Build;GeneratePkgDef;CreateVsixContainer' `
   -p:Configuration=Release `

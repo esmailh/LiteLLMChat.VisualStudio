@@ -88,7 +88,7 @@ internal sealed class ExtensionServices : IDisposable
             if (!Settings.EnableToolCalling) return Array.Empty<ToolDefinition>();
             IEnumerable<ToolDefinition> tools = ContextTools.Definitions;
             if (Settings.EnableFileEditing) tools = tools.Concat(EditTools.Definitions);
-            if (Settings.EnableTerminalTools) tools = tools.Concat(TerminalTools.Definitions);
+            if (Settings.EnableTerminalTools) tools = tools.Concat(TerminalTools.Definitions).Concat(new[] { GitTools.Definition });
             return tools.ToList();
         }
     }

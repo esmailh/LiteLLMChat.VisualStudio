@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>WinExe</OutputType><TargetFramework>net48</TargetFramework><AssemblyName>LiteLLM.GitWrapper</AssemblyName><RootNamespace>LiteLLM.GitWrapper</RootNamespace></PropertyGroup>
+  <ItemGroup><Reference Include="System.Windows.Forms" /><ProjectReference Include="..\LiteLLM.Core\LiteLLM.Core.csproj" /></ItemGroup>
+</Project>

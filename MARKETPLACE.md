@@ -92,6 +92,8 @@ In Agent mode, the assistant can use tools for:
 
 Workspace paths are confined to the open solution root. Paths outside the solution and directory traversal attempts are rejected. The extension does not execute arbitrary shell commands, build commands, or network requests through workspace tools.
 
+With terminal tools enabled, LiteLLM Agent mode adds a dedicated, shell-free `run_git` tool. It accepts exact argument arrays (and legacy strings), confirms every command, follows Git's configured push/upstream remote precedence, and selects push versus fetch URLs correctly. Recognized GitHub/GitLab credential failures can offer a separately confirmed browser login through `gh` or `glab`; self-hosted providers require a conservative host-scoped CLI probe. The remote protocol is preserved where supported, sensitive diagnostics are redacted, and a successful login permits exactly one retry of the unchanged Git command. Claude Code remains an independent subprocess and does not receive this Visual Studio tool; general Bash is not auto-enabled as a workaround.
+
 ## Editing and permissions
 
 Open **Tools > Options > LiteLLM** to configure tool calling and file editing.

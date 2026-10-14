@@ -381,6 +381,21 @@ public sealed class CoreTests
         ClaudeToolPolicy.Validate("Read, Glob Grep", false, true, false, true);
     }
 
+    [Fact] public void ClaudeToolPolicy_ComposesOnlyExactTrustedExecutableRule()
+    {
+        var path = Path.GetFullPath(Path.Combine("tools", "LiteLLM.GitWrapper.exe"));
+        Assert.Equal("Read,Bash(\"" + path + "\" *)", ClaudeToolPolicy.ComposeWithTrustedExecutable(" Read ", path));
+        Assert.Throws<ArgumentException>(() => ClaudeToolPolicy.ComposeWithTrustedExecutable("Read", "relative.exe"));
+        Assert.Throws<ArgumentException>(() => ClaudeToolPolicy.ComposeWithTrustedExecutable("Read", path + "\nother"));
+    }
+
+    [Fact] public void ClaudeToolPolicy_UserBashRemainsRejectedBeforeTrustedComposition()
+    {
+        var policy = new ClaudeToolPolicyOptions { EnableTerminalTools = false };
+        Assert.Throws<InvalidOperationException>(() => policy.Validate("Bash(*)"));
+        policy.Validate("Read");
+    }
+
     [Theory]
     [InlineData("/", 1, "")]
     [InlineData("  /rev", 6, "rev")]

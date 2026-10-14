@@ -54,6 +54,13 @@ public sealed class BuildTests
         Assert.Contains("Baz.cs", note, StringComparison.Ordinal);
     }
 
+    [Fact] public void BuildDiagnostics_RepairReminderRequiresAnotherEditAndBuild()
+    {
+        Assert.Contains("still failing", BuildDiagnostics.RepairReminder, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("edit", BuildDiagnostics.RepairReminder, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("verification", BuildDiagnostics.RepairReminder, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact] public void Settings_VerifyBuildAfterEditsDefaultsOnAndSurvivesAnOlderFile()
     {
         Assert.True(new UserSettings().VerifyBuildAfterEdits);

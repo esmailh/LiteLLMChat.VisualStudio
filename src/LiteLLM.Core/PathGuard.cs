@@ -24,8 +24,10 @@ public static class PathGuard
     /// as Windows paths are, and on a whole path segment so that "src2" is never taken for a child of "src".</summary>
     public static bool IsUnder(string root, string full)
     {
-        if (string.Equals(full, root, StringComparison.OrdinalIgnoreCase)) return true;
-        return full.StartsWith(root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        var canonicalRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var canonicalFull = Path.GetFullPath(full).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (string.Equals(canonicalFull, canonicalRoot, StringComparison.OrdinalIgnoreCase)) return true;
+        return canonicalFull.StartsWith(canonicalRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>The solution-relative form of a path, which is what the model and the chat should see.

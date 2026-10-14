@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -25,12 +26,47 @@ public static class CommandExecutor
 {
     public const int DefaultMaxOutputChars = 60000;
 
-    public static async Task<CommandExecutionResult> ExecuteAsync(
+    public static Task<CommandExecutionResult> ExecuteAsync(
         CommandShell shell, string command, string workingDirectory, TimeSpan timeout,
         CancellationToken cancellationToken, int maxOutputChars = DefaultMaxOutputChars)
     {
         if (string.IsNullOrWhiteSpace(command)) throw new ArgumentException("A command is required.", nameof(command));
-        if (!Directory.Exists(workingDirectory)) throw new DirectoryNotFoundException("Working directory not found: " + workingDirectory);
+        return ExecuteProcessAsync(StartInfo(shell, command, workingDirectory), timeout, cancellationToken, maxOutputChars);
+    }
+
+    /// <summary>Runs an executable directly, quoting each argument for the Windows process command line.</summary>
+    public static Task<CommandExecutionResult> ExecuteFileAsync(
+        string fileName, IReadOnlyList<string> arguments, string workingDirectory, TimeSpan timeout,
+        CancellationToken cancellationToken, int maxOutputChars = DefaultMaxOutputChars)
+    {
+        return ExecuteFileAsync(fileName, GitSupport.BuildCommandLine(arguments), workingDirectory, timeout,
+            cancellationToken, maxOutputChars);
+    }
+
+    /// <summary>Runs an executable directly, without a command shell interpreting its arguments.</summary>
+    public static Task<CommandExecutionResult> ExecuteFileAsync(
+        string fileName, string arguments, string workingDirectory, TimeSpan timeout,
+        CancellationToken cancellationToken, int maxOutputChars = DefaultMaxOutputChars)
+    {
+        if (string.IsNullOrWhiteSpace(fileName)) throw new ArgumentException("An executable is required.", nameof(fileName));
+        return ExecuteProcessAsync(new ProcessStartInfo
+        {
+            FileName = fileName,
+            Arguments = arguments ?? "",
+            WorkingDirectory = workingDirectory,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
+        }, timeout, cancellationToken, maxOutputChars);
+    }
+
+    private static async Task<CommandExecutionResult> ExecuteProcessAsync(
+        ProcessStartInfo startInfo, TimeSpan timeout, CancellationToken cancellationToken, int maxOutputChars)
+    {
+        if (!Directory.Exists(startInfo.WorkingDirectory)) throw new DirectoryNotFoundException("Working directory not found: " + startInfo.WorkingDirectory);
         if (timeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
         if (maxOutputChars < 1000) throw new ArgumentOutOfRangeException(nameof(maxOutputChars));
 
@@ -40,7 +76,7 @@ public static class CommandExecutor
         var stopwatch = Stopwatch.StartNew();
         using (var process = new Process())
         {
-            process.StartInfo = StartInfo(shell, command, workingDirectory);
+            process.StartInfo = startInfo;
             process.EnableRaisingEvents = true;
             process.Exited += (_, __) => exited.TrySetResult(true);
             process.OutputDataReceived += (_, e) => { if (e.Data != null) output.AppendLine(e.Data); };

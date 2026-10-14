@@ -52,6 +52,16 @@ public sealed class ClaudeToolPolicyOptions
 
 public static class ClaudeToolPolicy
 {
+    public static string ComposeWithTrustedExecutable(string configuredTools, string executablePath)
+    {
+        if (string.IsNullOrWhiteSpace(executablePath) || !Path.IsPathRooted(executablePath))
+            throw new ArgumentException("Trusted executable path must be absolute.", nameof(executablePath));
+        var fullPath = Path.GetFullPath(executablePath);
+        if (fullPath.IndexOfAny(new[] { '"', '\r', '\n', '\0' }) >= 0)
+            throw new ArgumentException("Trusted executable path contains unsupported characters.", nameof(executablePath));
+        var rule = "Bash(\"" + fullPath + "\" *)";
+        return string.IsNullOrWhiteSpace(configuredTools) ? rule : configuredTools.Trim() + "," + rule;
+    }
     private static readonly HashSet<string> FileWriteTools = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
         "Edit", "Write", "NotebookEdit"
@@ -242,10 +252,11 @@ public sealed class ClaudeCodeExecutable
 
 public sealed class ClaudeCodeRunner
 {
-    public async Task<ClaudeCodeResult> RunAsync(string executable, string prompt, string sessionId, string allowedTools, string disallowedTools, string workingDirectory, Action<string> update, Action<string>? sessionStarted, ClaudeToolPolicyOptions? policy, CancellationToken token)
+    public async Task<ClaudeCodeResult> RunAsync(string executable, string prompt, string sessionId, string allowedTools, string disallowedTools, string workingDirectory, Action<string> update, Action<string>? sessionStarted, ClaudeToolPolicyOptions? policy, CancellationToken token, string trustedExecutablePath = "")
     {
         if (policy == null) throw new ArgumentNullException(nameof(policy), "Claude tool policy is required at the process-launch boundary.");
         policy.Validate(allowedTools);
+            if (!string.IsNullOrWhiteSpace(trustedExecutablePath)) allowedTools = ClaudeToolPolicy.ComposeWithTrustedExecutable(allowedTools, trustedExecutablePath);
         if (string.IsNullOrWhiteSpace(workingDirectory)) throw new ArgumentException("A working directory is required.", nameof(workingDirectory));
         if (!Directory.Exists(workingDirectory)) throw new DirectoryNotFoundException("Claude Code working directory does not exist: " + workingDirectory);
         var resolved = ClaudeCodeExecutable.Resolve(executable);
@@ -253,6 +264,8 @@ public sealed class ClaudeCodeRunner
         {
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
             RedirectStandardOutput = true, RedirectStandardError = true,
+            StandardOutputEncoding = new UTF8Encoding(false),
+            StandardErrorEncoding = new UTF8Encoding(false),
             WorkingDirectory = workingDirectory
         };
         using (var process = new Process { StartInfo = psi }) using (var job = new WindowsProcessJob())
@@ -272,17 +285,18 @@ public sealed class ClaudeCodeRunner
             var wait = WaitAsync(process);
             Task write = Task.CompletedTask;
             var cancelled = new TaskCompletionSource<bool>();
+            using (var input = new StreamWriter(process.StandardInput.BaseStream, new UTF8Encoding(false)))
             using (token.Register(() =>
             {
                 cancelled.TrySetResult(true);
-                try { process.StandardInput.Close(); } catch { }
+                try { input.Close(); } catch { }
                 try { job.Terminate(); } catch { }
             }))
             {
                 try
                 {
                     token.ThrowIfCancellationRequested();
-                    write = process.StandardInput.WriteAsync(prompt ?? "");
+                    write = input.WriteAsync(prompt ?? "");
                     // Observe cancellation and drain failures immediately. Waiting only
                     // on WhenAll can deadlock if stdin blocks or a callback faults while
                     // the child continues filling a redirected pipe.
@@ -290,7 +304,7 @@ public sealed class ClaudeCodeRunner
                     if (first == cancelled.Task) token.ThrowIfCancellationRequested();
                     await first.ConfigureAwait(false);
                     if (first != write) await write.ConfigureAwait(false);
-                    process.StandardInput.Close();
+                    input.Close();
                     var all = Task.WhenAll(stdout, stderr, wait, write);
                     first = await Task.WhenAny(all, stdout, stderr, cancelled.Task).ConfigureAwait(false);
                     if (first == cancelled.Task) token.ThrowIfCancellationRequested();

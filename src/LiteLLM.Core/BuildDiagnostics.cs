@@ -22,6 +22,7 @@ public sealed class BuildReport
 public static class BuildDiagnostics
 {
     public const int MaxDetailChars = 12000;
+    public const string RepairReminder = "The verification build is still failing. Do not finish with an explanation or claim success: inspect the diagnostics already provided, edit the files responsible for errors caused by your change, and let automatic verification run again. If none of the errors were caused by your change, state that explicitly.";
 
     /// <summary>Counts the entries and bounds the text. <paramref name="errorListText"/> is the newline
     /// separated shape the Error List reader produces — "error: description — file:line". Counting is
