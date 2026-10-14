@@ -176,6 +176,12 @@ public partial class ChatControl : UserControl
             // sent, and replaying that would put words in the user's mouth. It is stored on the turn instead and
             // drawn back from there.
             if (turn.Build != null) AddToolNote("build", turn.Build.Summary, turn.Build.Errors == 0, null, turn.Build.Detail);
+            // After the build row, because that is the order they were drawn in a live turn.
+            if (turn.Tests != null) AddToolNote("tests", turn.Tests.Summary, turn.Tests.Errors == 0, null, turn.Tests.Detail);
+            // Same reasoning as the build row: the briefing is the model's own text standing in for messages that
+            // are still here, so it is replayed from the turn rather than re-derived, and the rows come back in
+            // the order they were drawn in a live turn.
+            foreach (var summary in turn.Summaries) AddToolNote("", summary.Summary, true, null, summary.Detail);
         }
         EmptyState.Visibility = _history.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
@@ -288,22 +294,49 @@ public partial class ChatControl : UserControl
         try
         {
             Services.ApplyOptions();
+            // Read once per turn, not once per round: the files are the same for the whole turn, and re-reading them
+            // on every request would be three file reads for text that cannot have changed underneath us. A null root
+            // yields "", so a solution that is not open costs the request nothing.
+            var repoInstructions = RepoInstructions.Load(await SolutionRootAsync());
             // Copilot Chat treats the round budget as a setting and asks before spending more rather than dying
             // at a fixed count. Clamp after ApplyOptions so a mid-session change still takes effect this turn.
             var limit = ChatStateLimits.ClampToolRounds(Services.Settings.MaxToolRounds);
-            var stopped = false; ChatMessage? last = null; var finish = ""; var builds = 0;
-            var unresolvedBuildFailure = false;
-            var buildRepairReminders = 0;
+            var stopped = false; ChatMessage? last = null; var finish = "";
+            // What automatic verification last reported, and what the model is told when it answers with prose
+            // instead of fixing it. One flag for both checks: from the model's side "the last verification
+            // failed" is one state, and the reminder is only the wording that goes with whichever check it was.
+            var unresolvedVerification = false;
+            var repairReminder = "";
+            var repairReminders = 0;
+            var contextNoted = false;
             for (var round = 1; ; round++)
             {
                 var assistant = new ChatMessage { Role = "assistant" };
                 _history.Add(assistant); last = assistant;
                 finish = "";
+                // Summarized before it is shortened, and only once the request has actually outgrown its budget:
+                // under the budget there is nothing to save, and a summary would be a call spent to make the
+                // request no smaller. What this recovers is the thread — the whole reason phase 1's shortening is
+                // a loss at all — and what it cannot reach, Trim still shortens below.
+                var prompt = _history.Take(_history.Count - 1).ToList();
+                if (ContextBudget.TotalChars(prompt) > ChatStateLimits.MaxPromptChars)
+                    prompt = await SummarizeAsync(prompt, model, token).ConfigureAwait(true);
+                // The budget is spent before sanitizing, because what it measures is the transcript that will
+                // actually be sent. Nothing is dropped to fit: an old tool result loses its body and keeps the
+                // call it answers, since a result that answers no call is refused by the server. Note the
+                // shortening once a turn, not once a round - the same old results qualify from the round the
+                // budget is first over, and a row every round would bury the transcript.
+                var trimmed = ContextBudget.Trim(prompt, ChatStateLimits.MaxPromptChars, ChatStateLimits.KeepRecentToolRounds, out var shortened);
                 // Sanitizing is what keeps the request valid: every tool result must answer a call the assistant
                 // announced and every announced call must be answered, or an OpenAI-compatible server rejects
                 // the whole transcript. A cancelled tool batch or a history loaded from an older build can
                 // otherwise leave the two out of step.
-                var history = ChatStateLimits.Sanitize(_history.Take(_history.Count - 1));
+                var history = ChatStateLimits.Sanitize(trimmed);
+                if (shortened > 0 && !contextNoted)
+                {
+                    contextNoted = true;
+                    AddToolNote("", "Context · " + shortened + " older tool result" + (shortened == 1 ? "" : "s") + " shortened to fit the request", true);
+                }
                 // Built here, not stored: the system prompt and the attachment block are added at request time and the
                 // transcript keeps only what the user typed and what the model answered.
                 // With the tools switched off an attached file is only a path, and the model has no way to open it, so
@@ -312,7 +345,14 @@ public partial class ChatControl : UserControl
                 var context = Services.Settings.EnableToolCalling
                     ? _activeTurn?.Context
                     : AgentPrompt.InlineFiles(_activeTurn?.Context, ReadAttachedText);
-                var request = AgentPrompt.Build(history, context, _mode, Services.Settings.EnableToolCalling, Services.Settings.EnableFileEditing, Services.Settings.EnableTerminalTools);
+                // The error list is read every round rather than once a turn, because its whole value is being
+                // current and a round that just edited a file is exactly when it has changed. Read, not built —
+                // it is a walk over items already in the window — and the block says so, so an entry that predates
+                // this turn is not read as the result of it. It joins the system prompt and never _history: that is
+                // rebuilt per request, so this needs no sanitizing, costs the stored conversation nothing, and
+                // goes away by itself once the list is clean.
+                var errors = BuildDiagnostics.ToStandingNote(await SolutionBuild.ReadErrorListAsync().ConfigureAwait(true));
+                var request = AgentPrompt.Build(history, context, _mode, Services.Settings.EnableToolCalling, Services.Settings.EnableFileEditing, Services.Settings.EnableTerminalTools, repoInstructions, errors);
 
                 var view = AddAssistantBubble(round == 1 ? "Thinking" : "Reading the tool results");
                 _streamed = 0; _phase = round == 1 ? "Thinking" : "Reading the tool results";
@@ -345,9 +385,9 @@ public partial class ChatControl : UserControl
                     // A prose answer does not resolve a failed verification build. Give the model one explicit
                     // correction round instead of accepting a false-success answer, but keep the retry bounded so
                     // a model that refuses to edit cannot spin forever.
-                    if (unresolvedBuildFailure && buildRepairReminders++ == 0)
+                    if (unresolvedVerification && repairReminders++ == 0)
                     {
-                        var reminder = new ChatMessage { Role = "user", Content = BuildDiagnostics.RepairReminder };
+                        var reminder = new ChatMessage { Role = "user", Content = repairReminder };
                         _history.Add(reminder);
                         _activeTurn?.Messages.Add(ChatStateLimits.CopyMessage(reminder));
                         SaveSession();
@@ -372,15 +412,20 @@ public partial class ChatControl : UserControl
                     AddToolNote(call.Name, result.Summary, result.Ok, null, null, EditTools.Revisions > revisions ? EditTools.Latest : null);
                 }
 
+                // Whether this round's build step ran and came back clean, which is the only state in which the
+                // assemblies on disk are the ones this round just wrote. Per round rather than per turn: a later
+                // round that only reads files must not run the tests again on the strength of an earlier build.
+                var buildVerified = false;
+
                 // The build check is what stops an edit that does not compile from being reported as a success: it
                 // runs once the round's edits are in, on the whole solution, and only when a file actually changed —
-                // a round that only read files has nothing to verify. Capped per turn, because each build costs the
-                // user real time and a model that keeps failing must not build forever; the round budget below is
-                // what finally ends the turn.
+                // a round that only read files has nothing to verify. It runs again on every later round that edits
+                // something, until the Error List comes back empty: a fixed number of attempts used to end the turn
+                // with the errors still listed, which is the failure this feature exists to prevent. The round
+                // budget below is what bounds it, and that asks the user before it grows.
                 if (Services.Settings.VerifyBuildAfterEdits && _mode == "agent" && Services.Settings.EnableFileEditing
-                    && EditTools.Revisions > revisionsAtRoundStart && builds < 3)
+                    && EditTools.Revisions > revisionsAtRoundStart)
                 {
-                    builds++;
                     _phase = "Building the solution";
                     var listed = await SolutionBuild.VerifyAsync(token).ConfigureAwait(true);
                     if (listed != null)   // null is "could not verify", which is not the same as "no errors"
@@ -392,14 +437,47 @@ public partial class ChatControl : UserControl
                         // assistant announced, and this one answers nothing, so ChatStateLimits.Sanitize would drop
                         // it before the model ever saw it. Persist it on the active turn as well: _history is rebuilt
                         // from turn messages after a reload/continuation, and losing this note loses the repair task.
-                        unresolvedBuildFailure = report.Errors > 0;
-                        if (unresolvedBuildFailure)
+                        buildVerified = report.Errors == 0;
+                        unresolvedVerification = !buildVerified;
+                        if (unresolvedVerification)
                         {
                             var buildNote = new ChatMessage { Role = "user", Content = BuildDiagnostics.ToModelNote(report) };
                             _history.Add(buildNote);
                             _activeTurn?.Messages.Add(ChatStateLimits.CopyMessage(buildNote));
-                            buildRepairReminders = 0;
+                            repairReminder = BuildDiagnostics.RepairReminder;
+                            repairReminders = 0;
                         }
+                    }
+                }
+
+                // The tests run on top of a build that passed, never instead of it: what is on disk is then the
+                // code in the editor, so a failure is a real one. Skipped when the build failed or could not be
+                // verified, because a test run against the previous round's binaries reports on code that has
+                // been replaced, and a green result from stale assemblies is worse than no result at all.
+                if (buildVerified && Services.Settings.VerifyTestsAfterEdits)
+                {
+                    _phase = "Running the tests";
+                    var (tests, problem) = await SolutionTests.RunAsync(token).ConfigureAwait(true);
+                    if (tests != null)
+                    {
+                        if (_activeTurn != null) _activeTurn.Tests = tests;
+                        AddToolNote("tests", tests.Summary, tests.Errors == 0, null, tests.Detail);
+                        if (tests.Errors > 0)
+                        {
+                            var testNote = new ChatMessage { Role = "user", Content = TestDiagnostics.ToModelNote(tests) };
+                            _history.Add(testNote);
+                            _activeTurn?.Messages.Add(ChatStateLimits.CopyMessage(testNote));
+                            unresolvedVerification = true;
+                            repairReminder = TestDiagnostics.RepairReminder;
+                            repairReminders = 0;
+                        }
+                    }
+                    else if (problem.Length > 0)
+                    {
+                        // Said out loud rather than passed over: a check that did not happen and a check that
+                        // found nothing draw the same silent transcript otherwise, and only one of them means
+                        // the code is fine.
+                        AddToolNote("tests", TestDiagnostics.ToUnverifiedLine(problem), false);
                     }
                 }
                 SaveSession();   // once per round, not per tool: each save re-serializes the whole document
@@ -441,6 +519,75 @@ public partial class ChatControl : UserControl
             Services.Log(detail);
         }
         finally { _ticker?.Stop(); _ticker = null; if (_live != null) FinishStatus(_live); _live = null; _generation.Dispose(); _generation = null; SetBusy(false); _activeTurn = null; Composer.Focus(); }
+    }
+
+    /// <summary>Replaces the oldest, already-covered part of an over-budget transcript with a briefing written by
+    /// the utility model, so a long turn keeps the thread instead of only losing what it cannot afford to send.
+    ///
+    /// Returns the transcript unchanged whenever there is nothing worth doing: too little history, nothing new
+    /// since the last summary, or a call that failed. That is the rule this whole method is built around — a
+    /// summary is an improvement to the request and never something the turn depends on, so every failure here
+    /// has to leave the request exactly what the budget alone would have made it.
+    ///
+    /// The summary is written once per span and reused: what the previous one stands for is left standing, and
+    /// only the material that has piled up since is folded in, which is what keeps this from costing a call on
+    /// every round.</summary>
+    private async Task<List<ChatMessage>> SummarizeAsync(List<ChatMessage> messages, ModelInfo model, CancellationToken token)
+    {
+        var summaries = _activeTurn?.Summaries;
+        var covered = summaries != null && summaries.Count > 0 ? summaries[summaries.Count - 1].Messages : 0;
+        // A stored transcript is head-sliced on the way to disk, so a count from an earlier turn can name
+        // messages that are no longer there. Starting over costs one call; trusting it would silently stop
+        // summarizing for the rest of the conversation.
+        if (covered < 0 || covered > messages.Count) covered = 0;
+        var previous = covered > 0 ? summaries![summaries.Count - 1].Detail : null;
+
+        if (!ContextSummary.TryBuildRequest(messages, covered, previous, ChatStateLimits.KeepRecentToolRounds, out var request, out var through))
+            return covered > 0 ? ContextSummary.Merge(messages, covered, previous!) : messages;
+
+        try
+        {
+            _phase = "Summarizing the conversation";
+            var utility = UtilityModel(model);
+            var answer = await Services.CompleteInternalAsync(utility, request, ContextSummary.UtilitySettings(Services.Settings), token).ConfigureAwait(true);
+            var text = ChatStateLimits.Clip(answer.Content.Trim(), ContextSummary.MaxSummaryChars);
+            // A reasoning model can spend the whole small budget thinking and answer with nothing. Replacing the
+            // messages with an empty briefing would quietly delete the conversation, so it is taken as the failure
+            // it is and said out loud.
+            if (text.Length == 0)
+            {
+                AddToolNote("", "Context · the utility model (" + utility.Id + ") returned no summary, so the older messages were left in place", false);
+                return covered > 0 ? ContextSummary.Merge(messages, covered, previous!) : messages;
+            }
+
+            var report = ContextSummary.Report(through, text);
+            _activeTurn?.Summaries.Add(report);
+            AddToolNote("", report.Summary, true, null, report.Detail);
+            Services.Log("Context summarized with " + utility.Id + ": " + through + " messages, " + text.Length + " characters");
+            SaveSession();
+            return ContextSummary.Merge(messages, through, text);
+        }
+        catch (OperationCanceledException) { throw; }   // the user stopped; that is not a summarization failure
+        catch (Exception ex)
+        {
+            AddToolNote("", "Context · could not summarize the older messages (" + ex.Message + "), so the request was sent without a briefing", false);
+            Services.Log("Context summary failed: " + ex);
+            return covered > 0 ? ContextSummary.Merge(messages, covered, previous!) : messages;
+        }
+    }
+
+    /// <summary>The model the extension thinks with: the configured utility model, or the one the chat is already
+    /// talking to. A configured model that no longer resolves falls back rather than failing — the setting names
+    /// a model that may since have been removed from the server, and a summary is never worth failing a turn
+    /// over. The id alone is accepted as well as the full key, because the key carries a server GUID and nobody
+    /// should have to type one.</summary>
+    private ModelInfo UtilityModel(ModelInfo fallback)
+    {
+        var key = (Services.Settings.UtilityModelKey ?? "").Trim();
+        if (key.Length == 0) return fallback;
+        return Services.Catalog.Match(key)
+            ?? Services.Models.FirstOrDefault(m => string.Equals(m.Id, key, StringComparison.OrdinalIgnoreCase))
+            ?? fallback;
     }
 
     /// <summary>Copilot Chat's "Continue to iterate?" checkpoint, rendered in the transcript rather than a modal

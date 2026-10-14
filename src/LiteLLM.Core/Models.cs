@@ -46,6 +46,12 @@ public sealed class UserSettings
     /// reports success and the breakage surfaces at the next manual build. Agent mode only, and it uses Visual
     /// Studio's own build so a solution of any project type is built the way its project system expects.</summary>
     public bool VerifyBuildAfterEdits { get; set; } = true;
+    /// <summary>Run the solution's tests after the agent edits files and a build has passed, handing any
+    /// failures back to it the same way build errors are. Off by default: a test run costs far more time than a
+    /// build, so it is opted into per solution. It is a check on top of the build rather than instead of it —
+    /// tests are only run against the assemblies that build just produced, since a test run against an older
+    /// binary reports on code that is not in the editor any more.</summary>
+    public bool VerifyTestsAfterEdits { get; set; }
     /// <summary>Allow the agent to run PowerShell and CMD commands from the open solution.</summary>
     public bool EnableTerminalTools { get; set; } = true;
     /// <summary>Ask before every command. Enabled by default because commands can affect resources outside files.</summary>
@@ -54,6 +60,11 @@ public sealed class UserSettings
     public int CommandTimeoutSeconds { get; set; } = 120;
     /// <summary>Tool-calling rounds allowed before the chat asks whether to continue.</summary>
     public int MaxToolRounds { get; set; } = ChatStateLimits.DefaultToolRounds;
+    /// <summary>Model the extension uses for its own calls — summarizing a long conversation's older messages
+    /// so they can be dropped without losing the thread. A model id, or the full key from the model list when
+    /// two servers offer the same id. Empty uses the model the chat is already talking to, which is what makes
+    /// this work with no configuration at all.</summary>
+    public string UtilityModelKey { get; set; } = "";
     /// <summary>Whether the file open in the editor rides along with every message, the way Visual Studio Code keeps
     /// the active editor in the chat's context. On by default; the composer's Auto button turns it off.</summary>
     public bool AutoAttachActiveDocument { get; set; } = true;

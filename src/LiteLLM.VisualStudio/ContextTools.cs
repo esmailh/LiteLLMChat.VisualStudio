@@ -56,7 +56,10 @@ internal static class ContextTools
     {
         await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
         var dte = (DTE?)await package.GetServiceAsync(typeof(DTE));
-        var args = Parse(arguments);
+        // Answered here rather than by each tool, and answered with the reason: every tool below reads its inputs
+        // out of this object, and an empty one turns a call the model got wrong into "No such file" against a
+        // path it never sent. Reported before the dispatch, so nothing downstream needs to check for it.
+        if (!ToolArguments.TryParse(arguments, out var args, out var argumentsError)) return Fail(argumentsError, "invalid arguments");
         var active = Try(() => dte?.ActiveDocument?.FullName) ?? "";
         var root = SolutionRoot(dte);
 
@@ -124,10 +127,16 @@ internal static class ContextTools
 
     private static ToolResult ReadFile(JObject args, string? root)
     {
-        var full = Resolve(root, Text(args, "path"));
+        if (!ToolArguments.TryText(args, "path", out var path, out var error)) return Fail(error, "read · invalid arguments");
+        // Named, because the schema calls it required and the model that omits it would otherwise be told the
+        // solution directory does not exist — a sentence about a path it never asked for.
+        if (path.Length == 0) return Fail("read_file needs a path. Call it again with {\"path\": \"src/Foo.cs\"}.", "read · no path");
+        var full = Resolve(root, path);
         if (!File.Exists(full)) return Fail("No such file: " + full, "read · not found");
-        var start = Math.Max(1, Number(args, "start_line", 1));
-        var count = Math.Min(MaxLines, Math.Max(1, Number(args, "line_count", DefaultLines)));
+        if (!ToolArguments.TryNumber(args, "start_line", 1, out var start, out error)) return Fail(error, "read · invalid arguments");
+        if (!ToolArguments.TryNumber(args, "line_count", DefaultLines, out var count, out error)) return Fail(error, "read · invalid arguments");
+        start = Math.Max(1, start);
+        count = Math.Min(MaxLines, Math.Max(1, count));
         var buffer = File.ReadLines(full).Skip(start - 1).Take(count + 1).ToList();
         if (buffer.Count == 0) return Fail("The file has fewer than " + start + " lines.", "read · past end of file");
         var more = buffer.Count > count;
@@ -143,9 +152,10 @@ internal static class ContextTools
 
     private static ToolResult ListFiles(JObject args, string? root, string active)
     {
-        var directory = DirectoryFor(args, root, active);
+        if (!ToolArguments.TryText(args, "path", out var path, out var error)) return Fail(error, "list · invalid arguments");
+        if (!ToolArguments.TryText(args, "pattern", out var pattern, out error)) return Fail(error, "list · invalid arguments");
+        var directory = SearchDirectory(root, active, path);
         if (!Directory.Exists(directory)) return Fail("No such directory: " + directory, "list · not found");
-        var pattern = Text(args, "pattern");
         if (pattern.Length == 0) pattern = "*";
         var files = Directory.EnumerateFiles(directory, pattern, SearchOption.AllDirectories)
             .Where(p => !IsNoise(p))
@@ -161,9 +171,10 @@ internal static class ContextTools
 
     private static ToolResult SearchFiles(JObject args, string? root, string active)
     {
-        var query = Text(args, "query");
+        if (!ToolArguments.TryText(args, "query", out var query, out var error)) return Fail(error, "search · invalid arguments");
         if (query.Length == 0) return Fail("search_files needs a query.", "search · no query");
-        var directory = DirectoryFor(args, root, active);
+        if (!ToolArguments.TryText(args, "path", out var path, out error)) return Fail(error, "search · invalid arguments");
+        var directory = SearchDirectory(root, active, path);
         if (!Directory.Exists(directory)) return Fail("No such directory: " + directory, "search · not found");
         var hits = new List<string>();
         var files = 0;
@@ -194,11 +205,12 @@ internal static class ContextTools
     {
         try
         {
-            var requested = Text(args, "path");
+            if (!ToolArguments.TryText(args, "path", out var requested, out var error)) return Fail(error, "open · invalid arguments");
             var full = requested.Length == 0 ? active : Resolve(root, requested);
             if (full.Length == 0) return Fail("No file to open.", "open · no path");
             if (!File.Exists(full)) return Fail("No such file: " + full, "open · not found");
-            var line = Math.Max(0, Number(args, "line", 0));
+            if (!ToolArguments.TryNumber(args, "line", 0, out var line, out error)) return Fail(error, "open · invalid arguments");
+            line = Math.Max(0, line);
             var relative = Relative(root, full);
             if (dte != null)
             {
@@ -213,9 +225,11 @@ internal static class ContextTools
         }
     }
 
-    private static string DirectoryFor(JObject args, string? root, string active)
+    /// <summary>Where a listing or a search looks when the call named no directory: the solution, then the open
+    /// document's folder, then the process's own. Any path the model did send has already been read, so that a
+    /// wrong-typed one is reported rather than treated as an absent one.</summary>
+    private static string SearchDirectory(string? root, string active, string path)
     {
-        var path = Text(args, "path");
         if (path.Length > 0) return Resolve(root, path);
         if (root != null) return root;
         return active.Length > 0 ? Path.GetDirectoryName(active)! : Environment.CurrentDirectory;
@@ -242,9 +256,6 @@ internal static class ContextTools
         path.IndexOf(Path.DirectorySeparatorChar + ".git" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) >= 0 ||
         path.IndexOf(Path.DirectorySeparatorChar + ".vs" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) >= 0;
 
-    private static JObject Parse(string arguments) { try { return string.IsNullOrWhiteSpace(arguments) ? new JObject() : JObject.Parse(arguments); } catch (Exception) { return new JObject(); } }
-    private static string Text(JObject args, string name) => (string?)args[name] ?? "";
-    private static int Number(JObject args, string name, int fallback) { var value = args[name]; if (value == null) return fallback; try { return value.Value<int>(); } catch (Exception) { return fallback; } }
     private static string Clip(string value, int max) => value.Length <= max ? value : value.Substring(0, max) + "\n… [truncated, " + value.Length + " characters total]";
     private static ToolResult Result(string content, string summary) => new ToolResult { Content = content, Summary = summary, Ok = true };
     private static ToolResult Fail(string content, string summary) => new ToolResult { Content = content, Summary = summary, Ok = false };

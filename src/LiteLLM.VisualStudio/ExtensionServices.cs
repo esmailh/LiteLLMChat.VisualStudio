@@ -52,7 +52,14 @@ internal sealed class ExtensionServices : IDisposable
         Settings.RequestTimeoutSeconds = o.RequestTimeoutSeconds; Settings.EnableStreaming = o.EnableStreaming; Settings.MaxTokens = o.MaxTokens; Settings.Temperature = o.Temperature; Settings.ShowReasoning = o.ShowReasoning; Settings.EnableToolCalling = o.EnableToolCalling; Settings.PermissionMode = o.PermissionMode; Settings.MaxToolRounds = o.MaxToolRounds; Settings.LoggingLevel = o.LoggingLevel;
         Settings.EnableFileEditing = o.EnableFileEditing; Settings.ConfirmEachEdit = o.ConfirmEachEdit; Settings.VerifyBuildAfterEdits = o.VerifyBuildAfterEdits;
         Settings.EnableTerminalTools = o.EnableTerminalTools; Settings.ConfirmEachCommand = o.ConfirmEachCommand; Settings.CommandTimeoutSeconds = o.CommandTimeoutSeconds;
+        // The tests check is offered even when the build check is off; it simply never runs, because it runs
+        // only against assemblies a passing build has just produced. Reading the value in either way is what
+        // keeps the dialog's state and the saved state the same thing.
+        Settings.VerifyTestsAfterEdits = o.VerifyTestsAfterEdits;
         Settings.ClaudeExecutable = o.ClaudeExecutable; Settings.ClaudeAllowedTools = o.ClaudeAllowedTools; Settings.ClaudeDisallowedTools = o.ClaudeDisallowedTools;
+        // Miss this line and the value lives only in the options dialog: the next save writes the loaded
+        // settings back over it and the setting silently reverts.
+        Settings.UtilityModelKey = o.UtilityModelKey;
     }
     internal void Save() { ApplyOptions(); _store.Save(Settings); }
     internal void SaveSessions() { SessionStore.Save(Sessions); SessionsChanged?.Invoke(this, EventArgs.Empty); }
@@ -99,6 +106,14 @@ internal sealed class ExtensionServices : IDisposable
         return _client.StreamAsync(server, model.Id, messages, Settings, Tools, update, token);
     }
     internal async Task<ChatMessage> CompleteAsync(ModelInfo model, IReadOnlyList<ChatMessage> messages, CancellationToken token) => await _client.CompleteAsync(Settings.Servers.First(s => s.Id == model.ServerId), model.Id, messages, Settings, Tools, token);
+
+    /// <summary>A call the extension makes on its own behalf rather than one the user asked for: the context
+    /// summary. It carries its own settings, because a summary must not be given the session's token budget, and
+    /// it is given no tools at all — there is nothing for it to look up, and offering them invites it to try.
+    /// It also leaves the recorded exchange alone, so the copy-request command keeps naming the round the user
+    /// is looking at.</summary>
+    internal Task<ChatMessage> CompleteInternalAsync(ModelInfo model, IReadOnlyList<ChatMessage> messages, UserSettings settings, CancellationToken token) =>
+        _client.CompleteAsync(Settings.Servers.First(s => s.Id == model.ServerId), model.Id, messages, settings, null, token, false);
     internal async Task<string> GetSelectionAsync()
     {
         await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();

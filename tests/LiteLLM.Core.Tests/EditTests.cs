@@ -157,6 +157,59 @@ public sealed class EditTests
     }
 
     [Fact]
+    public void AgentPrompt_AddsTheProjectsInstructionsAsTheirOwnLastSection()
+    {
+        var history = new List<ChatMessage> { new ChatMessage { Role = "user", Content = "why does the build fail" } };
+        var built = AgentPrompt.Build(history, null, "agent", true, true, false, "From AGENTS.md:\nUse MSBuild, not dotnet build.");
+
+        Assert.Equal("system", built[0].Role);
+        Assert.Contains("Repository instructions", built[0].Content, StringComparison.Ordinal);
+        Assert.Contains("Use MSBuild, not dotnet build.", built[0].Content, StringComparison.Ordinal);
+        // Appended after the extension's own rules rather than woven into them, so a project's file cannot be read
+        // as though it were the part that decides which tools exist.
+        Assert.True(built[0].Content.IndexOf("Repository instructions", StringComparison.Ordinal)
+            > built[0].Content.IndexOf("Editing files", StringComparison.Ordinal));
+        Assert.Equal("why does the build fail", built[1].Content);
+    }
+
+    [Fact]
+    public void AgentPrompt_LeavesTheSystemMessageAloneWhenTheProjectHasNone()
+    {
+        var history = new List<ChatMessage> { new ChatMessage { Role = "user", Content = "hello" } };
+        var built = AgentPrompt.Build(history, null, "agent", true, true, false, "");
+
+        Assert.Equal(AgentPrompt.Instructions("agent", true, true, false), built[0].Content);
+        Assert.DoesNotContain("Repository instructions", built[0].Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AgentPrompt_AddsTheCurrentErrorsAfterEverythingElse()
+    {
+        var history = new List<ChatMessage> { new ChatMessage { Role = "user", Content = "why does the build fail" } };
+        var errors = BuildDiagnostics.ToStandingNote("error: CS0246: The type or namespace name 'Bar' could not be found — C:\\s\\Baz.cs:3");
+        var built = AgentPrompt.Build(history, null, "agent", true, true, false, "From AGENTS.md:\nUse MSBuild.", errors);
+
+        Assert.Contains("Current errors in the solution", built[0].Content, StringComparison.Ordinal);
+        Assert.Contains("CS0246", built[0].Content, StringComparison.Ordinal);
+        // Last section of the system message, and the transcript is still only what the user typed: the block is
+        // current state, so it lives in the request and not in the conversation.
+        Assert.True(built[0].Content.IndexOf("Current errors in the solution", StringComparison.Ordinal)
+            > built[0].Content.IndexOf("Repository instructions", StringComparison.Ordinal));
+        Assert.Equal(2, built.Count);
+        Assert.Equal("why does the build fail", built[1].Content);
+    }
+
+    [Fact]
+    public void AgentPrompt_LeavesTheSystemMessageAloneForACleanSolution()
+    {
+        var history = new List<ChatMessage> { new ChatMessage { Role = "user", Content = "hello" } };
+        var built = AgentPrompt.Build(history, null, "agent", true, true, false, "", "");
+
+        Assert.Equal(AgentPrompt.Instructions("agent", true, true, false), built[0].Content);
+        Assert.DoesNotContain("Current errors", built[0].Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AgentPrompt_OnlyPromisesEditingToolsWhenTheyAreActuallyOffered()
     {
         Assert.Contains("apply_patch", AgentPrompt.Instructions(true, true));

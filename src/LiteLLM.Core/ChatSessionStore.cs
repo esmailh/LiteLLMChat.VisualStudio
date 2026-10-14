@@ -119,6 +119,27 @@ public sealed class ChatSessionStore
                     turn.Build.Detail = ChatStateLimits.Clip(turn.Build.Detail ?? "", BuildDiagnostics.MaxDetailChars);
                     turn.Build.Summary = ChatStateLimits.OneLine(turn.Build.Summary, 200);
                 }
+                // A test report arrives from a runner's console output, so it is bounded exactly like the build
+                // report it is shaped as — including its failure text, which is a stack trace and can be long.
+                if (turn.Tests != null)
+                {
+                    turn.Tests.Detail = ChatStateLimits.Clip(turn.Tests.Detail ?? "", TestDiagnostics.MaxDetailChars);
+                    turn.Tests.Summary = ChatStateLimits.OneLine(turn.Tests.Summary, 200);
+                }
+                // A summary is model output, so it arrives without a size like a build log does, and it is
+                // bounded the same way. The list is capped as well: a turn that summarized more often than this
+                // stopped being a conversation and became a loop.
+                turn.Summaries ??= new List<ContextSummaryReport>();
+                turn.Summaries = turn.Summaries
+                    .Where(s => s != null)
+                    .Take(ContextSummary.MaxPerTurn)
+                    .Select(s => new ContextSummaryReport
+                    {
+                        Messages = Math.Max(0, s.Messages),
+                        Summary = ChatStateLimits.OneLine(s.Summary, 200),
+                        Detail = ChatStateLimits.Clip(s.Detail ?? "", ContextSummary.MaxSummaryChars)
+                    })
+                    .ToList();
                 if (turn.Status == ChatTurnStatus.Pending || turn.Status == ChatTurnStatus.Streaming)
                 {
                     turn.Status = ChatTurnStatus.Cancelled;

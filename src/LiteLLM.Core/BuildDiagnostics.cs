@@ -77,6 +77,51 @@ public static class BuildDiagnostics
 
     private static string Count(int value, string noun) => value + " " + noun + (value == 1 ? "" : "s");
 
+    /// <summary>Ceiling on the standing note's detail. The Error List covers the whole solution and most of
+    /// what is in it is older than the conversation, so the model is given the count and the beginning of the
+    /// list rather than all 12 000 characters of it on every round of every turn.</summary>
+    public const int MaxStandingLines = 20;
+    public const int MaxStandingChars = 2000;
+
+    /// <summary>The Error List as it stands, for the system prompt — or "" when it holds nothing, which costs
+    /// the request exactly nothing. Deliberately not <see cref="ToModelNote"/>: that one answers a build this
+    /// turn ran and says so, and nothing was built here. Letting the model believe otherwise would have it read
+    /// an entry from before its work as the result of it. It goes in the system prompt and not in the history
+    /// because the system prompt is rebuilt per request: the block is current by construction, needs no
+    /// sanitizing, and disappears on its own once the list is clean.</summary>
+    public static string ToStandingNote(string? errorListText)
+    {
+        var raw = (errorListText ?? "").Trim();
+        var report = Summarize(raw);   // the counts only, and over the whole list rather than over what is shown
+        if (report.Errors == 0 && report.Warnings == 0) return "";
+
+        // One line at a time, and the count is taken from what actually went in: joining the first twenty and then
+        // clipping the result lets the note promise twenty lines and deliver nine, and a list the model reads as
+        // smaller than it is has stopped being told the truth about the solution's state. The first line goes in
+        // whatever its length, because an entry can be enormous — a template error names every type it tried — and
+        // a list whose opening entry is unreadable still has to say something about it.
+        var lines = raw.Split('\n');
+        var detail = new StringBuilder();
+        var kept = 0;
+        for (var i = 0; i < lines.Length && i < MaxStandingLines; i++)
+        {
+            if (i > 0 && detail.Length + 1 + lines[i].Length > MaxStandingChars) break;
+            if (i > 0) detail.Append('\n');
+            detail.Append(i == 0 ? ChatStateLimits.Clip(lines[i], MaxStandingChars) : lines[i]);
+            kept++;
+        }
+
+        var text = new StringBuilder("The solution's Error List currently holds ");
+        if (report.Errors > 0) text.Append(Count(report.Errors, "error"));
+        if (report.Errors > 0 && report.Warnings > 0) text.Append(" and ");
+        if (report.Warnings > 0) text.Append(Count(report.Warnings, "warning"));
+        text.Append(". It was read, not built for this request, so part of it may predate the work you are doing.");
+        if (kept < lines.Length) text.Append(" Showing the first ").Append(kept).Append(" of ").Append(lines.Length).Append(" lines.");
+        text.Append("\n\n").Append(detail);
+        text.Append("\n\nDo not set out to clear this list. Fix what your own change caused; if an entry is not caused by your change, say so plainly and leave it alone rather than editing around it.");
+        return text.ToString();
+    }
+
     /// <summary>What goes back to the model when the build found errors. It is injected into the history
     /// as a user message rather than a tool result, because a tool result that answers no announced call
     /// is dropped by <see cref="ChatStateLimits.Sanitize"/> — and this note has to survive to the next

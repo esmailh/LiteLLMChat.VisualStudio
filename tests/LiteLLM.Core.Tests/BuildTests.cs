@@ -61,6 +61,78 @@ public sealed class BuildTests
         Assert.Contains("verification", BuildDiagnostics.RepairReminder, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact] public void BuildDiagnostics_StandingNoteCarriesTheCountsTheBeginningAndWhatIsNotTheModelsFault()
+    {
+        var note = BuildDiagnostics.ToStandingNote(Sample);
+
+        Assert.Contains("2 errors", note, StringComparison.Ordinal);
+        Assert.Contains("1 warning", note, StringComparison.Ordinal);
+        Assert.Contains("Baz.cs", note, StringComparison.Ordinal);
+        // It has to say it was read rather than built: this block goes out on every round, including rounds where
+        // nothing was built, and an entry from last week must not read as the result of what the model just changed.
+        Assert.Contains("not built for this request", note, StringComparison.Ordinal);
+        Assert.Contains("if an entry is not caused by your change, say so plainly and leave it alone", note, StringComparison.Ordinal);
+        // The post-edit note's opening would be a lie here, so the two notes must not be the same text.
+        Assert.DoesNotContain("built for you after your edits", note, StringComparison.Ordinal);
+    }
+
+    [Fact] public void BuildDiagnostics_StandingNoteSaysNothingForACleanSolution()
+    {
+        // A solution that has never been built lists nothing, and that must cost the system prompt nothing at all
+        // rather than announcing an empty list on every round of every turn.
+        Assert.Equal("", BuildDiagnostics.ToStandingNote(""));
+        Assert.Equal("", BuildDiagnostics.ToStandingNote(null));
+        Assert.Equal("", BuildDiagnostics.ToStandingNote("message: this error was already fixed"));
+    }
+
+    [Fact] public void BuildDiagnostics_StandingNoteShowsTheBeginningOfALongListAndSaysHowMuchIsMissing()
+    {
+        var entries = new List<string>();
+        for (var i = 1; i <= 60; i++) entries.Add("error: CS000" + i + ": failure " + i + " — C:\\sol\\f" + i + ".cs:1");
+        var note = BuildDiagnostics.ToStandingNote(string.Join("\n", entries));
+
+        Assert.Contains("60 errors", note, StringComparison.Ordinal);
+        Assert.Contains("Showing the first 20 of 60 lines", note, StringComparison.Ordinal);
+        Assert.Contains("failure 20", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("failure 21", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("failure 60", note, StringComparison.Ordinal);
+    }
+
+    [Fact] public void BuildDiagnostics_StandingNoteNeverClaimsMoreLinesThanItShows()
+    {
+        // Found by running the note over a real-shaped list: the first version said "showing the first 20 lines"
+        // and then cut the detail at the character cap after nine. A count the model cannot see is worse than no
+        // count, because it reads the list as smaller than it is and stops looking. Long lines, so the character
+        // cap is the one that binds here and the line count is not.
+        var entries = new List<string>();
+        for (var i = 1; i <= 40; i++)
+            entries.Add("error: CS0246: The type or namespace name 'LiteLLM' could not be found (are you missing a using directive or an assembly reference?) — C:\\sol\\ChatControl.xaml.cs:" + (100 + i));
+        var note = BuildDiagnostics.ToStandingNote(string.Join("\n", entries));
+
+        const string marker = "Showing the first ";
+        var at = note.IndexOf(marker, StringComparison.Ordinal);
+        Assert.True(at >= 0, "the note did not say how much of the list it was showing");
+        var claimed = int.Parse(note.Substring(at + marker.Length).Split(' ')[0]);
+
+        var shown = 0;
+        foreach (var line in note.Split('\n')) if (line.StartsWith("error:", StringComparison.Ordinal)) shown++;
+        Assert.Equal(claimed, shown);
+        Assert.True(claimed < BuildDiagnostics.MaxStandingLines, "this case was meant to be bounded by characters, not by lines");
+        // Bounded by whole lines, so nothing was cut in half and there is no truncation marker to explain.
+        Assert.DoesNotContain(ChatStateLimits.TruncationMarker, note, StringComparison.Ordinal);
+    }
+
+    [Fact] public void BuildDiagnostics_StandingNoteBoundsASingleEnormousEntry()
+    {
+        // One entry can be arbitrarily long — a template error names every type it tried — so the line limit alone
+        // is not a bound. The list has to stay bounded whatever shape it arrives in.
+        var note = BuildDiagnostics.ToStandingNote("error: " + new string('x', 9000));
+
+        Assert.Contains(ChatStateLimits.TruncationMarker, note, StringComparison.Ordinal);
+        var kept = note.Split('x').Length - 1;
+        Assert.True(kept <= BuildDiagnostics.MaxStandingChars, "the note carried " + kept + " characters of the entry");
+    }
+
     [Fact] public void Settings_VerifyBuildAfterEditsDefaultsOnAndSurvivesAnOlderFile()
     {
         Assert.True(new UserSettings().VerifyBuildAfterEdits);

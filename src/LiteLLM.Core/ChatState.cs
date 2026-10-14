@@ -36,6 +36,30 @@ public sealed class ChatTurnState
     /// messages rather than as one of them: the note the model is sent is a user-role message, and storing
     /// it as a message would render it back as something the user typed.</summary>
     public BuildReport? Build { get; set; }
+    /// <summary>The last automatic post-edit test run for this turn, or null when none ran. Beside the build
+    /// report rather than replacing it: the build says whether the change compiles and the tests say whether it
+    /// still does what it did, and a turn that lost either one would lose the reason it was asked to keep
+    /// going.</summary>
+    public BuildReport? Tests { get; set; }
+    /// <summary>Every time this turn's older messages were folded into a summary, in the order it happened.
+    /// A list rather than the latest one, because a long turn can summarize more than once and a reloaded
+    /// conversation has to draw back the same rows the live one drew.</summary>
+    public List<ContextSummaryReport> Summaries { get; set; } = new List<ContextSummaryReport>();
+}
+
+/// <summary>What one summarization of the older part of a transcript did. Shaped like <see cref="BuildReport"/>
+/// on purpose: the row and the tooltip are drawn from the same two fields either way, and both are written by
+/// the extension about something it did on its own.</summary>
+public sealed class ContextSummaryReport
+{
+    /// <summary>How many messages of the transcript's beginning the summary stands for. Persisted, because it
+    /// is what tells a later round how much of the conversation is already inside the summary and how much new
+    /// material would be worth asking for another one.</summary>
+    public int Messages { get; set; }
+    /// <summary>The one-line label the chat row shows.</summary>
+    public string Summary { get; set; } = "";
+    /// <summary>The summary itself, which is what the model was given in place of those messages.</summary>
+    public string Detail { get; set; } = "";
 }
 
 public sealed class ChatSessionState
@@ -81,6 +105,15 @@ public static class ChatStateLimits
     public const int MaxMessageChars = 60000;
     public const int MaxToolResultChars = 12000;
     public const int MaxContextPreviewChars = 4000;
+
+    /// <summary>Characters one request's transcript may carry, the system prompt and the attachments aside.
+    /// Long turns are not shortened by dropping messages — see <see cref="ContextBudget"/> for what gives way
+    /// instead — so this bounds the request without ever making it invalid.</summary>
+    public const int MaxPromptChars = 200000;
+
+    /// <summary>Rounds at the end of a transcript whose tool results are never shortened, whatever the budget
+    /// says: those are the ones the model is working on right now.</summary>
+    public const int KeepRecentToolRounds = 2;
 
     /// <summary>Tool-calling rounds allowed before the user is asked whether to keep going.</summary>
     public const int DefaultToolRounds = 25;

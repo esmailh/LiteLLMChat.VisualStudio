@@ -42,16 +42,22 @@ public sealed class LiteLlmClient : IDisposable
         }
     }
 
-    public async Task<ChatMessage> CompleteAsync(ServerConfiguration server, string model, IReadOnlyList<ChatMessage> messages, UserSettings settings, IReadOnlyList<ToolDefinition>? tools, CancellationToken cancellationToken)
+    /// <summary>One complete (non-streamed) round trip. <paramref name="record"/> is false for a call the
+    /// extension makes on its own behalf — a context summary — so that a background call does not overwrite the
+    /// request and response JSON the user has open on the row they are looking at. The exchange is still built
+    /// and still travels on any exception, so a failure is never reported without the payload that caused it;
+    /// it is only the slot the copy commands read that is left alone.</summary>
+    public async Task<ChatMessage> CompleteAsync(ServerConfiguration server, string model, IReadOnlyList<ChatMessage> messages, UserSettings settings, IReadOnlyList<ToolDefinition>? tools, CancellationToken cancellationToken, bool record = true)
     {
         var payload = CreatePayload(model, messages, settings, tools, false);
         using (var response = await SendWithRetryAsync(() => CreateRequest(server, HttpMethod.Post, "v1/chat/completions", payload), settings.RequestTimeoutSeconds, cancellationToken).ConfigureAwait(false))
         {
             var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-            Record(server, "v1/chat/completions", Pretty(payload), response, body, false);
-            EnsureSuccess(response, body);
+            var exchange = new HttpExchange { Url = Url(server, "v1/chat/completions"), RequestBody = Pretty(payload), ResponseBody = body, Status = (int)response.StatusCode, Streamed = false };
+            if (record) LastExchange = exchange;
+            EnsureSuccess(response, body, exchange);
             try { return ResponseParser.ParseCompletion(body); }
-            catch (JsonException ex) { throw new LiteLlmException("The server returned an invalid chat response.", ex.Message, ex) { Exchange = LastExchange }; }
+            catch (JsonException ex) { throw new LiteLlmException("The server returned an invalid chat response.", ex.Message, ex) { Exchange = exchange }; }
         }
     }
 
@@ -183,10 +189,13 @@ public sealed class LiteLlmClient : IDisposable
         }
         return result;
     }
-    private void EnsureSuccess(HttpResponseMessage response, string body)
+    /// <summary>Fails the response the way every other call does. The exchange that caused it is passed in
+    /// rather than read off <see cref="LastExchange"/>, because a call made with <c>record: false</c> never put
+    /// its exchange there and the one it would find belongs to an earlier request.</summary>
+    private void EnsureSuccess(HttpResponseMessage response, string body, HttpExchange? exchange = null)
     {
         if (response.IsSuccessStatusCode) return;
-        throw new LiteLlmException(ErrorMapper.Explain(response.StatusCode, body), "HTTP " + (int)response.StatusCode + " " + response.ReasonPhrase + "\n" + body) { Exchange = LastExchange };
+        throw new LiteLlmException(ErrorMapper.Explain(response.StatusCode, body), "HTTP " + (int)response.StatusCode + " " + response.ReasonPhrase + "\n" + body) { Exchange = exchange ?? LastExchange };
     }
     /// <summary>A cancellation the caller asked for is a stop, not a failure — reporting it as one would paint a
     /// red error over a turn the user deliberately ended.</summary>

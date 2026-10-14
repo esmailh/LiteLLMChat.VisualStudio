@@ -27,9 +27,9 @@ public static class AgentPrompt
     /// that can read them. Shared across the attachments of one message, so ten files cannot add up to a novel.</summary>
     private const int MaxInlineFileChars = 8000;
 
-    public static List<ChatMessage> Build(IEnumerable<ChatMessage> history, IReadOnlyList<ChatContextItem>? attachments, string mode, bool toolCalling, bool fileEditing, bool terminalTools = false)
+    public static List<ChatMessage> Build(IEnumerable<ChatMessage> history, IReadOnlyList<ChatContextItem>? attachments, string mode, bool toolCalling, bool fileEditing, bool terminalTools = false, string? repoInstructions = null, string? solutionErrors = null)
     {
-        var messages = new List<ChatMessage> { new ChatMessage { Role = "system", Content = Instructions(mode, toolCalling, fileEditing, terminalTools) } };
+        var messages = new List<ChatMessage> { new ChatMessage { Role = "system", Content = Instructions(mode, toolCalling, fileEditing, terminalTools, repoInstructions, solutionErrors) } };
         messages.AddRange(history.Where(m => m != null).Select(ChatStateLimits.CopyMessage));
 
         var attached = (attachments ?? new List<ChatContextItem>()).Where(a => a != null && a.Label.Length > 0).ToList();
@@ -106,7 +106,13 @@ public static class AgentPrompt
 
     public static string Instructions(bool toolCalling, bool fileEditing) => Instructions("agent", toolCalling, fileEditing, false);
 
-    public static string Instructions(string mode, bool toolCalling, bool fileEditing, bool terminalTools = false)
+    public static string Instructions(string mode, bool toolCalling, bool fileEditing, bool terminalTools = false, string? repoInstructions = null, string? solutionErrors = null) =>
+        WithErrors(WithRepo(BaseInstructions(mode, toolCalling, fileEditing, terminalTools), repoInstructions), solutionErrors);
+
+    /// <summary>What the extension itself tells the model, before the project has its say. A project's own
+    /// instructions are added after this rather than woven into it, so that the promises below stay one readable
+    /// block and no markdown file a project happens to own can quietly rewrite which tools exist.</summary>
+    private static string BaseInstructions(string mode, bool toolCalling, bool fileEditing, bool terminalTools = false)
     {
         var text = new StringBuilder();
         text.Append(@"You are an AI assistant working inside Visual Studio at the user's side, in the solution they have open.
@@ -170,6 +176,17 @@ Verifying the build
   when it reports no errors you may say the change compiles.");
         return text.ToString();
     }
+
+    /// <summary>The project's instructions as the last section, when it has any. Empty means the request is exactly
+    /// what it was before this existed, which is what a project with no such file should cost.</summary>
+    private static string WithRepo(string instructions, string? repoInstructions) =>
+        string.IsNullOrEmpty(repoInstructions) ? instructions : instructions + "\n\nRepository instructions\n" + repoInstructions;
+
+    /// <summary>The Error List as it stands, last of all: it is the most perishable thing in the request, and at
+    /// the end it reads as the current state rather than as another rule to follow. Empty for a clean solution,
+    /// which leaves the system message byte-for-byte what it is on a solution that was never built.</summary>
+    private static string WithErrors(string instructions, string? solutionErrors) =>
+        string.IsNullOrEmpty(solutionErrors) ? instructions : instructions + "\n\nCurrent errors in the solution\n" + solutionErrors;
 
     private static string Escape(string value) => value.Replace("\"", "'").Replace("\r", " ").Replace("\n", " ");
 }
