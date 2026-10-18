@@ -29,8 +29,8 @@ Bring an OpenAI-compatible AI assistant — or your Claude Code CLI — into Vis
 ## Requirements
 
 - Visual Studio 2022 (17.x) or later, including Visual Studio 2026 (18.x).
-- Windows with the Visual Studio extension development components installed by Visual Studio.
-- .NET Framework 4.8 targeting support.
+- Windows 10 or 11 (x64).
+- .NET Framework 4.8, which is included with Windows and Visual Studio.
 - A reachable LiteLLM or OpenAI-compatible API exposing:
   - `GET /v1/models`
   - `POST /v1/chat/completions`

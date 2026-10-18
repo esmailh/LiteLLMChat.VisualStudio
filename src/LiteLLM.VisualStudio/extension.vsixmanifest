@@ -11,21 +11,21 @@
          cleanly. Bullet characters are avoided for the same reason: in a pane that collapses whitespace a list marker
          would run into the sentence before it. The schema caps this element at 1000 characters, so it is budgeted rather
          than free â€” the numbers are the feature list, and Detail belongs in the README the package ships. -->
-    <Description xml:space="preserve">Chat with any OpenAI-compatible LiteLLM gateway without leaving Visual Studio: multiple servers with per-model enable/disable, model discovery across them, streaming replies with reasoning display, markdown and fenced code blocks with Copy Code, and a local conversation history you can switch or delete.
+    <Description xml:space="preserve">Chat with an OpenAI-compatible LiteLLM gateway or the Claude Code CLI in Visual Studio. LiteLLM runs the extension's agent loop; Claude hands each turn to the CLI.
 
-Context attachments work as in VS Code: the file open in the editor rides along by itself, and the paperclip button or a typed # attaches a selection or files.
+Ask, Agent and Plan modes, streaming replies with reasoning, markdown and fenced code with Copy Code, clickable file and C# symbol links, and VS Code-style context: the active file follows the editor, and @, # and / attach files, MCP tools and server prompts.
 
-Tools read and edit the solution through the editor, so Ctrl+Z takes an edit back and reads and writes stay inside the solution root.
+Agent edits the solution with optional diff confirmation and Undo, verifies the build, and optionally runs the tests. Conversations, retry, cancellation and a per-chat ignore-earlier-turns switch are local; token usage comes from each server's report.
 
-Settings live in Tools &gt; Options &gt; LiteLLM and the Dashboard: servers and keys, timeout, streaming, temperature and token options, file editing with an optional confirm diff, and a tool-round budget. Keys are encrypted per Windows user with DPAPI.
+It is also an MCP client over stdio, Streamable HTTP and HTTP+SSE, with per-call approval, a tool browser and OAuth. Servers start only when enabled.
 
-The chat, the dashboard and the dialogs are drawn in Visual Studio's own theme brushes and repaint with the IDE on a theme change.</Description>
+Settings live in Tools &gt; Options &gt; LiteLLM and the Dashboard. API keys and MCP secrets are encrypted per Windows user with DPAPI. The UI follows the IDE theme.</Description>
     <!-- The mark the chat's header and its empty state draw, on the accent the shell pairs it with. Regenerate it with
          tools\make-icon.ps1 rather than editing the PNG: the geometry is in that script. The element sits here rather
          than beside DisplayName because the schema fixes this group's order: Identity, DisplayName, Description,
          MoreInfo, License, GettingStartedGuide, ReleaseNotes, Icon, PreviewImage, Tags. -->
     <Icon>Resources\Icon.png</Icon>
-    <Tags>AI,LiteLLM,Chat,OpenAI,LLM,GPT,Model,Markdown,Agent,Tools,Copilot</Tags>
+    <Tags>AI,LiteLLM,Chat,OpenAI,LLM,Markdown,Agent,Copilot,MCP,Claude</Tags>
   </Metadata>
   <Installation>
     <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[17.0,19.0)">
