@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@v2
+        uses: microsoft/setup-msbuild@v3
 
       # MSBuild takes one project per invocation, and the solution references a project that is
       # not part of this checkout. Restore and build each project on its own.
