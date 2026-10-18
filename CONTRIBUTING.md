@@ -45,6 +45,12 @@ $vstest = (Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio\*\*\Common
 
 `vstest.console.exe` does not accept `/nologo`. A change should leave the suite green.
 
+## Packaging
+
+`tools\build-vsix.ps1` builds the Release VSIX and copies it to the repository root. Run it from
+anywhere; it locates MSBuild itself. A plain Release `Build` does not create the container from the
+command line, because the VS SDK targets are evaluated before the SDK has assigned its output paths.
+
 ## Pull requests
 
 - Keep one concept per file, and match the surrounding style. Comments explain *why*, not *what*.
