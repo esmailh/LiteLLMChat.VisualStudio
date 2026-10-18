@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/esmailh/LiteLLMChat.VisualStudio/security/advisories/new
+    about: Report vulnerabilities privately; do not open a public issue.
+  - name: Questions and ideas
+    url: https://github.com/esmailh/LiteLLMChat.VisualStudio/discussions
+    about: Ask a question or discuss an idea with the maintainer and other users.

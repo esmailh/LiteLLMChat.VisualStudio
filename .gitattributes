@@ -1,0 +1,19 @@
+# Normalize text files so a clone on Windows and a clone on Linux produce the same content.
+* text=auto
+
+*.cs text diff=csharp
+*.xaml text
+*.csproj text
+*.props text
+*.targets text
+*.sln text eol=crlf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text
+*.json text
+
+*.png binary
+*.ico binary
+*.vsix binary
+*.snk binary
+*.pfx binary

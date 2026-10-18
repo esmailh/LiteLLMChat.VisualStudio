@@ -1,5 +1,8 @@
 # LiteLLM Chat for Visual Studio
 
+[![build](https://github.com/esmailh/LiteLLMChat.VisualStudio/actions/workflows/build.yml/badge.svg)](https://github.com/esmailh/LiteLLMChat.VisualStudio/actions/workflows/build.yml)
+[![CodeQL](https://github.com/esmailh/LiteLLMChat.VisualStudio/actions/workflows/codeql.yml/badge.svg)](https://github.com/esmailh/LiteLLMChat.VisualStudio/actions/workflows/codeql.yml)
+
 See [MARKETPLACE.md](MARKETPLACE.md) for the complete user-facing feature guide, setup instructions, privacy notes, and troubleshooting information.
 
 A native WPF VSIX for chatting with any OpenAI-compatible LiteLLM gateway without leaving Visual Studio. It supports multiple servers, model discovery, streaming, reasoning display, read and edit tools, VS Code–style context attachments, MCP servers, a Claude Code backend, diagnostics, DPAPI-protected API keys, and a local conversation history.
@@ -109,6 +112,10 @@ Diagnostics appear in **View > Output > LiteLLM**. The status bar reports discov
 ## Architecture note
 
 The chat behavior adapts public VS Code concepts—session/request/response state, incremental response parts, explicit context items, cancellation, retry, model selection, and bounded history—to the existing Visual Studio/WPF and LiteLLM architecture. It does not copy GitHub Copilot proprietary implementation or introduce a webview/React chat application. Advanced VS Code features such as remote sessions, virtualized editor-backed content parts, participant ecosystems, and provider-specific confirmation protocols remain platform/provider-specific.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build and test instructions. Report security issues privately as described in [SECURITY.md](SECURITY.md), never in a public issue.
 
 ## License
 

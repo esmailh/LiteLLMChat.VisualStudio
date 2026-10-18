@@ -7,3 +7,16 @@ TestResults/
 artifacts/
 *.vsix
 *.log
+
+# Local configuration and secrets
+.env
+.env.*
+*.pfx
+*.snk
+secrets.json
+.mcp.json
+.claude/settings.local.json
+
+# Build and diagnostic output
+*.binlog
+ActivityLog.xml

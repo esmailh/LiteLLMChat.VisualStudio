@@ -22,7 +22,7 @@ Today it scores badly on the first two:
   references a project that does not exist.
 - **A tool call with malformed arguments gets a wrong diagnosis.** `ContextTools.Parse`
   (`ContextTools.cs:245`) swallows invalid JSON into an empty `JObject`, so a missing brace
-  comes back as `No such file: F:\New folder (3) - Copy` and the model chases a phantom bug.
+  comes back as `No such file: <repo root>` and the model chases a phantom bug.
 - **The only automatic self-check is "the build is clean."**
 
 The outcome we want: a loop that keeps its head over a long session, knows the conventions of
@@ -184,7 +184,7 @@ tests. Manual: a long editing session in Visual Studio should keep working past 
 ## Phase 2 — A tool call with bad arguments must say so
 
 **Why.** A real bug, not a polish item. `ContextTools.Parse` (`ContextTools.cs:245`) returns an
-empty `JObject` for malformed JSON, so the model is told `No such file: F:\New folder (3) - Copy`
+empty `JObject` for malformed JSON, so the model is told `No such file: <repo root>`
 and goes looking for a file it never named. `Number` (`:247`) silently substitutes the default
 for a wrong type, so the model never learns it made a mistake.
 

@@ -1,0 +1,66 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      # MSBuild takes one project per invocation, and the solution references a project that is
+      # not part of this checkout. Restore and build each project on its own.
+      - name: Restore
+        shell: pwsh
+        run: |
+          $projects = @(
+            'src\LiteLLM.Core\LiteLLM.Core.csproj',
+            'src\LiteLLM.GitWrapper\LiteLLM.GitWrapper.csproj',
+            'src\LiteLLM.VisualStudio\LiteLLM.VisualStudio.csproj',
+            'tests\LiteLLM.Core.Tests\LiteLLM.Core.Tests.csproj'
+          )
+          foreach ($project in $projects) {
+            msbuild $project /t:Restore /p:Configuration=Debug /v:m /nologo
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $projects = @(
+            'src\LiteLLM.Core\LiteLLM.Core.csproj',
+            'src\LiteLLM.GitWrapper\LiteLLM.GitWrapper.csproj',
+            'src\LiteLLM.VisualStudio\LiteLLM.VisualStudio.csproj',
+            'tests\LiteLLM.Core.Tests\LiteLLM.Core.Tests.csproj'
+          )
+          foreach ($project in $projects) {
+            msbuild $project /t:Build /p:Configuration=Debug /v:m /nologo
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Test
+        shell: pwsh
+        run: |
+          $vstest = Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio\*\*\Common7\IDE\CommonExtensions\Microsoft\TestWindow\vstest.console.exe" |
+            Select-Object -First 1
+          if (-not $vstest) { throw 'vstest.console.exe was not found.' }
+          & $vstest.FullName 'tests\LiteLLM.Core.Tests\bin\Debug\net48\LiteLLM.Core.Tests.dll'
+          exit $LASTEXITCODE

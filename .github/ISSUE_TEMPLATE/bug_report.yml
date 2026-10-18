@@ -1,0 +1,79 @@
+name: Bug report
+description: Report a defect in LiteLLM Chat for Visual Studio.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include API keys, MCP tokens, or confidential source code. Report security issues
+        privately through the Security tab as described in SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Extension version
+      description: Shown in the extension's details or in Dashboard/About.
+      placeholder: 1.7.5
+    validations:
+      required: true
+  - type: input
+    id: visualstudio
+    attributes:
+      label: Visual Studio version and edition
+      placeholder: 2022 17.14.3 Enterprise, or 2026 Insiders
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - LiteLLM
+        - Claude Code
+        - Not applicable
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model and gateway
+      description: The model name and the kind of endpoint, without credentials.
+      placeholder: gpt-4.1 through a LiteLLM proxy
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The smallest sequence that shows the problem.
+      placeholder: |
+        1. Open the chat with Agent mode selected
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: Include the row or message the chat showed, and redact secrets.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: View > Output > LiteLLM, with paths, tokens and prompts redacted.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I am using the latest released version.
+          required: true
+        - label: I searched existing issues for the same problem.
+          required: true

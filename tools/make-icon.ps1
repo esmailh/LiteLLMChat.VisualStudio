@@ -4,7 +4,7 @@
 # builds the package, can be sure of. Four cubic curves whose control points sit near the centre give the concave
 # four-pointed sparkle: the tips are sharp and the sides bow inward toward the middle.
 #
-# Run from the project root (F:\New folder (3)) after changing a number here; the PNG it writes is what the package
+# Run from the repository root after changing a number here; the PNG it writes is what the package
 # ships, so it has to be regenerated rather than edited.
 [CmdletBinding()]
 param([string]$Path = 'src\LiteLLM.VisualStudio\Resources\Icon.png')
