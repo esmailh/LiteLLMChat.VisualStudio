@@ -2,7 +2,7 @@
   <PropertyGroup><TargetFramework>net48</TargetFramework><GenerateAssemblyInfo>true</GenerateAssemblyInfo></PropertyGroup>
   <ItemGroup>
     <Reference Include="System.Net.Http" />
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
   </ItemGroup>
 </Project>
