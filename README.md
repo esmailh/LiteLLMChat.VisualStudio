@@ -104,8 +104,12 @@ Diagnostics appear in **View > Output > LiteLLM**. The status bar reports discov
 - **401/403:** update the key. A blank key field retains the previous value; remove and recreate a server to remove a key.
 - **404:** confirm the URL does not already include `/v1` and that the model route exists.
 - **Timeout/network errors:** increase the timeout in Options and inspect the LiteLLM Output pane.
-- **VSIX build fails outside Visual Studio:** install the VS extension development workload and build from its Developer Command Prompt; the Core project/tests can be built independently with `dotnet`.
+- **VSIX build fails outside Visual Studio:** install the VS extension development workload and build from its Developer Command Prompt; `dotnet build` does not work for these projects.
 
 ## Architecture note
 
 The chat behavior adapts public VS Code concepts—session/request/response state, incremental response parts, explicit context items, cancellation, retry, model selection, and bounded history—to the existing Visual Studio/WPF and LiteLLM architecture. It does not copy GitHub Copilot proprietary implementation or introduce a webview/React chat application. Advanced VS Code features such as remote sessions, virtualized editor-backed content parts, participant ecosystems, and provider-specific confirmation protocols remain platform/provider-specific.
+
+## License
+
+MIT. See [LICENSE.txt](https://github.com/esmailh/LiteLLMChat.VisualStudio/blob/main/LICENSE.txt) for the full text.

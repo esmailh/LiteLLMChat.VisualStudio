@@ -29,6 +29,12 @@
       <IncludeInVSIX>true</IncludeInVSIX>
       <VSIXSubPath></VSIXSubPath>
     </Content>
+    <!-- The manifest's License element is limited to .txt or .rtf, so the repository's LICENSE.txt is shipped at the
+         package root; the Marketplace listing also has its own license field. -->
+    <Content Include="$(MSBuildProjectDirectory)\..\..\LICENSE.txt">
+      <IncludeInVSIX>true</IncludeInVSIX>
+      <VSIXSubPath></VSIXSubPath>
+    </Content>
     <VSIXSourceItem Include="$(MSBuildProjectDirectory)\..\LiteLLM.Core\bin\$(Configuration)\net48\LiteLLM.Core.dll" />
     <VSIXSourceItem Include="$(MSBuildProjectDirectory)\..\LiteLLM.GitWrapper\bin\$(Configuration)\net48\LiteLLM.GitWrapper.exe" />
     <VSIXSourceItem Include="$(NuGetPackageRoot)newtonsoft.json\13.0.3\lib\net45\Newtonsoft.Json.dll" />

@@ -24,6 +24,7 @@ Settings live in Tools &gt; Options &gt; LiteLLM and the Dashboard. API keys and
          tools\make-icon.ps1 rather than editing the PNG: the geometry is in that script. The element sits here rather
          than beside DisplayName because the schema fixes this group's order: Identity, DisplayName, Description,
          MoreInfo, License, GettingStartedGuide, ReleaseNotes, Icon, PreviewImage, Tags. -->
+    <License>LICENSE.txt</License>
     <Icon>Resources\Icon.png</Icon>
     <Tags>AI,LiteLLM,Chat,OpenAI,LLM,Markdown,Agent,Copilot,MCP,Claude</Tags>
   </Metadata>

@@ -244,6 +244,6 @@ When reporting a problem, include the Visual Studio version, extension version, 
 
 ## License
 
-See the repository license and notices:
+MIT. The full text ships with the extension as `LICENSE.txt` and is available at:
 
-<https://github.com/esmailh/LiteLLMChat.VisualStudio>
+<https://github.com/esmailh/LiteLLMChat.VisualStudio/blob/main/LICENSE.txt>
