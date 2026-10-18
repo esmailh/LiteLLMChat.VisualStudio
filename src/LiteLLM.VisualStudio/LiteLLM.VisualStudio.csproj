@@ -14,7 +14,7 @@
     <ProjectReference Include="..\LiteLLM.Core\LiteLLM.Core.csproj" />
     <ProjectReference Include="..\LiteLLM.GitWrapper\LiteLLM.GitWrapper.csproj" ReferenceOutputAssembly="false" />
     <PackageReference Include="Microsoft.VisualStudio.SDK" Version="17.12.40392" ExcludeAssets="runtime" />
-    <PackageReference Include="Microsoft.VSSDK.BuildTools" Version="17.12.2069" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.VSSDK.BuildTools" Version="18.5.40034" PrivateAssets="all" />
   </ItemGroup>
   <ItemGroup>
     <VSCTCompile Include="Commands.vsct">
