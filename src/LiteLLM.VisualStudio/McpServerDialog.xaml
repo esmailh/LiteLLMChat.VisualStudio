@@ -1,0 +1,54 @@
+<Window x:Class="LiteLLM.VisualStudio.McpServerDialog" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="clr-namespace:Microsoft.VisualStudio.PlatformUI;assembly=Microsoft.VisualStudio.Shell.15.0"
+        Title="MCP server" Width="620" MinWidth="520" Height="720" MinHeight="520" WindowStartupLocation="CenterOwner" ResizeMode="CanResize">
+ <Window.Resources><ResourceDictionary><ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/LiteLLM.VisualStudio;component/ThemeResources.xaml"/></ResourceDictionary.MergedDictionaries></ResourceDictionary></Window.Resources>
+ <Grid Background="{DynamicResource {x:Static ui:EnvironmentColors.ToolWindowBackgroundBrushKey}}"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+  <Border Background="{DynamicResource {x:Static ui:EnvironmentColors.EnvironmentBackgroundBrushKey}}" BorderBrush="{DynamicResource {x:Static ui:EnvironmentColors.ToolWindowBorderBrushKey}}" BorderThickness="0,0,0,1" Padding="18,14"><StackPanel><TextBlock Text="MCP server" Style="{StaticResource PageTitle}"/><TextBlock Text="A stdio process, a Streamable HTTP endpoint, or a legacy HTTP+SSE endpoint" Style="{StaticResource Caption}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/></StackPanel></Border>
+  <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,6,0" Focusable="False"><StackPanel Margin="18,14,12,14">
+   <TextBlock Text="Display name"/><TextBox x:Name="NameBox" Margin="0,4,0,12"/>
+   <TextBlock Text="Transport"/><ComboBox x:Name="TransportBox" Margin="0,4,0,12" SelectionChanged="Transport_Changed"><ComboBoxItem Content="stdio — launch a local process" Tag="stdio"/><ComboBoxItem Content="Streamable HTTP" Tag="http"/><ComboBoxItem Content="HTTP + SSE (legacy)" Tag="sse"/></ComboBox>
+
+   <StackPanel x:Name="StdioPanel">
+    <TextBlock Text="Command"/><TextBox x:Name="CommandBox" Margin="0,4,0,3"/><TextBlock Text="Resolved on PATH like a shell would; .cmd and .ps1 shims are understood." Style="{StaticResource Caption}" Margin="0,0,0,12" TextWrapping="Wrap"/>
+    <TextBlock Text="Arguments — one per line"/><TextBox x:Name="ArgsBox" AcceptsReturn="True" MinHeight="56" MaxHeight="120" VerticalScrollBarVisibility="Auto" Margin="0,4,0,12" FontFamily="Consolas, Courier New"/>
+    <TextBlock Text="Working directory (optional)"/><TextBox x:Name="WorkingDirBox" Margin="0,4,0,3"/><TextBlock Text="${workspaceFolder} resolves to the open solution's root." Style="{StaticResource Caption}" Margin="0,0,0,12" TextWrapping="Wrap"/>
+    <TextBlock Text="Environment — names and values are encrypted when saved"/>
+    <ListBox x:Name="EnvironmentRows" MaxHeight="150" Margin="0,4,0,6"><ListBox.ItemTemplate><DataTemplate><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><TextBox Text="{Binding Key, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,6,0"/><TextBox Grid.Column="1" Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}"/></Grid></DataTemplate></ListBox.ItemTemplate></ListBox>
+    <StackPanel Orientation="Horizontal" Margin="0,0,0,14"><TextBox x:Name="NewEnvKey" Width="160" ToolTip="Name"/><TextBox x:Name="NewEnvValue" Width="240" Margin="6,0,0,0" ToolTip="Value"/><Button Content="Add" Click="AddEnvironment_Click"/><Button Content="Remove" Click="RemoveEnvironment_Click"/></StackPanel>
+   </StackPanel>
+
+   <StackPanel x:Name="HttpPanel">
+    <TextBlock Text="URL"/><TextBox x:Name="UrlBox" Margin="0,4,0,3"/><TextBlock x:Name="HttpWarning" Style="{StaticResource Caption}" Foreground="{DynamicResource DangerBrush}" Margin="0,0,0,12" TextWrapping="Wrap" Visibility="Collapsed"/>
+    <TextBlock Text="Headers — names and values are encrypted when saved"/>
+    <ListBox x:Name="HeaderRows" MaxHeight="150" Margin="0,4,0,6"><ListBox.ItemTemplate><DataTemplate><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="160"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><TextBox Text="{Binding Key, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,6,0"/><TextBox Grid.Column="1" Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}"/></Grid></DataTemplate></ListBox.ItemTemplate></ListBox>
+    <StackPanel Orientation="Horizontal" Margin="0,0,0,10"><TextBox x:Name="NewHeaderKey" Width="160" ToolTip="Name"/><TextBox x:Name="NewHeaderValue" Width="240" Margin="6,0,0,0" ToolTip="Value"/><Button Content="Add" Click="AddHeader_Click"/><Button Content="Remove" Click="RemoveHeader_Click"/></StackPanel>
+    <TextBlock Text="Bearer token (optional)"/><PasswordBox x:Name="TokenBox" Margin="0,4,0,3" ToolTip="Leave blank to keep the saved token"/><TextBlock Text="Stored with Windows Data Protection. A password shown here would be the one thing the store exists to avoid." Style="{StaticResource Caption}" Margin="0,0,0,12" TextWrapping="Wrap"/>
+    <CheckBox x:Name="OAuthBox" Content="Sign in with OAuth 2.1 (authorization code + PKCE)"/><TextBlock Text="Sign in from the MCP page after saving. A manual bearer token takes precedence when one is set." Style="{StaticResource Caption}" Margin="6,2,0,12" TextWrapping="Wrap"/>
+    <TextBlock Text="OAuth scopes (optional, space separated)"/><TextBox x:Name="ScopesBox" Margin="0,4,0,12"/>
+   </StackPanel>
+
+   <TextBlock Text="Protocol"/><ComboBox x:Name="ProtocolBox" Margin="0,4,0,3"><ComboBoxItem Content="Auto — probe, then fall back" Tag="auto"/><ComboBoxItem Content="Modern (2026-07-28)" Tag="modern"/><ComboBoxItem Content="2025-11-25" Tag="2025-11-25"/><ComboBoxItem Content="Legacy" Tag="legacy"/></ComboBox><TextBlock Text="Only override this when a server answers the automatic probe badly." Style="{StaticResource Caption}" Margin="0,0,0,12" TextWrapping="Wrap"/>
+
+   <Grid Margin="0,0,0,12"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <StackPanel Margin="0,0,8,0"><TextBlock Text="Connect timeout (seconds, 0 = default)"/><TextBox x:Name="ConnectTimeoutBox" Margin="0,4,0,0"/></StackPanel>
+    <StackPanel Grid.Column="1"><TextBlock Text="Tool timeout (seconds, 0 = default)"/><TextBox x:Name="ToolTimeoutBox" Margin="0,4,0,0"/></StackPanel>
+   </Grid>
+
+   <TextBlock Text="Solution scope (optional)"/><TextBox x:Name="SolutionRootBox" Margin="0,4,0,3"/><TextBlock Text="Empty means every solution. A full path limits the server to that solution." Style="{StaticResource Caption}" Margin="0,0,0,12" TextWrapping="Wrap"/>
+
+   <CheckBox x:Name="EnabledBox" Content="Enable this server"/><CheckBox x:Name="ExposeBox" Content="Also give this server to the Claude backend" Margin="0,6,0,0"/><CheckBox x:Name="AutoApproveBox" Content="Skip the card for tools the server marks read-only" Margin="0,6,0,12"/>
+
+   <TextBlock Text="Tools" Style="{StaticResource SectionTitle}"/><TextBlock Text="Test the connection to list the server's tools, then send one to an allow list. Names are the server's own." Style="{StaticResource Caption}" Margin="0,3,0,6" TextWrapping="Wrap"/>
+   <Button Content="Test connection" HorizontalAlignment="Left" Click="Test_Click"/>
+   <TextBlock x:Name="TestStatus" Style="{StaticResource Caption}" Margin="0,6,0,6" TextWrapping="Wrap"/>
+   <ListBox x:Name="AvailableTools" MaxHeight="130" Margin="0,0,0,6"><ListBox.ItemTemplate><DataTemplate><StackPanel Margin="0,1"><TextBlock Text="{Binding Name}" FontWeight="SemiBold"/><TextBlock Text="{Binding Description}" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis"/></StackPanel></DataTemplate></ListBox.ItemTemplate></ListBox>
+   <StackPanel Orientation="Horizontal" Margin="0,0,0,10"><Button Content="Always allow selected" Click="AlwaysAllow_Click"/><Button Content="Never allow selected" Click="NeverAllow_Click"/></StackPanel>
+   <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <StackPanel Margin="0,0,8,0"><TextBlock Text="Always allow — one tool per line"/><TextBox x:Name="AllowedToolsBox" AcceptsReturn="True" MinHeight="60" MaxHeight="130" VerticalScrollBarVisibility="Auto" Margin="0,4,0,0" FontFamily="Consolas, Courier New"/></StackPanel>
+    <StackPanel Grid.Column="1"><TextBlock Text="Never allow — one tool per line"/><TextBox x:Name="DisabledToolsBox" AcceptsReturn="True" MinHeight="60" MaxHeight="130" VerticalScrollBarVisibility="Auto" Margin="0,4,0,0" FontFamily="Consolas, Courier New"/></StackPanel>
+   </Grid>
+   <TextBlock x:Name="ErrorText" Foreground="{DynamicResource DangerBrush}" Margin="0,10,0,0" TextWrapping="Wrap"/>
+  </StackPanel></ScrollViewer>
+  <Border Grid.Row="2" Background="{DynamicResource {x:Static ui:EnvironmentColors.EnvironmentBackgroundBrushKey}}" BorderBrush="{DynamicResource {x:Static ui:EnvironmentColors.ToolWindowBorderBrushKey}}" BorderThickness="0,1,0,0" Padding="18,10"><StackPanel Orientation="Horizontal" HorizontalAlignment="Right"><Button Content="Cancel" IsCancel="True"/><Button Content="Save server" Style="{StaticResource PrimaryButton}" IsDefault="True" Click="Save_Click"/></StackPanel></Border>
+ </Grid>
+</Window>

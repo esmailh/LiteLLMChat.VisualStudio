@@ -52,6 +52,12 @@ internal static class ContextTools
         Define("get_project_name", "Project containing the active document.", null)
     };
 
+    /// <summary>The tools that only read the disk: no editor state beyond the solution root, no confirmation card.
+    /// Consecutive calls of these may be run at the same time, because the answer to one cannot depend on the
+    /// answer to another — which is the whole of what the loop's batching relies on.</summary>
+    internal static bool IsDiskOnly(string name) =>
+        name == "read_file" || name == "list_files" || name == "search_files";
+
     internal static async Task<ToolResult> ExecuteAsync(AsyncPackage package, string name, string arguments, CancellationToken token)
     {
         await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();

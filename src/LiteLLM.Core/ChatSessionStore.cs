@@ -35,6 +35,31 @@ public sealed class ChatSessionStore
 
     public string Path => _path;
 
+    /// <summary>Every conversation document this machine has written: one per solution scope plus the file used
+    /// before scoping existed. It exists to seed the token ledger, which is why it reads all of them rather than
+    /// the scope that happens to be open. A document that cannot be read is skipped rather than allowed to fail
+    /// the scan — a damaged conversation must not hide the healthy ones' totals.</summary>
+    public static List<ChatSessionDocument> LoadAllSaved(string? root = null)
+    {
+        var directory = root ?? System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LiteLLM.VisualStudio");
+        var documents = new List<ChatSessionDocument>();
+        try
+        {
+            var scoped = System.IO.Path.Combine(directory, "chat-sessions");
+            if (Directory.Exists(scoped))
+                foreach (var file in Directory.GetFiles(scoped, "*.json"))
+                    documents.Add(new ChatSessionStore(file).Load());
+            var unscoped = System.IO.Path.Combine(directory, "chat-sessions.json");
+            if (File.Exists(unscoped)) documents.Add(new ChatSessionStore(unscoped).Load());
+        }
+        catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+        {
+            // Whatever was read before the directory refused to enumerate is still usable.
+        }
+        return documents;
+    }
+
     public ChatSessionDocument Load()
     {
         if (!File.Exists(_path)) return NewDocument();
@@ -125,6 +150,14 @@ public sealed class ChatSessionStore
                 {
                     turn.Tests.Detail = ChatStateLimits.Clip(turn.Tests.Detail ?? "", TestDiagnostics.MaxDetailChars);
                     turn.Tests.Summary = ChatStateLimits.OneLine(turn.Tests.Summary, 200);
+                }
+                // Counts come from the server's JSON, which this file does not otherwise trust, and a negative
+                // count would render as a total smaller than its parts.
+                if (turn.Usage != null)
+                {
+                    turn.Usage.PromptTokens = Math.Max(0, turn.Usage.PromptTokens);
+                    turn.Usage.CompletionTokens = Math.Max(0, turn.Usage.CompletionTokens);
+                    turn.Usage.TotalTokens = Math.Max(0, turn.Usage.TotalTokens);
                 }
                 // A summary is model output, so it arrives without a size like a build log does, and it is
                 // bounded the same way. The list is capped as well: a turn that summarized more often than this

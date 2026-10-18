@@ -45,6 +45,10 @@ public sealed class ChatTurnState
     /// A list rather than the latest one, because a long turn can summarize more than once and a reloaded
     /// conversation has to draw back the same rows the live one drew.</summary>
     public List<ContextSummaryReport> Summaries { get; set; } = new List<ContextSummaryReport>();
+    /// <summary>What the model reported spending across this turn's calls, or null when no call reported
+    /// anything — a provider that omits usage while streaming, or a turn stored before this was counted.
+    /// Kept on the turn so a reloaded conversation shows the same total the live one did.</summary>
+    public TokenUsage? Usage { get; set; }
 }
 
 /// <summary>What one summarization of the older part of a transcript did. Shaped like <see cref="BuildReport"/>
@@ -79,6 +83,11 @@ public sealed class ChatSessionState
     public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedUtc { get; set; } = DateTime.UtcNow;
     public string SelectedModelKey { get; set; } = "";
+    /// <summary>When true, a turn sends only the messages it produced itself: earlier turns of this chat stay on
+    /// screen and in the saved conversation but are not part of the request. It trades continuity for tokens, so
+    /// it defaults to false — a file written before the switch existed reads as "send everything", the behavior
+    /// it had when it was written.</summary>
+    public bool IgnoreHistory { get; set; }
     /// <summary>Execution transport, independent of Ask/Agent/Plan. Missing values from older files mean LiteLLM.</summary>
     public string ExecutionBackend { get; set; } = "litellm";
     /// <summary>Opaque id emitted by Claude Code. Never synthesized from the extension conversation id.</summary>

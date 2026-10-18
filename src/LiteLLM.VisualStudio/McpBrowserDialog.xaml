@@ -1,0 +1,40 @@
+<Window x:Class="LiteLLM.VisualStudio.McpBrowserDialog" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="clr-namespace:Microsoft.VisualStudio.PlatformUI;assembly=Microsoft.VisualStudio.Shell.15.0"
+        Title="MCP browser" Width="820" Height="640" MinWidth="640" MinHeight="460" WindowStartupLocation="CenterOwner" ResizeMode="CanResize">
+ <Window.Resources><ResourceDictionary><ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/LiteLLM.VisualStudio;component/ThemeResources.xaml"/></ResourceDictionary.MergedDictionaries></ResourceDictionary></Window.Resources>
+ <Grid Background="{DynamicResource {x:Static ui:EnvironmentColors.ToolWindowBackgroundBrushKey}}"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+  <Border Background="{DynamicResource {x:Static ui:EnvironmentColors.EnvironmentBackgroundBrushKey}}" BorderBrush="{DynamicResource {x:Static ui:EnvironmentColors.ToolWindowBorderBrushKey}}" BorderThickness="0,0,0,1" Padding="18,14"><StackPanel><TextBlock x:Name="TitleText" Text="MCP" Style="{StaticResource PageTitle}"/><TextBlock Text="Call tools and read what the server publishes. A call made here is one you asked for; the chat still asks before its own." Style="{StaticResource Caption}" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
+  <TabControl Grid.Row="1" Margin="14,10,14,10">
+   <TabItem Header="Tools">
+    <Grid Margin="0,6,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="240"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+     <ListBox x:Name="ToolList" Margin="0,0,10,0" SelectionChanged="Tool_SelectionChanged"><ListBox.ItemTemplate><DataTemplate><StackPanel Margin="0,1"><TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Text="{Binding Description}" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis"/></StackPanel></DataTemplate></ListBox.ItemTemplate></ListBox>
+     <Grid Grid.Column="1"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+      <TextBlock x:Name="ToolTitle" Text="Select a tool" Style="{StaticResource SectionTitle}" TextTrimming="CharacterEllipsis"/>
+      <TextBlock x:Name="ToolDescription" Grid.Row="1" Style="{StaticResource Caption}" Margin="0,3,0,6" TextWrapping="Wrap"/>
+      <Grid Grid.Row="2"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><ScrollViewer MaxHeight="180" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel x:Name="ArgumentsPanel"/></ScrollViewer><Button x:Name="RunToolButton" Grid.Column="1" Content="Run" Style="{StaticResource PrimaryButton}" VerticalAlignment="Top" Click="RunTool_Click"/></Grid>
+      <TextBox x:Name="ToolResult" Grid.Row="3" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" FontFamily="Consolas, Courier New" Margin="0,8,0,0"/>
+     </Grid>
+    </Grid>
+   </TabItem>
+   <TabItem Header="Resources">
+    <Grid Margin="0,6,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="260"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+     <Grid Margin="0,0,10,0"><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions><ListBox x:Name="ResourceList"><ListBox.ItemTemplate><DataTemplate><StackPanel Margin="0,1"><TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Text="{Binding Description}" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis"/></StackPanel></DataTemplate></ListBox.ItemTemplate></ListBox><Button Grid.Row="1" Content="Read resource" HorizontalAlignment="Left" Margin="0,6,0,0" Click="ReadResource_Click"/></Grid>
+     <TextBox x:Name="ResourceResult" Grid.Column="1" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" FontFamily="Consolas, Courier New"/>
+    </Grid>
+   </TabItem>
+   <TabItem Header="Prompts">
+    <Grid Margin="0,6,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="260"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+     <Grid Margin="0,0,10,0"><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions><ListBox x:Name="PromptList" SelectionChanged="Prompt_SelectionChanged"><ListBox.ItemTemplate><DataTemplate><StackPanel Margin="0,1"><TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Text="{Binding Description}" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis"/></StackPanel></DataTemplate></ListBox.ItemTemplate></ListBox><Button Grid.Row="1" Content="Get prompt" HorizontalAlignment="Left" Margin="0,6,0,0" Click="GetPrompt_Click"/></Grid>
+     <Grid Grid.Column="1"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions><ScrollViewer MaxHeight="180" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><StackPanel x:Name="PromptArgumentsPanel"/></ScrollViewer><TextBox x:Name="PromptResult" Grid.Row="1" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" FontFamily="Consolas, Courier New" Margin="0,8,0,0"/></Grid>
+    </Grid>
+   </TabItem>
+   <TabItem Header="Logs">
+    <Grid Margin="0,6,0,0"><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+     <ListBox x:Name="LogList"><ListBox.ItemTemplate><DataTemplate><Grid Margin="0,1"><Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Name}" Style="{StaticResource Caption}"/><TextBlock Grid.Column="1" Text="{Binding Description}" TextWrapping="Wrap"/></Grid></DataTemplate></ListBox.ItemTemplate></ListBox>
+     <Button Grid.Row="1" Content="Refresh" HorizontalAlignment="Left" Margin="0,6,0,0" Click="RefreshLogs_Click"/>
+    </Grid>
+   </TabItem>
+  </TabControl>
+  <Border Grid.Row="2" Background="{DynamicResource {x:Static ui:EnvironmentColors.EnvironmentBackgroundBrushKey}}" BorderBrush="{DynamicResource {x:Static ui:EnvironmentColors.ToolWindowBorderBrushKey}}" BorderThickness="0,1,0,0" Padding="18,10"><StackPanel Orientation="Horizontal" HorizontalAlignment="Right"><Button Content="Close" IsCancel="True" IsDefault="True"/></StackPanel></Border>
+ </Grid>
+</Window>

@@ -1,8 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace LiteLLM.Core;
 
@@ -24,7 +27,13 @@ public sealed class SettingsStore
     public UserSettings Load()
     {
         if (!File.Exists(_path)) return new UserSettings();
-        try { return JsonConvert.DeserializeObject<UserSettings>(File.ReadAllText(_path)) ?? new UserSettings(); }
+        try
+        {
+            var settings = JsonConvert.DeserializeObject<UserSettings>(File.ReadAllText(_path)) ?? new UserSettings();
+            if (settings.McpServers == null) settings.McpServers = new List<McpServerConfiguration>();
+            foreach (var server in settings.McpServers.Where(server => server != null)) McpSecrets.FromStorage(server);
+            return settings;
+        }
         catch (Exception ex) when (ex is IOException || ex is JsonException || ex is UnauthorizedAccessException) { return new UserSettings(); }
     }
     public void Save(UserSettings settings)
@@ -32,7 +41,13 @@ public sealed class SettingsStore
         var directory = System.IO.Path.GetDirectoryName(_path);
         if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
         var temporary = _path + ".tmp";
-        File.WriteAllText(temporary, JsonConvert.SerializeObject(settings, Formatting.Indented), Encoding.UTF8);
+        // The server list is replaced with protected copies before serialization. Protecting in place would put the
+        // DPAPI blobs into the live settings, and the next request would send them as the environment value. The
+        // sensitive values never reach the file; the in-memory object stays plaintext.
+        var document = JObject.FromObject(settings);
+        document["McpServers"] = JToken.FromObject(
+            (settings.McpServers ?? new List<McpServerConfiguration>()).Select(McpSecrets.ForStorage));
+        File.WriteAllText(temporary, document.ToString(Formatting.Indented), Encoding.UTF8);
         if (File.Exists(_path)) File.Replace(temporary, _path, null); else File.Move(temporary, _path);
     }
 }

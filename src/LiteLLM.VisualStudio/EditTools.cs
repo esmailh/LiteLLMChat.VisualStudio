@@ -28,6 +28,11 @@ internal sealed class AppliedEdit
     internal bool Removed;
     /// <summary>How the file was encoded and ended its lines, so undo writes it back the same way.</summary>
     internal TextFile.Content Content = null!;
+    /// <summary>Set once the edit has been put back, so a second click cannot write its "before" over newer work.</summary>
+    internal bool Undone;
+    /// <summary>The edit's place in the session's sequence. The history is capped, so the list position cannot
+    /// answer "what happened since this revision" — this can.</summary>
+    internal int Serial;
 }
 
 /// <summary>An edit waiting on the user's answer, shown when "Confirm before each edit" is on. Everything a file
@@ -114,13 +119,29 @@ internal static class EditTools
 
     private static readonly List<AppliedEdit> History = new List<AppliedEdit>();
     private const int MaxHistory = 20;
+    private static int _revisions;
 
     /// <summary>The most recent edit, which is the only one the chat may offer to undo.</summary>
     internal static AppliedEdit? Latest => History.Count > 0 ? History[History.Count - 1] : null;
 
-    /// <summary>How many edits have been applied. A caller that reads this before a tool call can tell whether the
-    /// call changed anything, and so whether the row it is about to write deserves a diff and an undo.</summary>
-    internal static int Revisions => History.Count;
+    /// <summary>How many edits have been applied in this session. A caller that reads this before a tool call
+    /// can tell whether the call changed anything, and so whether the row it is about to write deserves a diff
+    /// and an undo.
+    ///
+    /// Monotonic, and deliberately not <c>History.Count</c>: the history stops growing once it reaches
+    /// <see cref="MaxHistory"/>, so a count taken from it would stop changing after twenty edits — and with it
+    /// the build check and the undo row, which both compare this number across a call.</summary>
+    internal static int Revisions => _revisions;
+
+    /// <summary>The edits applied after <paramref name="revision"/> that are still in the undo history, oldest
+    /// first. An edit older than <see cref="MaxHistory"/> has been let go and is not included, which a caller can
+    /// tell by comparing the count with <see cref="Revisions"/>.</summary>
+    internal static IReadOnlyList<AppliedEdit> EditsSince(int revision)
+    {
+        var since = new List<AppliedEdit>();
+        foreach (var edit in History) if (edit.Serial > revision) since.Add(edit);
+        return since;
+    }
 
     internal static async Task<ToolResult> ExecuteAsync(DTE? dte, string? root, string name, JObject args)
     {
@@ -503,9 +524,14 @@ internal static class EditTools
     /// discarding the newer work.</summary>
     internal static string Undo(DTE? dte, AppliedEdit edit)
     {
+        if (edit.Undone) return "That edit has already been undone.";
         for (var i = History.Count - 1; i >= 0; i--)
         {
             if (ReferenceEquals(History[i], edit)) break;
+            // An edit that has already been put back no longer stands between this one and the file, which is
+            // what makes undoing a turn in reverse possible: the newest edit of a file goes first, and the one
+            // before it is then the latest remaining.
+            if (History[i].Undone) continue;
             if (string.Equals(History[i].Path, edit.Path, StringComparison.OrdinalIgnoreCase))
                 return "A later edit changed " + edit.Label + ". Undo that one first.";
         }
@@ -515,6 +541,7 @@ internal static class EditTools
         {
             TextFile.Write(edit.Path, edit.Content, edit.Content.Conform(edit.Before));
             Open(dte, edit.Path);
+            edit.Undone = true;
             return "Restored " + edit.Label + ".";
         }
 
@@ -522,6 +549,7 @@ internal static class EditTools
         {
             if (document != null) Try(() => document.Close(vsSaveChanges.vsSaveChangesNo));
             if (File.Exists(edit.Path)) File.Delete(edit.Path);
+            edit.Undone = true;
             return "Removed " + edit.Label + ", which this edit had created.";
         }
 
@@ -534,13 +562,50 @@ internal static class EditTools
                 var whole = view.StartPoint.CreateEditPoint();
                 whole.ReplaceText(view.EndPoint, text, 0);
                 document!.Save();
+                edit.Undone = true;
                 return "Restored " + edit.Label + ".";
             }
             catch (COMException) { }
         }
         TextFile.Write(edit.Path, edit.Content, text);
         Open(dte, edit.Path);
+        edit.Undone = true;
         return "Restored " + edit.Label + ".";
+    }
+
+    /// <summary>Puts back every edit of one turn, newest first. That order is the whole of the correctness: each
+    /// <see cref="AppliedEdit.Before"/> is the file as it stood when that edit ran, so undoing a later edit of a
+    /// file and then an earlier one walks the file backward one step at a time. Anything that cannot be put back
+    /// — a file whose history has moved on since — is named rather than passed over.</summary>
+    internal static string UndoAll(DTE? dte, IReadOnlyList<AppliedEdit> edits)
+    {
+        var pending = 0;
+        foreach (var edit in edits) if (!edit.Undone) pending++;
+        if (pending == 0) return "Those edits have already been undone.";
+
+        var restored = 0;
+        string? failure = null;
+        for (var index = edits.Count - 1; index >= 0; index--)
+        {
+            var edit = edits[index];
+            if (edit.Undone) continue;
+            string message;
+            try { message = Undo(dte, edit); }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is COMException || ex is InvalidOperationException)
+            {
+                failure = edit.Label + ": " + ex.Message;
+                break;
+            }
+            if (edit.Undone) { restored++; continue; }
+            // A refused edit means one older than it is unsafe to write as well: its "before" predates the
+            // change that is still standing. Stopping here is what keeps the rest of the turn from being
+            // written over work this method could not account for.
+            failure = message;
+            break;
+        }
+
+        var done = restored == 1 ? "Undid the edit from this turn." : "Undid " + restored + " of " + pending + " edits from this turn.";
+        return failure == null ? done : done + " " + failure + " The earlier edits were left alone.";
     }
 
     // ---------------------------------------------------------------- editor plumbing
@@ -581,7 +646,7 @@ internal static class EditTools
     }
 
     private static int Count(string text) => LineText.Split(LineText.Normalize(text)).Count;
-    private static void Remember(AppliedEdit edit) { History.Add(edit); while (History.Count > MaxHistory) History.RemoveAt(0); }
+    private static void Remember(AppliedEdit edit) { edit.Serial = ++_revisions; History.Add(edit); while (History.Count > MaxHistory) History.RemoveAt(0); }
 
     // ---------------------------------------------------------------- small shared bits
 

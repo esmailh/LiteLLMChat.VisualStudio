@@ -15,23 +15,13 @@ using EnvDTE;
 using LiteLLM.Core;
 using Microsoft.VisualStudio.PlatformUI;
 using Microsoft.VisualStudio.Shell;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace LiteLLM.VisualStudio;
-public partial class ChatControl : UserControl
+public partial class ChatControl : UserControl, IAgentView
 {
     internal static ChatControl? Current { get; private set; }
-
-    /// <summary>One rendered message: the card, its content panel, and — while the turn runs — the live status line at its foot.</summary>
-    private sealed class Bubble
-    {
-        internal Border Border = null!;
-        internal StackPanel Body = null!;
-        internal StackPanel? Live;
-        internal TextBlock? Status;
-        internal ProgressBar? Bar;
-        internal ChatMessage? Message;
-        internal HttpExchange? Exchange;
-    }
 
     private readonly List<ChatMessage> _history = new List<ChatMessage>();
     private CancellationTokenSource? _generation;
@@ -62,15 +52,43 @@ public partial class ChatControl : UserControl
     private int _slashTokenStart;
     private int _slashTokenLength;
     private bool _fileMentionMode;
+    /// <summary>True while the popup is showing MCP tools for a <c>#</c> token rather than solution files for an
+    /// <c>@</c> token. The two share the popup and its keyboard handling; what a selection does is different.</summary>
+    private bool _toolMentionMode;
+    /// <summary>True while the popup is showing MCP prompts on the LiteLLM backend rather than the Claude CLI's
+    /// own slash commands. The two lists share the popup but not the thing a selection does.</summary>
+    private bool _promptMode;
     private int _suggestionRefreshVersion;
     private string? _mentionRoot;
     private IReadOnlyList<FileMentionEntry> _mentionFiles = Array.Empty<FileMentionEntry>();
+    /// <summary>The solution's declarations, so a class or method named in a reply can be clicked like a file
+    /// reference. Built once per solution root, off the UI thread; null until the first build finishes, and null
+    /// again while a different solution's index is being built.</summary>
+    private SymbolIndex? _symbolIndex;
+    private string? _symbolIndexRoot;
+    private bool _symbolIndexBuilding;
 
     private sealed class FileMentionEntry
     {
         internal string FullPath = "";
         public string Name { get; set; } = "";
         public string Description { get; set; } = "File";
+        /// <summary>Set when this row is an MCP resource. The same picker lists both, because a reader looking for
+        /// context does not think of "the solution's files" and "the server's documents" as two gestures.</summary>
+        public McpResourceInfo? Resource { get; set; }
+        /// <summary>Set when this row is an MCP tool offered by the <c>#</c> picker. Choosing it inserts a token;
+        /// it does not run anything.</summary>
+        public McpToolInfo? Tool { get; set; }
+        /// <summary>The final row of the <c>#</c> picker: keep today's file picker reachable for people who type
+        /// <c>#</c> out of habit.</summary>
+        public bool FilesPicker { get; set; }
+    }
+
+    private sealed class PromptSuggestion
+    {
+        public string Name { get; set; } = "";
+        public string Description { get; set; } = "";
+        public McpPromptInfo Prompt { get; set; } = new McpPromptInfo();
     }
 
     internal ChatControl() { InitializeComponent(); VsTheme.Apply(this); Current = this; Loaded += OnLoaded; Unloaded += OnUnloaded; SizeChanged += OnSizeChanged; }
@@ -124,15 +142,24 @@ public partial class ChatControl : UserControl
         if (!_eventSubscriptionsActive)
         {
             Services.ModelsChanged += ModelsChanged; Services.SessionsChanged += SessionsChanged;
+            Services.Mcp.ToolsChanged += McpToolsChanged;
+            Services.Mcp.ServerClosed += McpServerClosed;
             _eventSubscriptionsActive = true;
         }
         // The edit tools ask the chat, rather than a modal dialog, because the question belongs in the conversation
         // where the change it is asking about is already on screen.
         EditTools.Confirm = AskToApplyEditAsync;
         TerminalTools.Confirm = AskToRunCommandAsync;
+        McpApproval.Confirm = AskToApproveMcpToolAsync;
         await Services.RefreshSessionScopeAsync();
         if (!IsLoaded || loadVersion != _loadVersion) return;
         ReloadSessions(); RenderSession(); ReloadModels();
+        // The enabled servers are stated in settings.json, so opening the window is where they come back: a restart
+        // must not mean visiting the Dashboard to reconnect each one by hand.
+        _ = AutoConnectMcpAsync(loadVersion);
+        // The replies already on screen gain their class and method links when this finishes; until then they are
+        // plain text, so nothing about the window's readiness depends on it.
+        _ = EnsureSymbolIndexAsync();
         ReloadPermissionMode();
         RefreshAutoContextButton();
         await WatchEditorAsync(loadVersion);
@@ -147,16 +174,88 @@ public partial class ChatControl : UserControl
         if (_eventSubscriptionsActive)
         {
             Services.ModelsChanged -= ModelsChanged; Services.SessionsChanged -= SessionsChanged;
+            Services.Mcp.ToolsChanged -= McpToolsChanged;
+            Services.Mcp.ServerClosed -= McpServerClosed;
             _eventSubscriptionsActive = false;
         }
         try { if (_windowEvents != null) _windowEvents.WindowActivated -= OnWindowActivated; } catch (Exception) { }
         _windowEvents = null; _dte = null;
         if (ReferenceEquals(EditTools.Confirm?.Target, this)) EditTools.Confirm = null;
         if (ReferenceEquals(TerminalTools.Confirm?.Target, this)) TerminalTools.Confirm = null;
+        if (ReferenceEquals(McpApproval.Confirm?.Target, this)) McpApproval.Confirm = null;
         if (ReferenceEquals(Current, this)) Current = null;
+    }
+    /// <summary>Brings back the MCP servers the user enabled. It runs for the LiteLLM backend only: the Claude CLI
+    /// starts its own MCP processes from the per-run configuration, so connecting here would launch a second set for
+    /// the same servers. Nothing is launched while the feature is off or every server is disabled. A server that
+    /// cannot be reached is drawn as its own row and does not fail the load.</summary>
+    private async Task AutoConnectMcpAsync(int loadVersion)
+    {
+        try
+        {
+            if (!Services.Settings.EnableMcp) return;
+            if (!string.Equals(Services.ActiveSession.ExecutionBackend, "litellm", StringComparison.OrdinalIgnoreCase)) return;
+            if (!(Services.Settings.McpServers ?? new List<McpServerConfiguration>()).Any(server => server != null && server.Enabled)) return;
+
+            // A window that looks ready while a server is being launched invites a message the turn cannot send
+            // with the tools it expects. Only an empty status line is taken, and only the same text is cleared, so a
+            // turn started meanwhile keeps its own status.
+            const string connecting = "Connecting MCP servers…";
+            var announced = StateText.Text.Length == 0;
+            if (announced) StateText.Text = connecting;
+
+            var root = await SolutionRootAsync();
+            if (!IsLoaded || loadVersion != _loadVersion) return;
+            var report = await Services.Mcp.ConnectEnabledAsync(Services.Settings, root, CancellationToken.None);
+            if (!IsLoaded || loadVersion != _loadVersion) return;
+            foreach (var row in report.Rows) AddToolNote("mcp", row.Summary, row.Ok, null, row.Detail);
+            if (announced && StateText.Text == connecting) StateText.Text = string.Empty;
+        }
+        catch (Exception ex)
+        {
+            Services.Log("MCP auto-connect failed: " + ex);
+        }
     }
     private void ModelsChanged(object sender, EventArgs e) => Dispatcher.Invoke(ReloadModels);
     private void SessionsChanged(object sender, EventArgs e) => Dispatcher.Invoke(ReloadSessions);
+    /// <summary>The event fires on whatever thread changed the snapshot, so the refresh is marshalled. If the tool
+    /// list under an open popup changed, the next refresh shows the new one; a row that vanished cannot be chosen.</summary>
+    private void McpToolsChanged(object? sender, EventArgs e)
+    {
+        // The event arrives on the connection's receive loop. Reading IsLoaded there would be a cross-thread call
+        // on a DispatcherObject and throw, and the client swallows handler failures — the composer would simply
+        // stop refreshing. The dispatcher is the only thing touched before the switch.
+        _ = Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (!IsLoaded) return;
+            RefreshSlashCommands();
+        }));
+    }
+    /// <summary>A server that ended on its own is said as soon as it happens rather than left for the next tool call:
+    /// the composer would otherwise keep offering tools that no longer exist. A server this window disconnected on
+    /// purpose closes from a map that no longer owns it and never reaches here.</summary>
+    private void McpServerClosed(McpServerConfiguration server, string reason)
+    {
+        // Same rule as ToolsChanged: IsLoaded belongs to the UI thread, so the check moves inside the dispatch.
+        _ = Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (!IsLoaded) return;
+            AddToolNote("mcp", "MCP · " + server.Name + " disconnected: " + McpLog.Redact(reason), false, null,
+                "The next turn tries to connect it again; ↻ in the MCP dashboard does it now.", null);
+            RefreshSlashCommands();
+        }));
+    }
+    /// <summary>Whether MCP is on for this turn and this solution has a server the user enabled that is not
+    /// connected — the state in which a typed '#' silently falls back to the file picker. A connected server that
+    /// simply offers no tools is not that state, and must not be described as disconnected.</summary>
+    private bool McpEnabledButNotConnected(string? root) =>
+        Services.Settings.EnableMcp &&
+        Services.Settings.EnableToolCalling &&
+        string.Equals(Services.ActiveSession.ExecutionBackend, "litellm", StringComparison.OrdinalIgnoreCase) &&
+        Services.Mcp.Tools.Count == 0 &&
+        (Services.Settings.McpServers ?? new List<McpServerConfiguration>())
+            .Any(server => server != null && server.Enabled && server.AppliesTo(root) &&
+                           !(Services.Mcp.StatusOf(server.Id)?.Connected ?? false));
     private void ReloadSessions() { SessionBox.ItemsSource = null; SessionBox.ItemsSource = Services.Sessions.Sessions; SessionBox.SelectedValuePath = "Id"; SessionBox.SelectedValue = Services.Sessions.ActiveSessionId; RefreshDeleteButton(false); }
     private void ReloadModels() { var selected = Services.ActiveSession.SelectedModelKey.Length > 0 ? Services.ActiveSession.SelectedModelKey : Services.Settings.SelectedModelKey; ModelBox.ItemsSource = null; ModelBox.ItemsSource = Services.Models; ModelBox.SelectedItem = Services.Models.FirstOrDefault(m => m.Key == selected) ?? Services.Models.FirstOrDefault(); if (ModelBox.SelectedItem is ModelInfo model) ModelBox.ToolTip = model.Id; StateText.Text = Services.Models.Count == 0 ? "Configure a server in the Dashboard" : string.Empty; }
     private void RenderSession()
@@ -182,8 +281,13 @@ public partial class ChatControl : UserControl
             // are still here, so it is replayed from the turn rather than re-derived, and the rows come back in
             // the order they were drawn in a live turn.
             foreach (var summary in turn.Summaries) AddToolNote("", summary.Summary, true, null, summary.Detail);
+            // Last, as it was drawn last. A turn stored by a build that did not count usage has none.
+            if (turn.Usage != null) AddToolNote("", turn.Usage.Line, true, null, null, null);
         }
         EmptyState.Visibility = _history.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        // The chip strip follows the conversation, and this switch lives on the conversation, so switching chats
+        // must redraw it as well as the messages.
+        RefreshContextBar();
     }
     private void SaveSession() => SaveSession(Services.ActiveSession, (ModelBox.SelectedItem as ModelInfo)?.Key);
     private void SaveSession(ChatSessionState session, string? selectedModelKey = null) { session.UpdatedUtc = DateTime.UtcNow; session.SelectedModelKey = selectedModelKey ?? session.SelectedModelKey; if (session.HasMessages && session.Title == "New chat") { var first = session.Turns.SelectMany(t => t.Messages).FirstOrDefault(m => m.Role == "user"); if (first != null) session.Title = ChatStateLimits.OneLine(first.Content, 42); } Services.SaveSessions(); }
@@ -221,6 +325,7 @@ public partial class ChatControl : UserControl
         SetBusy(true); var generation = new CancellationTokenSource(); _generation = generation; var token = generation.Token; StartTicker();
         var assistant = new ChatMessage { Role = "assistant" }; _history.Add(assistant);
         var view = AddAssistantBubble("Thinking");
+        McpClaudeLease? mcpLease = null;
         try
         {
             var runner = new ClaudeCodeRunner();
@@ -232,6 +337,31 @@ public partial class ChatControl : UserControl
             workingDirectory = Path.GetFullPath(workingDirectory);
             var wrapperPath = Path.Combine(Path.GetDirectoryName(typeof(ChatControl).Assembly.Location) ?? "", "LiteLLM.GitWrapper.exe");
             if (!File.Exists(wrapperPath)) throw new FileNotFoundException("The packaged LiteLLM Git wrapper was not found.", wrapperPath);
+            // The CLI runs its own harness, so the extension can only hand it servers and an allow-list. A failure
+            // here is a row and an MCP-less Claude turn, never a failed one: the rest of the turn does not depend on it.
+            if (settings.EnableMcp)
+            {
+                try
+                {
+                    mcpLease = await Services.Mcp.PrepareClaudeRunAsync(settings, workingDirectory, token);
+                    if (mcpLease != null)
+                    {
+                        var count = mcpLease.Servers == 1 ? "1 server" : mcpLease.Servers + " servers";
+                        var allowed = mcpLease.AllowedTools.Count == 0
+                            ? "; no tool is allow-listed, so Claude will report every MCP tool as denied"
+                            : " · " + (mcpLease.AllowedTools.Count == 1
+                                ? "1 tool allow-listed"
+                                : mcpLease.AllowedTools.Count + " tools allow-listed");
+                        AddToolNote("mcp", "MCP · " + count + " exposed to Claude" + allowed, mcpLease.AllowedTools.Count > 0);
+                    }
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    AddToolNote("mcp", "MCP · the Claude configuration could not be prepared: " + ex.Message, false);
+                    Services.Log("MCP configuration for the Claude backend failed: " + ex);
+                }
+            }
             prompt = "For Git operations, use only the approved LiteLLM.GitWrapper executable. It performs confirmations and authentication; do not invoke git, gh, or glab directly.\n\n" + prompt;
             var result = await runner.RunAsync(settings.ClaudeExecutable, prompt, session.ClaudeSessionId,
                 settings.ClaudeAllowedTools, settings.ClaudeDisallowedTools, workingDirectory, text =>
@@ -252,7 +382,7 @@ public partial class ChatControl : UserControl
                         session.ClaudeSessionId = id;
                         SaveSession(session, "claude-code");
                     }));
-                }, policy, token, wrapperPath).ConfigureAwait(true);
+                }, policy, token, wrapperPath, mcpLease?.Path, mcpLease?.AllowedTools, mcpLease?.Strict ?? false).ConfigureAwait(true);
             assistant.Content = result.Text;
             if (ReferenceEquals(_activeTurn, turn) && ReferenceEquals(Services.ActiveSession, session)) { SetContent(view, assistant); FinishStatus(view); }
             if (string.IsNullOrWhiteSpace(session.ClaudeSessionId) && !string.IsNullOrWhiteSpace(result.SessionId)) session.ClaudeSessionId = result.SessionId;
@@ -263,16 +393,22 @@ public partial class ChatControl : UserControl
         }
         catch (OperationCanceledException) { if (assistant.Content.Length > 0) turn.Messages.Add(ChatStateLimits.CopyMessage(assistant)); turn.Status = ChatTurnStatus.Cancelled; turn.CompletedUtc = DateTime.UtcNow; SaveSession(session, "claude-code"); if (ReferenceEquals(Services.ActiveSession, session)) StateText.Text = "Stopped"; }
         catch (Exception ex) { if (assistant.Content.Length > 0) turn.Messages.Add(ChatStateLimits.CopyMessage(assistant)); turn.Status = ChatTurnStatus.Failed; turn.Error = ex.Message; turn.CompletedUtc = DateTime.UtcNow; SaveSession(session, "claude-code"); if (ReferenceEquals(Services.ActiveSession, session)) { AddToolNote("error", ex.Message, false, null, ex.ToString()); StateText.Text = ex.Message; } Services.Log(ex.ToString()); }
-        finally { if (ReferenceEquals(_generation, generation)) { _ticker?.Stop(); _ticker = null; if (_live != null) FinishStatus(_live); _live = null; _generation = null; SetBusy(false); } generation.Dispose(); if (ReferenceEquals(_activeTurn, turn)) _activeTurn = null; Composer.Focus(); }
+        finally { mcpLease?.Dispose(); if (ReferenceEquals(_generation, generation)) { _ticker?.Stop(); _ticker = null; if (_live != null) FinishStatus(_live); _live = null; _generation = null; SetBusy(false); } generation.Dispose(); if (ReferenceEquals(_activeTurn, turn)) _activeTurn = null; Composer.Focus(); }
     }
 
     private async Task SendAsync()
     {
         var input = Composer.Text;
         if (string.IsNullOrWhiteSpace(input) || _generation != null) return;
+        // Started before the first reply so the links exist by the time it is drawn; the turn itself never waits for
+        // the index, and a solution opened after the window loaded is picked up here.
+        _ = EnsureSymbolIndexAsync();
+        var editsBefore = EditTools.Revisions;
         if (string.Equals(Services.ActiveSession.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase))
         {
             await SendClaudeAsync(input);
+            // The CLI edits its own files; a declaration it added or removed makes the index stale for the next reply.
+            if (EditTools.Revisions > editsBefore) _symbolIndex = null;
             return;
         }
         if (!(ModelBox.SelectedItem is ModelInfo model)) return;
@@ -293,220 +429,11 @@ public partial class ChatControl : UserControl
         SetBusy(true); _generation = new CancellationTokenSource(); var token = _generation.Token; StartTicker();
         try
         {
-            Services.ApplyOptions();
-            // Read once per turn, not once per round: the files are the same for the whole turn, and re-reading them
-            // on every request would be three file reads for text that cannot have changed underneath us. A null root
-            // yields "", so a solution that is not open costs the request nothing.
-            var repoInstructions = RepoInstructions.Load(await SolutionRootAsync());
-            // Copilot Chat treats the round budget as a setting and asks before spending more rather than dying
-            // at a fixed count. Clamp after ApplyOptions so a mid-session change still takes effect this turn.
-            var limit = ChatStateLimits.ClampToolRounds(Services.Settings.MaxToolRounds);
-            var stopped = false; ChatMessage? last = null; var finish = "";
-            // What automatic verification last reported, and what the model is told when it answers with prose
-            // instead of fixing it. One flag for both checks: from the model's side "the last verification
-            // failed" is one state, and the reminder is only the wording that goes with whichever check it was.
-            var unresolvedVerification = false;
-            var repairReminder = "";
-            var repairReminders = 0;
-            var contextNoted = false;
-            for (var round = 1; ; round++)
-            {
-                var assistant = new ChatMessage { Role = "assistant" };
-                _history.Add(assistant); last = assistant;
-                finish = "";
-                // Summarized before it is shortened, and only once the request has actually outgrown its budget:
-                // under the budget there is nothing to save, and a summary would be a call spent to make the
-                // request no smaller. What this recovers is the thread — the whole reason phase 1's shortening is
-                // a loss at all — and what it cannot reach, Trim still shortens below.
-                var prompt = _history.Take(_history.Count - 1).ToList();
-                if (ContextBudget.TotalChars(prompt) > ChatStateLimits.MaxPromptChars)
-                    prompt = await SummarizeAsync(prompt, model, token).ConfigureAwait(true);
-                // The budget is spent before sanitizing, because what it measures is the transcript that will
-                // actually be sent. Nothing is dropped to fit: an old tool result loses its body and keeps the
-                // call it answers, since a result that answers no call is refused by the server. Note the
-                // shortening once a turn, not once a round - the same old results qualify from the round the
-                // budget is first over, and a row every round would bury the transcript.
-                var trimmed = ContextBudget.Trim(prompt, ChatStateLimits.MaxPromptChars, ChatStateLimits.KeepRecentToolRounds, out var shortened);
-                // Sanitizing is what keeps the request valid: every tool result must answer a call the assistant
-                // announced and every announced call must be answered, or an OpenAI-compatible server rejects
-                // the whole transcript. A cancelled tool batch or a history loaded from an older build can
-                // otherwise leave the two out of step.
-                var history = ChatStateLimits.Sanitize(trimmed);
-                if (shortened > 0 && !contextNoted)
-                {
-                    contextNoted = true;
-                    AddToolNote("", "Context · " + shortened + " older tool result" + (shortened == 1 ? "" : "s") + " shortened to fit the request", true);
-                }
-                // Built here, not stored: the system prompt and the attachment block are added at request time and the
-                // transcript keeps only what the user typed and what the model answered.
-                // With the tools switched off an attached file is only a path, and the model has no way to open it, so
-                // a bounded excerpt goes with the request instead. The turn keeps the path either way, so the chat and
-                // the stored session are unaffected by which way the setting is set.
-                var context = Services.Settings.EnableToolCalling
-                    ? _activeTurn?.Context
-                    : AgentPrompt.InlineFiles(_activeTurn?.Context, ReadAttachedText);
-                // The error list is read every round rather than once a turn, because its whole value is being
-                // current and a round that just edited a file is exactly when it has changed. Read, not built —
-                // it is a walk over items already in the window — and the block says so, so an entry that predates
-                // this turn is not read as the result of it. It joins the system prompt and never _history: that is
-                // rebuilt per request, so this needs no sanitizing, costs the stored conversation nothing, and
-                // goes away by itself once the list is clean.
-                var errors = BuildDiagnostics.ToStandingNote(await SolutionBuild.ReadErrorListAsync().ConfigureAwait(true));
-                var request = AgentPrompt.Build(history, context, _mode, Services.Settings.EnableToolCalling, Services.Settings.EnableFileEditing, Services.Settings.EnableTerminalTools, repoInstructions, errors);
-
-                var view = AddAssistantBubble(round == 1 ? "Thinking" : "Reading the tool results");
-                _streamed = 0; _phase = round == 1 ? "Thinking" : "Reading the tool results";
-
-                if (Services.Settings.EnableStreaming)
-                    await Services.StreamAsync(model, request, async update =>
-                    {
-                        assistant.Content += update.ContentDelta; assistant.Reasoning += update.ReasoningDelta;
-                        if (update.ToolCalls.Count > 0) assistant.ToolCalls = update.ToolCalls;
-                        if (update.FinishReason.Length > 0) finish = update.FinishReason;
-                        _streamed = assistant.Content.Length;
-                        _phase = assistant.Content.Length > 0 ? "Writing" : "Thinking";
-                        await Dispatcher.InvokeAsync(() => SetContent(view, assistant));
-                    }, token).ConfigureAwait(true);
-                else
-                {
-                    var complete = await Services.CompleteAsync(model, request, token).ConfigureAwait(true);
-                    assistant.Content = complete.Content; assistant.Reasoning = complete.Reasoning; assistant.ToolCalls = complete.ToolCalls;
-                    SetContent(view, assistant);
-                }
-                _lastExchange = LastExchange; view.Exchange = _lastExchange;   // attach the raw JSON to the bubble that came from it
-                // One assistant message per round, appended in order. Overwriting the turn's first assistant
-                // instead would record every round's calls against a single message, leaving the stored turn
-                // with results that answer nothing and calls that are never answered.
-                _activeTurn?.Messages.Add(ChatStateLimits.CopyMessage(assistant));
-                FinishStatus(view);
-
-                if (assistant.ToolCalls.Count == 0)
-                {
-                    // A prose answer does not resolve a failed verification build. Give the model one explicit
-                    // correction round instead of accepting a false-success answer, but keep the retry bounded so
-                    // a model that refuses to edit cannot spin forever.
-                    if (unresolvedVerification && repairReminders++ == 0)
-                    {
-                        var reminder = new ChatMessage { Role = "user", Content = repairReminder };
-                        _history.Add(reminder);
-                        _activeTurn?.Messages.Add(ChatStateLimits.CopyMessage(reminder));
-                        SaveSession();
-                        if (round < limit) continue;
-                    }
-                    SaveSession();
-                    break;
-                }
-
-                var revisionsAtRoundStart = EditTools.Revisions;
-                foreach (var call in assistant.ToolCalls)
-                {
-                    token.ThrowIfCancellationRequested();
-                    _phase = "Running " + call.Name;
-                    // The revision count says whether this call produced an edit, which is what puts the diff and the
-                    // undo on this row rather than on the previous one.
-                    var revisions = EditTools.Revisions;
-                    var result = await ContextTools.ExecuteAsync(LiteLlmPackage.Instance, call.Name, call.Arguments, token).ConfigureAwait(true);
-                    var toolMessage = new ChatMessage { Role = "tool", ToolCallId = call.Id, ToolName = call.Name, Content = result.Content };
-                    _history.Add(toolMessage);
-                    _activeTurn?.Messages.Add(ChatStateLimits.CopyMessage(toolMessage));
-                    AddToolNote(call.Name, result.Summary, result.Ok, null, null, EditTools.Revisions > revisions ? EditTools.Latest : null);
-                }
-
-                // Whether this round's build step ran and came back clean, which is the only state in which the
-                // assemblies on disk are the ones this round just wrote. Per round rather than per turn: a later
-                // round that only reads files must not run the tests again on the strength of an earlier build.
-                var buildVerified = false;
-
-                // The build check is what stops an edit that does not compile from being reported as a success: it
-                // runs once the round's edits are in, on the whole solution, and only when a file actually changed —
-                // a round that only read files has nothing to verify. It runs again on every later round that edits
-                // something, until the Error List comes back empty: a fixed number of attempts used to end the turn
-                // with the errors still listed, which is the failure this feature exists to prevent. The round
-                // budget below is what bounds it, and that asks the user before it grows.
-                if (Services.Settings.VerifyBuildAfterEdits && _mode == "agent" && Services.Settings.EnableFileEditing
-                    && EditTools.Revisions > revisionsAtRoundStart)
-                {
-                    _phase = "Building the solution";
-                    var listed = await SolutionBuild.VerifyAsync(token).ConfigureAwait(true);
-                    if (listed != null)   // null is "could not verify", which is not the same as "no errors"
-                    {
-                        var report = BuildDiagnostics.Summarize(listed);
-                        if (_activeTurn != null) _activeTurn.Build = report;
-                        AddToolNote("build", report.Summary, report.Errors == 0, null, report.Detail);
-                        // Handed back as a user message rather than a tool result: a tool result answers a call the
-                        // assistant announced, and this one answers nothing, so ChatStateLimits.Sanitize would drop
-                        // it before the model ever saw it. Persist it on the active turn as well: _history is rebuilt
-                        // from turn messages after a reload/continuation, and losing this note loses the repair task.
-                        buildVerified = report.Errors == 0;
-                        unresolvedVerification = !buildVerified;
-                        if (unresolvedVerification)
-                        {
-                            var buildNote = new ChatMessage { Role = "user", Content = BuildDiagnostics.ToModelNote(report) };
-                            _history.Add(buildNote);
-                            _activeTurn?.Messages.Add(ChatStateLimits.CopyMessage(buildNote));
-                            repairReminder = BuildDiagnostics.RepairReminder;
-                            repairReminders = 0;
-                        }
-                    }
-                }
-
-                // The tests run on top of a build that passed, never instead of it: what is on disk is then the
-                // code in the editor, so a failure is a real one. Skipped when the build failed or could not be
-                // verified, because a test run against the previous round's binaries reports on code that has
-                // been replaced, and a green result from stale assemblies is worse than no result at all.
-                if (buildVerified && Services.Settings.VerifyTestsAfterEdits)
-                {
-                    _phase = "Running the tests";
-                    var (tests, problem) = await SolutionTests.RunAsync(token).ConfigureAwait(true);
-                    if (tests != null)
-                    {
-                        if (_activeTurn != null) _activeTurn.Tests = tests;
-                        AddToolNote("tests", tests.Summary, tests.Errors == 0, null, tests.Detail);
-                        if (tests.Errors > 0)
-                        {
-                            var testNote = new ChatMessage { Role = "user", Content = TestDiagnostics.ToModelNote(tests) };
-                            _history.Add(testNote);
-                            _activeTurn?.Messages.Add(ChatStateLimits.CopyMessage(testNote));
-                            unresolvedVerification = true;
-                            repairReminder = TestDiagnostics.RepairReminder;
-                            repairReminders = 0;
-                        }
-                    }
-                    else if (problem.Length > 0)
-                    {
-                        // Said out loud rather than passed over: a check that did not happen and a check that
-                        // found nothing draw the same silent transcript otherwise, and only one of them means
-                        // the code is fine.
-                        AddToolNote("tests", TestDiagnostics.ToUnverifiedLine(problem), false);
-                    }
-                }
-                SaveSession();   // once per round, not per tool: each save re-serializes the whole document
-
-                // The budget is only consulted once the results are in, so what goes back to the model is always
-                // a complete exchange — the same reason Copilot Chat checks at the top of its loop.
-                if (round < limit) continue;
-                if (ChatStateLimits.AtToolRoundsCeiling(limit))
-                {
-                    stopped = true;
-                    AddToolNote("", "Stopped at the " + ChatStateLimits.MaxToolRoundsCeiling + "-round ceiling. The results so far are kept — send another message to continue from them.", false);
-                    break;
-                }
-                var raised = ChatStateLimits.ExtendToolRounds(limit);
-                if (!await AskToContinueAsync(limit, raised, token).ConfigureAwait(true)) { stopped = true; break; }
-                limit = raised;
-            }
-            // Skipped when the user chose to stop: `last` is then the tool request they declined to continue, so
-            // its emptiness says nothing about the model running out of budget, and the stop note is already up.
-            if (!stopped && last != null && last.Content.Length == 0 && last.ToolCalls.Count == 0)
-            {
-                if (last.Reasoning.Length > 0)
-                    AddToolNote("", "The model spent its whole " + Services.Settings.MaxTokens + "-token budget on reasoning and never wrote an answer. Raise \"Maximum tokens\" in Tools ▸ Options ▸ LiteLLM.", false);
-                else if (finish == "length") AddToolNote("", "The reply hit the " + Services.Settings.MaxTokens + "-token limit before it produced any text.", false);
-                else throw new LiteLlmException("The model returned an empty response.", "No content or tool calls.");
-            }
-            else if (!stopped && finish == "length") AddToolNote("", "The reply was cut off at the " + Services.Settings.MaxTokens + "-token limit.", false);
-            if (_activeTurn != null) { _activeTurn.Status = ChatTurnStatus.Complete; _activeTurn.CompletedUtc = DateTime.UtcNow; }
-            SaveSession(); StateText.Text = string.Empty;
+            // The round loop lives in AgentHarness now: with the tools and the verification steps inside it, a
+            // turn is a piece of work rather than a view update, and this control is only what it reads and
+            // draws through. What stays here is what belongs to the window — the composer, the token, the
+            // outcome — and the harness draws through the IAgentView this control implements.
+            await new AgentHarness(this, Services, model).RunAsync(token).ConfigureAwait(true);
         }
         catch (OperationCanceledException) { if (_activeTurn != null) { _activeTurn.Status = ChatTurnStatus.Cancelled; _activeTurn.CompletedUtc = DateTime.UtcNow; } SaveSession(); StateText.Text = "Stopped"; }
         catch (Exception ex)
@@ -518,77 +445,32 @@ public partial class ChatControl : UserControl
             SaveSession(); StateText.Text = ex.Message;
             Services.Log(detail);
         }
-        finally { _ticker?.Stop(); _ticker = null; if (_live != null) FinishStatus(_live); _live = null; _generation.Dispose(); _generation = null; SetBusy(false); _activeTurn = null; Composer.Focus(); }
+        finally { _ticker?.Stop(); _ticker = null; if (_live != null) FinishStatus(_live); _live = null; _generation.Dispose(); _generation = null; SetBusy(false); _activeTurn = null; Composer.Focus(); if (EditTools.Revisions > editsBefore) _symbolIndex = null; }
     }
 
-    /// <summary>Replaces the oldest, already-covered part of an over-budget transcript with a briefing written by
-    /// the utility model, so a long turn keeps the thread instead of only losing what it cannot afford to send.
-    ///
-    /// Returns the transcript unchanged whenever there is nothing worth doing: too little history, nothing new
-    /// since the last summary, or a call that failed. That is the rule this whole method is built around — a
-    /// summary is an improvement to the request and never something the turn depends on, so every failure here
-    /// has to leave the request exactly what the budget alone would have made it.
-    ///
-    /// The summary is written once per span and reused: what the previous one stands for is left standing, and
-    /// only the material that has piled up since is folded in, which is what keeps this from costing a call on
-    /// every round.</summary>
-    private async Task<List<ChatMessage>> SummarizeAsync(List<ChatMessage> messages, ModelInfo model, CancellationToken token)
-    {
-        var summaries = _activeTurn?.Summaries;
-        var covered = summaries != null && summaries.Count > 0 ? summaries[summaries.Count - 1].Messages : 0;
-        // A stored transcript is head-sliced on the way to disk, so a count from an earlier turn can name
-        // messages that are no longer there. Starting over costs one call; trusting it would silently stop
-        // summarizing for the rest of the conversation.
-        if (covered < 0 || covered > messages.Count) covered = 0;
-        var previous = covered > 0 ? summaries![summaries.Count - 1].Detail : null;
-
-        if (!ContextSummary.TryBuildRequest(messages, covered, previous, ChatStateLimits.KeepRecentToolRounds, out var request, out var through))
-            return covered > 0 ? ContextSummary.Merge(messages, covered, previous!) : messages;
-
-        try
-        {
-            _phase = "Summarizing the conversation";
-            var utility = UtilityModel(model);
-            var answer = await Services.CompleteInternalAsync(utility, request, ContextSummary.UtilitySettings(Services.Settings), token).ConfigureAwait(true);
-            var text = ChatStateLimits.Clip(answer.Content.Trim(), ContextSummary.MaxSummaryChars);
-            // A reasoning model can spend the whole small budget thinking and answer with nothing. Replacing the
-            // messages with an empty briefing would quietly delete the conversation, so it is taken as the failure
-            // it is and said out loud.
-            if (text.Length == 0)
-            {
-                AddToolNote("", "Context · the utility model (" + utility.Id + ") returned no summary, so the older messages were left in place", false);
-                return covered > 0 ? ContextSummary.Merge(messages, covered, previous!) : messages;
-            }
-
-            var report = ContextSummary.Report(through, text);
-            _activeTurn?.Summaries.Add(report);
-            AddToolNote("", report.Summary, true, null, report.Detail);
-            Services.Log("Context summarized with " + utility.Id + ": " + through + " messages, " + text.Length + " characters");
-            SaveSession();
-            return ContextSummary.Merge(messages, through, text);
-        }
-        catch (OperationCanceledException) { throw; }   // the user stopped; that is not a summarization failure
-        catch (Exception ex)
-        {
-            AddToolNote("", "Context · could not summarize the older messages (" + ex.Message + "), so the request was sent without a briefing", false);
-            Services.Log("Context summary failed: " + ex);
-            return covered > 0 ? ContextSummary.Merge(messages, covered, previous!) : messages;
-        }
-    }
-
-    /// <summary>The model the extension thinks with: the configured utility model, or the one the chat is already
-    /// talking to. A configured model that no longer resolves falls back rather than failing — the setting names
-    /// a model that may since have been removed from the server, and a summary is never worth failing a turn
-    /// over. The id alone is accepted as well as the full key, because the key carries a server GUID and nobody
-    /// should have to type one.</summary>
-    private ModelInfo UtilityModel(ModelInfo fallback)
-    {
-        var key = (Services.Settings.UtilityModelKey ?? "").Trim();
-        if (key.Length == 0) return fallback;
-        return Services.Catalog.Match(key)
-            ?? Services.Models.FirstOrDefault(m => string.Equals(m.Id, key, StringComparison.OrdinalIgnoreCase))
-            ?? fallback;
-    }
+    /// <summary>What <see cref="AgentHarness"/> may ask of this window. Explicit rather than making the methods
+    /// public: the loop is the only caller, and the control's own API stays what the rest of the extension uses.
+    /// Each member is the same private method or field the loop used to reach directly, which is what makes the
+    /// move a move.</summary>
+    List<ChatMessage> IAgentView.History => _history;
+    ChatTurnState? IAgentView.ActiveTurn => _activeTurn;
+    HttpExchange? IAgentView.LastExchange { get => _lastExchange; set => _lastExchange = value; }
+    string IAgentView.Mode => _mode;
+    string IAgentView.Phase { get => _phase; set => _phase = value; }
+    int IAgentView.Streamed { get => _streamed; set => _streamed = value; }
+    string IAgentView.Status { get => StateText.Text; set => StateText.Text = value; }
+    Bubble IAgentView.AddAssistantBubble(string status) => AddAssistantBubble(status);
+    void IAgentView.SetContent(Bubble bubble, ChatMessage message) => SetContent(bubble, message);
+    void IAgentView.FinishStatus(Bubble bubble) => FinishStatus(bubble);
+    void IAgentView.AddToolNote(string name, string summary, bool ok, HttpExchange? exchange, string? detail, AppliedEdit? edit) => AddToolNote(name, summary, ok, exchange, detail, edit);
+    void IAgentView.AddUndoAllNote(IReadOnlyList<AppliedEdit> edits) => AddToolNote("", edits.Count == 1
+        ? "Edited 1 file this turn — right-click to undo it"
+        : "Edited " + edits.Count + " files this turn — right-click to undo them all", true, null, null, null, edits);
+    Task<bool> IAgentView.AskToContinueAsync(int limit, int raised, CancellationToken token) => AskToContinueAsync(limit, raised, token);
+    Task IAgentView.InvokeAsync(Action action) => Dispatcher.InvokeAsync(action).Task;
+    Task<string?> IAgentView.SolutionRootAsync() => SolutionRootAsync();
+    string? IAgentView.ReadAttachedText(string path) => ReadAttachedText(path);
+    void IAgentView.SaveSession() => SaveSession();
 
     /// <summary>Copilot Chat's "Continue to iterate?" checkpoint, rendered in the transcript rather than a modal
     /// dialog so the conversation stays readable while the turn waits. Resolves true to continue with the raised
@@ -633,7 +515,7 @@ public partial class ChatControl : UserControl
 
     /// <summary>A one-line record of a tool call. The result itself stays in the model's context — echoing a whole file into the conversation is what burns the user's tokens. An edit is the one exception, and even then the diff is
     /// offered on the row's menu rather than printed into the transcript.</summary>
-    private void AddToolNote(string name, string summary, bool ok, HttpExchange? exchange = null, string? detail = null, AppliedEdit? edit = null)
+    private void AddToolNote(string name, string summary, bool ok, HttpExchange? exchange = null, string? detail = null, AppliedEdit? edit = null, IReadOnlyList<AppliedEdit>? undoAll = null)
     {
         var row = new StackPanel { Orientation = Orientation.Horizontal };
         row.Children.Add(new TextBlock { Text = ok ? "🔧" : "⚠", Margin = new Thickness(0, 0, 6, 0) });
@@ -645,15 +527,23 @@ public partial class ChatControl : UserControl
         if (ok) border.SetResourceReference(Border.BorderBrushProperty, CommonDocumentColors.ListItemBorderBrushKey);
         else border.SetResourceReference(Border.BorderBrushProperty, "DangerBrush");
         var full = detail ?? "";
-        border.ContextMenu = Menu(
+        var entries = new List<object?>
+        {
             Item("Copy error report", () => Copy(Report(exchange, summary, full), "Report"), !ok && exchange != null),
             Item("Copy summary", () => Copy(summary, "Summary")),
             Item("Copy full detail", () => Copy(full, "Detail"), full.Length > 0),
             null,
             Item("Copy diff", () => Copy(edit!.Diff, "Diff"), edit != null),
-            Item("Undo this edit", () => UndoEdit(edit!), edit != null),
-            Item("Copy request (JSON)", () => Copy(exchange?.RequestBody, "Request"), exchange != null),
-            Item("Copy response (JSON)", () => Copy(exchange?.ResponseBody, "Response"), exchange != null));
+            Item("Undo this edit", () => UndoEdit(edit!), edit != null)
+        };
+        // Only on the turn's own row, and only when there is more than the row's single undo to offer. It sits
+        // with the other undo rather than on the turn's assistant bubble, because the menu is where this chat
+        // keeps every action that can change a file back.
+        if (undoAll is { Count: > 0 })
+            entries.Add(Item("Undo all " + undoAll.Count + (undoAll.Count == 1 ? " edit" : " edits") + " from this turn", () => _ = UndoAllAsync(undoAll)));
+        entries.Add(Item("Copy request (JSON)", () => Copy(exchange?.RequestBody, "Request"), exchange != null));
+        entries.Add(Item("Copy response (JSON)", () => Copy(exchange?.ResponseBody, "Response"), exchange != null));
+        border.ContextMenu = Menu(entries.ToArray());
         border.ToolTip = edit != null ? edit.Diff : full.Length > 0 ? full : (name.Length > 0 ? name : summary);
         Messages.Children.Add(border);
         ScrollIfFollowing();
@@ -665,6 +555,20 @@ public partial class ChatControl : UserControl
         {
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
             StateText.Text = EditTools.Undo((DTE?)await LiteLlmPackage.Instance.GetServiceAsync(typeof(DTE)), edit);
+        }
+        catch (Exception ex) { StateText.Text = "Could not undo: " + ex.Message; }
+    }
+
+    /// <summary>Undoes a whole turn's edits in one go. The order is <see cref="EditTools.UndoAll"/>'s, not this
+    /// row's: newest first, because each edit recorded the file as it stood just before it ran. Returns a task
+    /// rather than being an <c>async void</c> — the menu action is not an event handler, and the surrounding code
+    /// already carries the analyzer warnings this would have added to.</summary>
+    private async Task UndoAllAsync(IReadOnlyList<AppliedEdit> edits)
+    {
+        try
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            StateText.Text = EditTools.UndoAll((DTE?)await LiteLlmPackage.Instance.GetServiceAsync(typeof(DTE)), edits);
         }
         catch (Exception ex) { StateText.Text = "Could not undo: " + ex.Message; }
     }
@@ -714,6 +618,126 @@ public partial class ChatControl : UserControl
         }
         finally { answered = true; Messages.Children.Remove(card); }
         return apply;
+    }
+
+    /// <summary>The question an MCP tool call asks. The card names both the server and the tool the user configured,
+    /// shows the annotations the server published, and prints the model's arguments with anything that looks like a
+    /// credential masked. Deny is offered as plainly as Allow, and "Always allow" writes the server's own tool name
+    /// to the allow-list that <see cref="McpPolicy"/> reads.
+    ///
+    /// The confirmation is the only place a hint becomes a decision: an unannotated tool asks, and so does a
+    /// read-only one unless the global exception and the server's own switch are both on.</summary>
+    private async Task<bool> AskToApproveMcpToolAsync(McpApprovalRequest request)
+    {
+        if (AllowAllPermissions) return true;
+        var tool = request.Tool;
+        var server = tool.Server;
+
+        var badges = new List<string>();
+        if (tool.ReadOnlyHint) badges.Add("read-only");
+        if (tool.DestructiveHint) badges.Add("destructive");
+        if (tool.OpenWorldHint) badges.Add("open-world");
+        if (badges.Count == 0) badges.Add("may change something");
+
+        var body = new StackPanel();
+        body.Children.Add(new TextBlock
+        {
+            Text = "⚙  MCP · " + server.Name + " · " + tool.DisplayName,
+            FontWeight = FontWeights.SemiBold,
+            TextWrapping = TextWrapping.Wrap
+        });
+        body.Children.Add(new TextBlock
+        {
+            Text = tool.Name + "  ·  " + string.Join(" · ", badges),
+            Style = (Style)FindResource("Caption"),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 2, 0, 0)
+        });
+        if (!string.IsNullOrWhiteSpace(tool.Description))
+        {
+            var description = tool.Description!;
+            body.Children.Add(new TextBlock
+            {
+                Text = description.Length <= 400 ? description : description.Substring(0, 400) + "…",
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 6, 0, 0)
+            });
+        }
+
+        var arguments = RedactArguments(request.Arguments).ToString(Formatting.Indented);
+        if (arguments.Length > 4000) arguments = arguments.Substring(0, 4000) + "\n…";
+        body.Children.Add(new TextBox
+        {
+            Text = arguments,
+            IsReadOnly = true,
+            AcceptsReturn = true,
+            FontFamily = new FontFamily("Consolas, Courier New"),
+            MaxHeight = 220,
+            Margin = new Thickness(0, 8, 0, 0),
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            TextWrapping = TextWrapping.NoWrap
+        });
+
+        var deny = new Button { Content = "Deny" };
+        var always = new Button { Content = "Always allow this tool" };
+        var allow = new Button { Content = "Allow once", Style = (Style)FindResource("PrimaryButton") };
+        body.Children.Add(new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 10, 0, 0),
+            Children = { deny, always, allow }
+        });
+        var card = new Border { Style = (Style)FindResource("Card"), HorizontalAlignment = HorizontalAlignment.Left, MaxWidth = 900, Child = body, Margin = new Thickness(0, 0, 0, 12) };
+        card.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.AccentMediumBrushKey);
+
+        var source = new TaskCompletionSource<bool>();
+        var answered = false;
+        void Answer(bool approved, bool remember)
+        {
+            if (answered) return;
+            answered = true;
+            deny.IsEnabled = false; always.IsEnabled = false; allow.IsEnabled = false;
+            if (approved && remember && !server.AllowedTools.Any(name => string.Equals(name, tool.Name, StringComparison.Ordinal)))
+            {
+                server.AllowedTools.Add(tool.Name);
+                Services.Save();
+            }
+            source.TrySetResult(approved);
+        }
+        deny.Click += (s, e) => Answer(false, false);
+        always.Click += (s, e) => Answer(true, true);
+        allow.Click += (s, e) => Answer(true, false);
+        Messages.Children.Add(card);
+        ScrollIfFollowing();
+
+        bool approvedResult;
+        try
+        {
+            using ((_generation?.Token ?? CancellationToken.None).Register(() => source.TrySetResult(false)))
+                approvedResult = await source.Task.ConfigureAwait(true);
+        }
+        finally { answered = true; Messages.Children.Remove(card); }
+        return approvedResult;
+    }
+
+    /// <summary>Masks values whose property name looks like a credential before the arguments are shown. The model
+    /// produced this text, and a token pasted into the conversation must not become a second place it is printed.
+    /// </summary>
+    private static JToken RedactArguments(JToken token)
+    {
+        if (token is JObject obj)
+        {
+            var copy = new JObject();
+            foreach (var property in obj.Properties())
+                copy[property.Name] = McpSecrets.LooksSecret(property.Name)
+                    ? new JValue("<redacted>")
+                    : RedactArguments(property.Value);
+            return copy;
+        }
+        if (token is JArray array) return new JArray(array.Select(RedactArguments));
+        return token.DeepClone();
     }
 
     private async Task<bool> AskToRunCommandAsync(CommandProposal proposal)
@@ -911,21 +935,34 @@ public partial class ChatControl : UserControl
 
     private FrameworkElement Directed(string text)
     {
-        var rendered = MarkdownRenderer.Render(text, reference =>
-            ThreadHelper.JoinableTaskFactory.RunAsync(async () => await OpenReferenceAsync(reference)));
+        var openFile = new Action<FileReference>(reference => OpenLater(() => OpenReferenceAsync(reference)));
+        var index = _symbolIndex;
+        var rendered = index == null
+            ? MarkdownRenderer.Render(text, openFile)
+            : MarkdownRenderer.Render(text, openFile, index.Find, location => OpenLater(() => OpenSymbolAsync(location)));
         rendered.FlowDirection = TextDirection.For(text);
         return rendered;
     }
+
+    /// <summary>Opens through Visual Studio's editor without making the drawing of a reply wait for it. Both open
+    /// operations report their own failures into the status line, so there is nothing left for the caller to do.</summary>
+    private static void OpenLater(Func<Task> open) =>
+        ThreadHelper.JoinableTaskFactory.RunAsync(async () => await open());
 
     /// <summary>Replaces the bubble's content, keeping the author line and any live status panel at the foot.</summary>
     private void SetContent(Bubble bubble, ChatMessage message)
     {
         bubble.Message = message;
-        var body = bubble.Body; var keep = bubble.Live != null ? 1 : 0;
-        while (body.Children.Count > 1 + keep) body.Children.RemoveAt(1);
+        // Everything in the body is drawn from the message except the live panel, which belongs at the foot while
+        // a turn runs. Redrawing the body as a whole is what stops a previous streamed chunk from surviving: the
+        // old cleanup kept one rendered child, and that child was the first chunk of every streamed reply.
+        var body = bubble.Body;
+        var live = bubble.Live;
+        body.Children.Clear();
         if (message.Reasoning.Length > 0 && ShowReasoning)
-            body.Children.Insert(1, new Expander { Header = "Thinking · Show reasoning", Content = Directed(message.Reasoning), Margin = new Thickness(0, 2, 0, 6) });
-        if (message.Content.Length > 0) body.Children.Insert(body.Children.Count - keep, Directed(message.Content));
+            body.Children.Add(new Expander { Header = "Thinking · Show reasoning", Content = Directed(message.Reasoning), Margin = new Thickness(0, 2, 0, 6) });
+        if (message.Content.Length > 0) body.Children.Add(Directed(message.Content));
+        if (live != null) body.Children.Add(live);
         ScrollIfFollowing();
     }
 
@@ -1046,8 +1083,37 @@ public partial class ChatControl : UserControl
         ContextBar.Children.Clear();
         if (_activeFileContext != null) ContextBar.Children.Add(Chip(_activeFileContext, true));
         foreach (var item in _attachments) ContextBar.Children.Add(Chip(item, false));
-        ContextBar.Visibility = _activeFileContext != null || _attachments.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        // This switch changes what the model is sent without changing a single row on screen, so it needs a chip
+        // of its own: a model that silently never saw the earlier turns would otherwise read as a bug.
+        var historyOff = Services.ActiveSession.IgnoreHistory
+            && !string.Equals(Services.ActiveSession.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase);
+        if (historyOff) ContextBar.Children.Add(HistoryChip());
+        ContextBar.Visibility = _activeFileContext != null || _attachments.Count > 0 || historyOff ? Visibility.Visible : Visibility.Collapsed;
         RefreshComposerState();
+    }
+
+    /// <summary>The chip for a chat that is not sending its earlier turns. Its × turns history back on, so the only
+    /// way out of the state is not the menu that entered it.</summary>
+    private Border HistoryChip()
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal };
+        // The shell's own History glyph — a clock with a counter-clockwise arrow — rather than a card index or a
+        // clock face emoji: the chip is about earlier turns no longer being sent, and this is the mark Visual Studio
+        // uses for exactly that idea.
+        row.Children.Add(new TextBlock
+        {
+            Text = "\uE81C",
+            FontFamily = new FontFamily("Segoe MDL2 Assets"),
+            Margin = new Thickness(0, 0, 5, 0),
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        row.Children.Add(new TextBlock { Text = "History off", Style = (Style)FindResource("Caption"), VerticalAlignment = VerticalAlignment.Center });
+        var remove = new Button { Content = "×", Style = (Style)FindResource("SubtleButton"), Padding = new Thickness(5, 0, 5, 0), Margin = new Thickness(4, 0, 0, 0), ToolTip = "Send earlier messages again" };
+        remove.Click += (s, e) => SetIgnoreHistory(false);
+        row.Children.Add(remove);
+        var border = new Border { Style = (Style)FindResource("Tag"), Margin = new Thickness(0, 0, 5, 3), ToolTip = "Earlier messages in this chat are kept on screen and in the saved conversation, but are not sent with the next message.", Child = row };
+        border.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.AccentMediumBrushKey);
+        return border;
     }
 
     /// <summary>One attachment. The label opens the file it names; the × takes it off the message. The full path lives
@@ -1100,6 +1166,8 @@ public partial class ChatControl : UserControl
     {
         _ = RefreshActiveFileAsync();
         _ = RefreshSessionScopeAndRenderAsync();
+        // This is also how a solution opened after the window was loaded gets its index built.
+        _ = EnsureSymbolIndexAsync();
     }
 
     private async Task RefreshSessionScopeAndRenderAsync()
@@ -1109,6 +1177,19 @@ public partial class ChatControl : UserControl
         if (ReferenceEquals(previous, Services.Sessions)) return;
         RenderSession();
         ReloadModels();
+    }
+
+    /// <summary>Turns "send only this turn" on or off for the conversation on screen. The transcript is untouched;
+    /// what changes is the request the next turn builds from it.</summary>
+    private void SetIgnoreHistory(bool value)
+    {
+        if (Services.ActiveSession.IgnoreHistory == value) return;
+        Services.ActiveSession.IgnoreHistory = value;
+        SaveSession();
+        RefreshContextBar();
+        AddToolNote("", value
+            ? "History · earlier messages in this chat will not be sent with the next turn"
+            : "History · earlier messages in this chat will be sent again", true, null, null, null);
     }
 
     private void AutoContext_Click(object sender, RoutedEventArgs e) => SetAutoContext(!Services.Settings.AutoAttachActiveDocument);
@@ -1126,6 +1207,11 @@ public partial class ChatControl : UserControl
     {
         var auto = Item((Services.Settings.AutoAttachActiveDocument ? "✓ " : "") + "Auto context — attach active editor file", () => SetAutoContext(!Services.Settings.AutoAttachActiveDocument));
         auto.ToolTip = "When enabled, the file currently open in the editor is automatically included with every message.";
+        var claude = string.Equals(Services.ActiveSession.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase);
+        var history = Item((Services.ActiveSession.IgnoreHistory ? "✓ " : "") + "History — ignore earlier turns in this chat", () => SetIgnoreHistory(!Services.ActiveSession.IgnoreHistory), !claude);
+        history.ToolTip = claude
+            ? "Available on the LiteLLM backend."
+            : "Earlier messages in this chat stay on screen and in the saved conversation, but are not sent with the next message. Takes effect from the next turn.";
         var defaultPermissions = Item((AllowAllPermissions ? "" : "✓ ") + "Default permissions", () => SetPermissionMode("default"));
         defaultPermissions.ToolTip = "Ask before protected actions according to the current settings.";
         var allowAll = Item((AllowAllPermissions ? "✓ " : "") + "Allow all", () => SetPermissionMode("allowAll"));
@@ -1133,6 +1219,7 @@ public partial class ChatControl : UserControl
         var menu = Menu(
             auto,
             Item("Add context…", ShowContextMenu),
+            history,
             Item("Copy…", () => Copy_Click(sender, e)),
             null,
             defaultPermissions,
@@ -1230,6 +1317,79 @@ public partial class ChatControl : UserControl
         }
         catch (ArgumentException) { StateText.Text = "Referenced file is outside the solution"; }
         catch (Exception ex) { StateText.Text = "Could not open referenced file"; Services.Log(ex.ToString()); }
+    }
+
+    /// <summary>Opens the file an indexed declaration lives in and moves the caret to its name. The path came from the
+    /// index under the solution root, not from the model, so there is no outside-the-solution case here — but the file
+    /// can have been deleted or the solution closed since the index was built, and each failure is said rather than
+    /// leaving the click without an answer.</summary>
+    private async Task OpenSymbolAsync(SymbolLocation location)
+    {
+        try
+        {
+            if (!File.Exists(location.Path)) { StateText.Text = "The symbol's file is no longer there"; return; }
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            var dte = (DTE?)await LiteLlmPackage.Instance.GetServiceAsync(typeof(DTE));
+            var window = dte?.ItemOperations.OpenFile(location.Path);
+            if (window == null) { StateText.Text = "Could not open the symbol's file"; return; }
+            window.Activate();
+            if (dte?.ActiveDocument?.Selection is TextSelection selection)
+            {
+                if (location.Column > 0) selection.MoveToLineAndOffset(location.Line, location.Column, false);
+                else selection.GotoLine(location.Line, false);
+            }
+        }
+        catch (Exception ex) { StateText.Text = "Could not open the symbol"; Services.Log(ex.ToString()); }
+    }
+
+    /// <summary>Builds the declaration index for the current solution, then redraws the conversation so replies added
+    /// before it was ready gain their links. Best-effort by design: an unreadable tree costs the links and not the
+    /// chat, and a running turn is left alone because redrawing it would rebuild the live bubble from the stored turn,
+    /// which lags the text still streaming into it.</summary>
+    private async Task EnsureSymbolIndexAsync()
+    {
+        if (_symbolIndexBuilding) return;
+        string? root;
+        try { root = await SolutionRootAsync(); }
+        catch (Exception ex) { Services.Log("Symbol index could not start: " + ex); return; }
+        var directory = root ?? "";
+        if (directory.Length == 0) return;
+        if (_symbolIndex != null && string.Equals(directory, _symbolIndexRoot, StringComparison.OrdinalIgnoreCase)) return;
+
+        _symbolIndexBuilding = true;
+        _symbolIndexRoot = directory;
+        _symbolIndex = null;
+        SymbolIndex? built = null;
+        try { built = await Task.Run(() => SymbolIndex.Build(SourceFiles(directory))); }
+        catch (Exception ex) { Services.Log("Symbol index could not be built: " + ex); }
+        finally { _symbolIndexBuilding = false; }
+
+        if (built == null) return;
+        await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+        // A solution can be closed while a large tree is being read; an index of the previous one would link to files
+        // the user has since closed. Leaving it unset makes the next activation build the new one.
+        var current = await SolutionRootAsync();
+        if (!string.Equals(current, directory, StringComparison.OrdinalIgnoreCase)) return;
+        _symbolIndex = built;
+        if (IsLoaded && _generation == null) RenderSession();
+    }
+
+    private static IReadOnlyList<string> SourceFiles(string root)
+    {
+        var files = new List<string>();
+        try
+        {
+            foreach (var path in Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories))
+            {
+                // bin, obj, .git and .vs hold generated or stale copies; indexing them would link a declaration to a
+                // file the user cannot edit and does not recognise.
+                if (ContextTools.IsNoise(path)) continue;
+                files.Add(path);
+                if (files.Count >= SymbolIndex.MaxFiles) break;
+            }
+        }
+        catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { }
+        return files;
     }
 
     /// <summary>VS Code's Add Context menu. What cannot be done here is still listed, greyed, with the reason in the
@@ -1374,12 +1534,19 @@ public partial class ChatControl : UserControl
         var text = Composer.Text;
         if (text.Length == 0 || text[text.Length - 1] != '#') return;
         if (text.Length > 1 && !char.IsWhiteSpace(text[text.Length - 2])) return;
+        // The inline picker already owns the character when there are tools to choose from; taking it back would
+        // turn the filter the user is typing into the file picker.
+        if (CanMentionMcpTools()) return;
         _picking = true;
         try { Composer.Text = text.Substring(0, text.Length - 1); Composer.CaretIndex = Composer.Text.Length; }
         finally { _picking = false; }
 
         var root = await SolutionRootAsync();
         if (root == null) { StateText.Text = "Open a solution first"; return; }
+        // The picker still opens — '#' keeps its old meaning with no tools — but not before saying why there is
+        // nothing to mention: a user who expected tools should not have to discover that from a silent fallback.
+        if (McpEnabledButNotConnected(root))
+            StateText.Text = "MCP is not connected — enable a server in the Dashboard or press ↻ on its row";
         await PickIntoAsync(root);
     }
     private async void Composer_PreviewKeyDown(object sender, KeyEventArgs e)
@@ -1406,14 +1573,19 @@ public partial class ChatControl : UserControl
 
     private async Task RefreshComposerSuggestionsAsync()
     {
+        // A programmatic write — retry restoring a prompt, a starter prompt, inserting a suggestion — must not open
+        // a picker from the text it just put back. Retry in particular restores a prompt that may end in a token.
+        if (_picking) { SlashCommandPopup.IsOpen = false; return; }
+
         var refreshVersion = ++_suggestionRefreshVersion;
         string filter;
         if (FileMentions.TryGetFilter(Composer.Text, Composer.CaretIndex, out _slashTokenStart, out _slashTokenLength, out filter))
         {
             _fileMentionMode = true;
+            _toolMentionMode = false;
+            _promptMode = false;
             var root = await SolutionRootAsync();
-            if (root == null) { SlashCommandPopup.IsOpen = false; return; }
-            if (!string.Equals(root, _mentionRoot, StringComparison.OrdinalIgnoreCase))
+            if (root != null && !string.Equals(root, _mentionRoot, StringComparison.OrdinalIgnoreCase))
             {
                 _mentionRoot = root;
                 _mentionFiles = await Task.Run(() => ReadMentionFiles(root));
@@ -1421,7 +1593,21 @@ public partial class ChatControl : UserControl
             if (refreshVersion != _suggestionRefreshVersion ||
                 !FileMentions.TryGetFilter(Composer.Text, Composer.CaretIndex, out _, out _, out var currentFilter) ||
                 !string.Equals(filter, currentFilter, StringComparison.Ordinal)) return;
-            var matches = _mentionFiles.Where(f => filter.Length == 0 || f.Name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0).Take(100).ToList();
+            var matches = new List<FileMentionEntry>();
+            // Resources come first: a server offers a handful and they are the rows a reader is least likely to
+            // find by scrolling through a solution tree. They are also offered when no solution is open, because
+            // a resource does not live in one.
+            matches.AddRange(Services.Mcp.Resources
+                .Where(resource => Matches(filter, resource.DisplayName, resource.Uri, resource.Server.Name))
+                .Take(50)
+                .Select(resource => new FileMentionEntry
+                {
+                    Name = resource.Server.Name + " · " + resource.DisplayName,
+                    Description = "MCP resource · " + resource.Uri,
+                    Resource = resource
+                }));
+            if (root != null)
+                matches.AddRange(_mentionFiles.Where(f => filter.Length == 0 || f.Name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0).Take(100));
             SlashCommandList.ItemsSource = matches;
             SlashCommandList.SelectedIndex = matches.Count > 0 ? 0 : -1;
             SlashCommandPopup.IsOpen = matches.Count > 0;
@@ -1429,14 +1615,92 @@ public partial class ChatControl : UserControl
         }
 
         _fileMentionMode = false;
-        var claude = string.Equals(Services.ActiveSession.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase);
-        if (!claude || !ClaudeSlashCommands.TryGetFilter(Composer.Text, Composer.CaretIndex, out _slashTokenStart, out _slashTokenLength, out filter))
-        { SlashCommandPopup.IsOpen = false; return; }
+        // '#' is the MCP tool picker when there are tools to offer and the backend is the one this loop runs. On
+        // the Claude backend, with MCP off, or with no connected tool it keeps its old meaning below: remove the
+        // character and open the file picker.
+        if (CanMentionMcpTools() &&
+            McpToolMentions.TryGetFilter(Composer.Text, Composer.CaretIndex,
+                out _slashTokenStart, out _slashTokenLength, out filter))
+        {
+            _toolMentionMode = true;
+            _promptMode = false;
+            var tools = Services.Mcp.Tools
+                .Where(tool => Matches(filter, tool.Name, tool.ExposedName, tool.DisplayName, tool.Server.Name,
+                    McpToolMentions.TokenFor(tool)))
+                .Take(50)
+                .Select(tool => new FileMentionEntry
+                {
+                    Name = McpToolMentions.TokenFor(tool),
+                    Description = "MCP tool · " + tool.Server.Name +
+                                  (string.IsNullOrWhiteSpace(tool.Description)
+                                      ? ""
+                                      : " · " + ChatStateLimits.OneLine(tool.Description, 160)),
+                    Tool = tool
+                })
+                .ToList();
+            // The files row is filtered like any other, so a C# directive such as '#region' produces no popup at
+            // all instead of a single row where Enter would open the file dialog.
+            if (filter.Length == 0 || Matches(filter, "Files & Folders", "file", "folder"))
+                tools.Add(new FileMentionEntry
+                {
+                    Name = "Files & Folders…",
+                    Description = "Attach files and folders",
+                    FilesPicker = true
+                });
+            SlashCommandList.ItemsSource = tools;
+            SlashCommandList.SelectedIndex = tools.Count > 0 ? 0 : -1;
+            SlashCommandPopup.IsOpen = tools.Count > 0;
+            return;
+        }
 
+        _toolMentionMode = false;
+        var claude = string.Equals(Services.ActiveSession.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase);
+        if (!ClaudeSlashCommands.TryGetFilter(Composer.Text, Composer.CaretIndex, out _slashTokenStart, out _slashTokenLength, out filter))
+        { _promptMode = false; SlashCommandPopup.IsOpen = false; return; }
+
+        if (!claude)
+        {
+            // The LiteLLM backend has no CLI slash commands of its own, so "/" is where its servers' prompts live.
+            _promptMode = true;
+            var prompts = Services.Mcp.Prompts
+                .Where(prompt => Matches(filter, prompt.DisplayName, prompt.Name, prompt.Server.Name))
+                .Take(100)
+                .Select(prompt => new PromptSuggestion
+                {
+                    Name = "/" + prompt.Name,
+                    Description = "MCP · " + prompt.Server.Name +
+                                  (string.IsNullOrWhiteSpace(prompt.Description) ? "" : " · " + prompt.Description!.Trim()),
+                    Prompt = prompt
+                })
+                .ToList();
+            SlashCommandList.ItemsSource = prompts;
+            SlashCommandList.SelectedIndex = prompts.Count > 0 ? 0 : -1;
+            SlashCommandPopup.IsOpen = prompts.Count > 0;
+            return;
+        }
+
+        _promptMode = false;
         var commands = ClaudeSlashCommands.Filter(filter);
         SlashCommandList.ItemsSource = commands;
         SlashCommandList.SelectedIndex = commands.Count > 0 ? 0 : -1;
         SlashCommandPopup.IsOpen = commands.Count > 0;
+    }
+
+    /// <summary>Whether a <c>#</c> in the composer can name an MCP tool. The tools come from the snapshot a previous
+    /// LiteLLM turn or a Dashboard connection filled; a keystroke never connects a server by itself.</summary>
+    private bool CanMentionMcpTools() =>
+        string.Equals(Services.ActiveSession.ExecutionBackend, "litellm", StringComparison.OrdinalIgnoreCase) &&
+        Services.Settings.EnableToolCalling &&
+        Services.Settings.EnableMcp &&
+        Services.Mcp.Tools.Count > 0;
+
+    private static bool Matches(string filter, params string?[] values)
+    {
+        if (string.IsNullOrEmpty(filter)) return true;
+        foreach (var value in values)
+            if (!string.IsNullOrEmpty(value) && value!.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+        return false;
     }
 
     private static IReadOnlyList<FileMentionEntry> ReadMentionFiles(string root)
@@ -1455,41 +1719,157 @@ public partial class ChatControl : UserControl
         return files.OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    private void InsertSelectedSuggestion()
+    private void InsertSelectedSuggestion() => _ = InsertSelectedSuggestionAsync();
+
+    private async Task InsertSelectedSuggestionAsync()
     {
+        if (_toolMentionMode)
+        {
+            if (!(SlashCommandList.SelectedItem is FileMentionEntry row)) return;
+            if (row.FilesPicker)
+            {
+                // The token goes back out before the picker opens, exactly as the old '#' gesture did, so the
+                // prompt is not left carrying a '#' whichever way the dialog is closed.
+                _picking = true;
+                try
+                {
+                    Composer.Text = FileMentions.RemoveToken(Composer.Text, _slashTokenStart, MentionSpanLength());
+                    Composer.CaretIndex = Math.Min(Composer.Text.Length, _slashTokenStart);
+                    SlashCommandPopup.IsOpen = false;
+                }
+                finally { _picking = false; }
+                var root = await SolutionRootAsync();
+                if (root == null) { StateText.Text = "Open a solution first"; return; }
+                await PickIntoAsync(root);
+                Composer.Focus();
+                return;
+            }
+
+            if (row.Tool == null) return;
+            var token = McpToolMentions.TokenFor(row.Tool);
+            _picking = true;
+            try
+            {
+                Composer.Text = ClaudeSlashCommands.ReplaceToken(Composer.Text, _slashTokenStart,
+                    MentionSpanLength(), token);
+                Composer.CaretIndex = Math.Min(Composer.Text.Length, _slashTokenStart + token.Length + 1);
+                SlashCommandPopup.IsOpen = false;
+            }
+            finally { _picking = false; }
+            // Selecting is not invoking: the token narrows the next turn, and the row that says a call ran is
+            // drawn only when the model actually calls it.
+            Composer.Focus();
+            return;
+        }
+
         if (_fileMentionMode)
         {
             if (!(SlashCommandList.SelectedItem is FileMentionEntry file)) return;
+            var resource = file.Resource;
             _picking = true;
             try
             {
-                Composer.Text = FileMentions.RemoveToken(Composer.Text, _slashTokenStart, _slashTokenLength);
+                Composer.Text = FileMentions.RemoveToken(Composer.Text, _slashTokenStart, MentionSpanLength());
                 Composer.CaretIndex = Math.Min(Composer.Text.Length, _slashTokenStart);
-                Attach(new ChatContextItem { Label = file.Name, Kind = "file", Preview = file.FullPath });
-                StateText.Text = "File attached";
                 SlashCommandPopup.IsOpen = false;
+                if (resource == null)
+                {
+                    Attach(new ChatContextItem { Label = file.Name, Kind = "file", Preview = file.FullPath });
+                    StateText.Text = "File attached";
+                }
             }
             finally { _picking = false; }
+            if (resource != null) await AttachResourceAsync(resource);
+            Composer.Focus();
+            return;
         }
-        else
+
+        if (_promptMode)
         {
-            if (!(SlashCommandList.SelectedItem is ClaudeSlashCommand command)) return;
-            _picking = true;
-            try
+            if (!(SlashCommandList.SelectedItem is PromptSuggestion suggestion)) return;
+            var dialog = new McpPromptDialog(suggestion.Prompt, Services.Mcp) { Owner = System.Windows.Window.GetWindow(this) };
+            if (dialog.ShowDialog() == true)
             {
-                Composer.Text = ClaudeSlashCommands.ReplaceToken(Composer.Text, _slashTokenStart, _slashTokenLength, command.Name);
-                Composer.CaretIndex = Math.Min(Composer.Text.Length, _slashTokenStart + command.Name.Length + 1);
-                SlashCommandPopup.IsOpen = false;
+                _picking = true;
+                try
+                {
+                    Composer.Text = ClaudeSlashCommands.ReplaceToken(Composer.Text, _slashTokenStart,
+                        MentionSpanLength(), dialog.Text);
+                    Composer.CaretIndex = Math.Min(Composer.Text.Length, _slashTokenStart + dialog.Text.Length + 1);
+                    SlashCommandPopup.IsOpen = false;
+                }
+                finally { _picking = false; }
             }
-            finally { _picking = false; }
+            Composer.Focus();
+            return;
         }
+
+        if (!(SlashCommandList.SelectedItem is ClaudeSlashCommand command)) return;
+        _picking = true;
+        try
+        {
+            Composer.Text = ClaudeSlashCommands.ReplaceToken(Composer.Text, _slashTokenStart, MentionSpanLength(), command.Name);
+            Composer.CaretIndex = Math.Min(Composer.Text.Length, _slashTokenStart + command.Name.Length + 1);
+            SlashCommandPopup.IsOpen = false;
+        }
+        finally { _picking = false; }
         Composer.Focus();
+    }
+
+    /// <summary>Reads an MCP resource now and attaches its text, rather than attaching a promise to read it later:
+    /// a send happens after the chat window has had time to advance, and a failure at that point would have no
+    /// composer left to report it in. The text is capped by <see cref="McpResourceContents.ToText"/>.</summary>
+    private async Task AttachResourceAsync(McpResourceInfo resource)
+    {
+        StateText.Text = "Reading " + resource.Uri + "…";
+        try
+        {
+            using (var cancellation = new CancellationTokenSource(TimeSpan.FromMinutes(1)))
+            {
+                var read = await Services.Mcp.ReadResourceAsync(resource.Server.Id, resource.Uri, cancellation.Token);
+                var text = string.Join(Environment.NewLine + Environment.NewLine,
+                    read.Contents.Select(content => content.ToText(null)));
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    StateText.Text = "The server returned no content for " + resource.Uri;
+                    return;
+                }
+                Attach(new ChatContextItem
+                {
+                    Label = resource.DisplayName + " · " + resource.Server.Name,
+                    Kind = "mcp-resource",
+                    Preview = text
+                });
+                StateText.Text = "MCP resource attached";
+            }
+        }
+        catch (OperationCanceledException) { StateText.Text = "The resource did not arrive within a minute."; }
+        catch (Exception ex) { StateText.Text = "MCP resource could not be read: " + McpLog.Redact(ex.Message); }
     }
 
     private void RefreshSlashCommands() => _ = RefreshComposerSuggestionsAsync();
 
     private void SlashCommandList_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
-    { if (SlashCommandList.SelectedItem != null) { e.Handled = true; InsertSelectedSuggestion(); } }
+    {
+        // A press on the scrollbar or the empty area below the rows also raises this event, and the selection is
+        // preset to the first row: without the container check, scrolling a long list would attach the top file.
+        if (SlashCommandList.SelectedItem == null) return;
+        if (!(ItemsControl.ContainerFromElement(SlashCommandList, e.OriginalSource as DependencyObject) is ListBoxItem))
+            return;
+        e.Handled = true;
+        InsertSelectedSuggestion();
+    }
+
+    /// <summary>The token under the caret runs from its marker to the next whitespace, not only to the caret. The
+    /// picker's filter ends at the caret because that is what narrows the list; accepting a row must take the whole
+    /// token, or a prompt edited in the middle of one keeps the tail ("@a.cs" with the caret after "a" would leave
+    /// ".cs" behind).</summary>
+    private int MentionSpanLength()
+    {
+        var end = _slashTokenStart + _slashTokenLength;
+        while (end < Composer.Text.Length && !char.IsWhiteSpace(Composer.Text[end])) end++;
+        return end - _slashTokenStart;
+    }
 
     private void ModelBox_SelectionChanged(object sender, SelectionChangedEventArgs e) { if (ModelBox.SelectedItem is ModelInfo m) { ModelBox.ToolTip = m.Id; Services.Settings.SelectedModelKey = m.Key; Services.ActiveSession.SelectedModelKey = m.Key; Services.Save(); Services.SaveSessions(); } }
     private void ReloadBackend()
@@ -1503,7 +1883,15 @@ public partial class ChatControl : UserControl
     {
         if (_generation != null || !(BackendBox.SelectedItem is ComboBoxItem item) || !(item.Tag is string backend)) return;
         var normalized = string.Equals(backend, "claude", StringComparison.OrdinalIgnoreCase) ? "claude" : "litellm";
-        if (!string.Equals(Services.ActiveSession.ExecutionBackend, normalized, StringComparison.Ordinal)) { Services.ActiveSession.ExecutionBackend = normalized; SaveSession(); }
+        if (!string.Equals(Services.ActiveSession.ExecutionBackend, normalized, StringComparison.Ordinal))
+        {
+            Services.ActiveSession.ExecutionBackend = normalized;
+            SaveSession();
+            // A genuine switch back is where the LiteLLM loop first gets to use MCP, and the load-time warm-up was
+            // skipped while the Claude backend was selected. ReloadBackend selects programmatically without
+            // changing the stored backend, so it cannot start a connect loop.
+            if (normalized == "litellm") _ = AutoConnectMcpAsync(_loadVersion);
+        }
         ModelBox.IsEnabled = normalized == "litellm";
         SlashCommandPopup.IsOpen = false;
         if (normalized == "claude") RefreshSlashCommands();

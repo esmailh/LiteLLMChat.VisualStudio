@@ -19,15 +19,35 @@ public sealed class ClaudeCodeResult
 
 public static class ClaudeCodeArguments
 {
-    public static string Build(string sessionId, string allowedTools, string disallowedTools)
+    public static string Build(string sessionId, string allowedTools, string disallowedTools,
+        string? mcpConfigPath = null, IReadOnlyList<string>? mcpAllowedTools = null, bool strictMcp = false)
     {
         var a = new List<string> { "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk" };
-        AddList(a, "--allowedTools", allowedTools); AddList(a, "--disallowedTools", disallowedTools);
+        // The CLI reads one comma-separated allow-list, so the MCP entries the extension resolved are merged into
+        // the user's own rather than passed as a second option.
+        AddList(a, "--allowedTools", MergeAllowed(allowedTools, mcpAllowedTools));
+        AddList(a, "--disallowedTools", disallowedTools);
+        // A path with no config is not "strict": emitting the flag alone would stop the CLI loading the user's own
+        // servers without replacing them with anything.
+        if (!string.IsNullOrWhiteSpace(mcpConfigPath))
+        {
+            a.Add("--mcp-config"); a.Add(mcpConfigPath!);
+            if (strictMcp) a.Add("--strict-mcp-config");
+        }
         if (!string.IsNullOrWhiteSpace(sessionId)) { a.Add("--resume"); a.Add(sessionId); }
         return string.Join(" ", a.ConvertAll(Quote));
     }
     private static void AddList(List<string> args, string option, string value)
     { if (!string.IsNullOrWhiteSpace(value)) { args.Add(option); args.Add(value); } }
+    private static string MergeAllowed(string allowedTools, IReadOnlyList<string>? mcpAllowedTools)
+    {
+        if (mcpAllowedTools == null || mcpAllowedTools.Count == 0) return allowedTools;
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(allowedTools)) parts.Add(allowedTools.Trim());
+        foreach (var tool in mcpAllowedTools)
+            if (!string.IsNullOrWhiteSpace(tool)) parts.Add(tool.Trim());
+        return string.Join(",", parts);
+    }
     public static string Quote(string value)
     {
         if (value.Length > 0 && value.IndexOfAny(new[] { ' ', '\t', '\n', '\v', '"' }) < 0) return value;
@@ -252,7 +272,7 @@ public sealed class ClaudeCodeExecutable
 
 public sealed class ClaudeCodeRunner
 {
-    public async Task<ClaudeCodeResult> RunAsync(string executable, string prompt, string sessionId, string allowedTools, string disallowedTools, string workingDirectory, Action<string> update, Action<string>? sessionStarted, ClaudeToolPolicyOptions? policy, CancellationToken token, string trustedExecutablePath = "")
+    public async Task<ClaudeCodeResult> RunAsync(string executable, string prompt, string sessionId, string allowedTools, string disallowedTools, string workingDirectory, Action<string> update, Action<string>? sessionStarted, ClaudeToolPolicyOptions? policy, CancellationToken token, string trustedExecutablePath = "", string? mcpConfigPath = null, IReadOnlyList<string>? mcpAllowedTools = null, bool strictMcp = false)
     {
         if (policy == null) throw new ArgumentNullException(nameof(policy), "Claude tool policy is required at the process-launch boundary.");
         policy.Validate(allowedTools);
@@ -260,7 +280,7 @@ public sealed class ClaudeCodeRunner
         if (string.IsNullOrWhiteSpace(workingDirectory)) throw new ArgumentException("A working directory is required.", nameof(workingDirectory));
         if (!Directory.Exists(workingDirectory)) throw new DirectoryNotFoundException("Claude Code working directory does not exist: " + workingDirectory);
         var resolved = ClaudeCodeExecutable.Resolve(executable);
-        var psi = new ProcessStartInfo(resolved.FileName, resolved.BuildArguments(ClaudeCodeArguments.Build(sessionId, allowedTools, disallowedTools)))
+        var psi = new ProcessStartInfo(resolved.FileName, resolved.BuildArguments(ClaudeCodeArguments.Build(sessionId, allowedTools, disallowedTools, mcpConfigPath, mcpAllowedTools, strictMcp)))
         {
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
             RedirectStandardOutput = true, RedirectStandardError = true,

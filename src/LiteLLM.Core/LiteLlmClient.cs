@@ -26,6 +26,11 @@ public sealed class LiteLlmClient : IDisposable
     /// <summary>The last round trip, successful or not — what the "copy request" / "copy response" commands read.</summary>
     public HttpExchange? LastExchange { get; private set; }
 
+    /// <summary>The token counts the last call reported, or null when it reported none. Reset at the start of
+    /// every call rather than left standing: a provider that omits usage must not be credited with the previous
+    /// call's numbers.</summary>
+    public TokenUsage? LastUsage { get; private set; }
+
     public async Task<IReadOnlyList<ModelInfo>> GetModelsAsync(ServerConfiguration server, int timeoutSeconds, CancellationToken cancellationToken)
     {
         using (var response = await SendWithRetryAsync(() => CreateRequest(server, HttpMethod.Get, "v1/models", null), timeoutSeconds, cancellationToken).ConfigureAwait(false))
@@ -49,6 +54,7 @@ public sealed class LiteLlmClient : IDisposable
     /// it is only the slot the copy commands read that is left alone.</summary>
     public async Task<ChatMessage> CompleteAsync(ServerConfiguration server, string model, IReadOnlyList<ChatMessage> messages, UserSettings settings, IReadOnlyList<ToolDefinition>? tools, CancellationToken cancellationToken, bool record = true)
     {
+        LastUsage = null;
         var payload = CreatePayload(model, messages, settings, tools, false);
         using (var response = await SendWithRetryAsync(() => CreateRequest(server, HttpMethod.Post, "v1/chat/completions", payload), settings.RequestTimeoutSeconds, cancellationToken).ConfigureAwait(false))
         {
@@ -56,62 +62,97 @@ public sealed class LiteLlmClient : IDisposable
             var exchange = new HttpExchange { Url = Url(server, "v1/chat/completions"), RequestBody = Pretty(payload), ResponseBody = body, Status = (int)response.StatusCode, Streamed = false };
             if (record) LastExchange = exchange;
             EnsureSuccess(response, body, exchange);
-            try { return ResponseParser.ParseCompletion(body); }
+            try
+            {
+                var message = ResponseParser.ParseCompletion(body, out var usage);
+                LastUsage = usage;
+                return message;
+            }
             catch (JsonException ex) { throw new LiteLlmException("The server returned an invalid chat response.", ex.Message, ex) { Exchange = exchange }; }
         }
     }
 
     public async Task StreamAsync(ServerConfiguration server, string model, IReadOnlyList<ChatMessage> messages, UserSettings settings, IReadOnlyList<ToolDefinition>? tools, Func<StreamUpdate, Task> onUpdate, CancellationToken cancellationToken)
     {
-        var payload = CreatePayload(model, messages, settings, tools, true);
-        using (var request = CreateRequest(server, HttpMethod.Post, "v1/chat/completions", payload))
-        using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        LastUsage = null;
+        // Asking for usage is an OpenAI request field, and a direct Azure connection may run an API version that
+        // rejects it outright; a proxied Azure deployment reaches the provider through LiteLLM, which does not.
+        // So the field is left off for Azure rather than risking a 400 before the first token.
+        var includeUsage = !IsAzure(server);
+        while (true)
         {
-            timeout.CancelAfter(TimeSpan.FromSeconds(Math.Max(5, settings.RequestTimeoutSeconds)));
-            HttpResponseMessage response;
-            try { response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false); }
-            catch (Exception ex) when (ex is HttpRequestException || ex is TaskCanceledException) { throw NetworkException(ex, cancellationToken); }
-            using (response)
+            var payload = CreatePayload(model, messages, settings, tools, true, includeUsage);
+            using (var request = CreateRequest(server, HttpMethod.Post, "v1/chat/completions", payload))
+            using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
-                if (!response.IsSuccessStatusCode)
+                timeout.CancelAfter(TimeSpan.FromSeconds(Math.Max(5, settings.RequestTimeoutSeconds)));
+                HttpResponseMessage response;
+                try { response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false); }
+                catch (Exception ex) when (ex is HttpRequestException || ex is TaskCanceledException) { throw NetworkException(ex, cancellationToken); }
+                using (response)
                 {
-                    var failure = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    Record(server, "v1/chat/completions", Pretty(payload), response, failure, true);
-                    EnsureSuccess(response, failure);
-                }
-                var media = response.Content.Headers.ContentType?.MediaType;
-                if (!string.Equals(media, "text/event-stream", StringComparison.OrdinalIgnoreCase))
-                {
-                    var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    Record(server, "v1/chat/completions", Pretty(payload), response, body, false);
-                    var fallback = ResponseParser.ParseCompletion(body);
-                    await onUpdate(new StreamUpdate { ContentDelta = fallback.Content, ReasoningDelta = fallback.Reasoning, ToolCalls = fallback.ToolCalls, FinishReason = "stop" }).ConfigureAwait(false); return;
-                }
-                var accumulated = new Dictionary<int, ToolCall>();
-                var transcript = new StringBuilder();
-                using (var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
-                    try
+                    if (!response.IsSuccessStatusCode)
                     {
-                        await SseParser.ReadAsync(stream, async data =>
+                        var failure = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        Record(server, "v1/chat/completions", Pretty(payload), response, failure, true);
+                        // Some OpenAI-compatible servers reject the whole request over a field they do not know.
+                        // The usage line is worth one retry, never the answer: drop the field and send the same
+                        // request again. includeUsage stays false, so a server that still refuses cannot loop us.
+                        if (includeUsage && IsClientError(response) && failure.IndexOf("stream_options", StringComparison.OrdinalIgnoreCase) >= 0)
                         {
-                            transcript.Append("data: ").Append(data).Append('\n');
-                            if (data != "[DONE]") await onUpdate(ResponseParser.ParseStreamChunk(data, accumulated)).ConfigureAwait(false);
-                        }, timeout.Token).ConfigureAwait(false);
+                            includeUsage = false;
+                            continue;
+                        }
+                        EnsureSuccess(response, failure);
                     }
-                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                    var media = response.Content.Headers.ContentType?.MediaType;
+                    if (!string.Equals(media, "text/event-stream", StringComparison.OrdinalIgnoreCase))
                     {
-                        LastExchange = new HttpExchange { Url = Url(server, "v1/chat/completions"), RequestBody = Pretty(payload), ResponseBody = transcript.ToString(), Status = 200, Streamed = true };
-                        throw new LiteLlmException("The model stopped responding mid-stream.", "The stream produced nothing for " + Math.Max(5, settings.RequestTimeoutSeconds) + "s.") { Exchange = LastExchange };
+                        var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        Record(server, "v1/chat/completions", Pretty(payload), response, body, false);
+                        var fallback = ResponseParser.ParseCompletion(body, out var fallbackUsage);
+                        LastUsage = fallbackUsage;
+                        await onUpdate(new StreamUpdate { ContentDelta = fallback.Content, ReasoningDelta = fallback.Reasoning, ToolCalls = fallback.ToolCalls, FinishReason = "stop", Usage = fallbackUsage }).ConfigureAwait(false); return;
                     }
-                LastExchange = new HttpExchange { Url = Url(server, "v1/chat/completions"), RequestBody = Pretty(payload), ResponseBody = transcript.ToString(), Status = 200, Streamed = true };
+                    var accumulated = new Dictionary<int, ToolCall>();
+                    var transcript = new StringBuilder();
+                    using (var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
+                        try
+                        {
+                            await SseParser.ReadAsync(stream, async data =>
+                            {
+                                transcript.Append("data: ").Append(data).Append('\n');
+                                if (data == "[DONE]") return;
+                                var update = ResponseParser.ParseStreamChunk(data, accumulated);
+                                if (update.Usage != null) LastUsage = update.Usage;
+                                await onUpdate(update).ConfigureAwait(false);
+                            }, timeout.Token).ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                        {
+                            LastExchange = new HttpExchange { Url = Url(server, "v1/chat/completions"), RequestBody = Pretty(payload), ResponseBody = transcript.ToString(), Status = 200, Streamed = true };
+                            throw new LiteLlmException("The model stopped responding mid-stream.", "The stream produced nothing for " + Math.Max(5, settings.RequestTimeoutSeconds) + "s.") { Exchange = LastExchange };
+                        }
+                    LastExchange = new HttpExchange { Url = Url(server, "v1/chat/completions"), RequestBody = Pretty(payload), ResponseBody = transcript.ToString(), Status = 200, Streamed = true };
+                }
             }
+            return;
         }
+    }
+
+    /// <summary>A refusal rather than a failure on the server's side — the shape a rejected request field
+    /// comes back in, and the only status range worth re-sending the same turn for.</summary>
+    private static bool IsClientError(HttpResponseMessage response)
+    {
+        var status = (int)response.StatusCode;
+        return status >= 400 && status < 500;
     }
 
     private void Record(ServerConfiguration server, string relative, string requestBody, HttpResponseMessage response, string responseBody, bool streamed) =>
         LastExchange = new HttpExchange { Url = Url(server, relative), RequestBody = requestBody, ResponseBody = responseBody, Status = (int)response.StatusCode, Streamed = streamed };
 
     private static string Url(ServerConfiguration server, string relative) => server.BaseUrl.TrimEnd('/') + "/" + relative;
+    private static bool IsAzure(ServerConfiguration server) => string.Equals(server.Provider, "Azure OpenAI", StringComparison.OrdinalIgnoreCase);
     private static string Pretty(JObject payload) => payload.ToString(Formatting.Indented);
 
     private async Task<HttpResponseMessage> SendWithRetryAsync(Func<HttpRequestMessage> factory, int timeoutSeconds, CancellationToken cancellationToken)
@@ -135,7 +176,7 @@ public sealed class LiteLlmClient : IDisposable
     private HttpRequestMessage CreateRequest(ServerConfiguration server, HttpMethod method, string relative, JObject? payload)
     {
         if (!Uri.TryCreate(server.BaseUrl.TrimEnd('/') + "/", UriKind.Absolute, out var baseUri) || (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps)) throw new LiteLlmException("The server URL is invalid.", server.BaseUrl);
-        var isAzure = string.Equals(server.Provider, "Azure OpenAI", StringComparison.OrdinalIgnoreCase);
+        var isAzure = IsAzure(server);
         var requestPath = relative;
         if (isAzure && relative == "v1/chat/completions")
         {
@@ -156,9 +197,12 @@ public sealed class LiteLlmClient : IDisposable
         if (payload != null) request.Content = new StringContent(payload.ToString(Formatting.None), Encoding.UTF8, "application/json");
         return request;
     }
-    private static JObject CreatePayload(string model, IReadOnlyList<ChatMessage> messages, UserSettings settings, IReadOnlyList<ToolDefinition>? tools, bool stream)
+    private static JObject CreatePayload(string model, IReadOnlyList<ChatMessage> messages, UserSettings settings, IReadOnlyList<ToolDefinition>? tools, bool stream, bool includeUsage = false)
     {
         var payload = new JObject { ["model"] = model, ["stream"] = stream, ["temperature"] = settings.Temperature, ["max_tokens"] = settings.MaxTokens, ["messages"] = new JArray(messages.Select(Serialize)) };
+        // Without this a streamed answer carries no usage line at all: the server sends counts on a final chunk
+        // only when the request asked for them, and a stream is the default path through this client.
+        if (stream && includeUsage) payload["stream_options"] = new JObject { ["include_usage"] = true };
         if (settings.EnableToolCalling && tools != null && tools.Count > 0) payload["tools"] = JArray.FromObject(tools);
         return payload;
     }

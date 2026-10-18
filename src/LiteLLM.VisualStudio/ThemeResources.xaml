@@ -245,6 +245,34 @@
     </ControlTemplate></Setter.Value></Setter>
   </Style>
 
+  <!-- The stock TabControl paints its content border and tab strip from fixed system brushes, which leaves them
+       Windows-white under a dark IDE. These keep the strip flat and the selected tab marked by the shell's own
+       focus border, so a tab reads like a tool-window page rather than a dialog. -->
+  <Style TargetType="TabControl">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="Padding" Value="0"/>
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:EnvironmentColors.ToolWindowTextBrushKey}}"/>
+  </Style>
+  <Style TargetType="TabItem">
+    <Setter Property="Foreground" Value="{DynamicResource {x:Static ui:EnvironmentColors.ToolWindowTextBrushKey}}"/>
+    <Setter Property="Padding" Value="12,6"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="TabItem">
+      <Border x:Name="Chrome" Background="Transparent" BorderBrush="Transparent" BorderThickness="0,0,0,2" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+        <ContentPresenter ContentSource="Header" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+      </Border>
+      <ControlTemplate.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemBackgroundHoverBrushKey}}"/>
+        </Trigger>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource {x:Static ui:CommonControlsColors.ButtonBorderFocusedBrushKey}}"/>
+        </Trigger>
+      </ControlTemplate.Triggers>
+    </ControlTemplate></Setter.Value></Setter>
+  </Style>
+
   <!-- Panels. Flat and squared like the shell's own surfaces, with the shell's border colour. -->
   <Style x:Key="Card" TargetType="Border">
     <Setter Property="Background" Value="{DynamicResource {x:Static ui:CommonDocumentColors.ListItemBackgroundBrushKey}}"/>

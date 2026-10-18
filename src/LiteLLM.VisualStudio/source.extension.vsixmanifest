@@ -4,7 +4,7 @@
     <!-- Bump this on every build that is installed. Visual Studio keys upgrades on this version: while it stays the
          same it treats each VSIX as a different extension, leaves the older folders under
          %LOCALAPPDATA%\Microsoft\VisualStudio\<instance>\Extensions alone, and loads whichever it finds first. -->
-    <Identity Id="LiteLLM.VisualStudio.7a065ef0-9e0d-4bbc-9c0f-06d899fdbbbb" Version="1.6.16" Language="en-US" Publisher="EsmaeilHatami" />
+    <Identity Id="LiteLLM.VisualStudio.7a065ef0-9e0d-4bbc-9c0f-06d899fdbbbb" Version="1.7.5" Language="en-US" Publisher="EsmaeilHatami" />
     <DisplayName>LiteLLM Chat for Visual Studio</DisplayName>
     <!-- The Publisher above is the name the extension list credits; this is what the details pane says about the work. It
          is plain sentences in the order someone meeting the extension would want to know things, and with no indentation

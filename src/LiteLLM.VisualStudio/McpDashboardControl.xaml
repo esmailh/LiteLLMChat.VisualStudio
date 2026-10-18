@@ -1,0 +1,38 @@
+<UserControl x:Class="LiteLLM.VisualStudio.McpDashboardControl" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ui="clr-namespace:Microsoft.VisualStudio.PlatformUI;assembly=Microsoft.VisualStudio.Shell.15.0">
+ <UserControl.Resources><ResourceDictionary><ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/LiteLLM.VisualStudio;component/ThemeResources.xaml"/></ResourceDictionary.MergedDictionaries>
+  <DataTemplate x:Key="RowTemplate"><StackPanel Margin="0,2"><TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Text="{Binding Description}" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis"/></StackPanel></DataTemplate>
+ </ResourceDictionary></UserControl.Resources>
+ <Grid Background="{DynamicResource {x:Static ui:EnvironmentColors.ToolWindowBackgroundBrushKey}}"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+  <Border Grid.Row="0" Background="{DynamicResource {x:Static ui:EnvironmentColors.EnvironmentBackgroundBrushKey}}" BorderBrush="{DynamicResource {x:Static ui:EnvironmentColors.ToolWindowBorderBrushKey}}" BorderThickness="0,0,0,1" Padding="16,10"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+   <StackPanel x:Name="HeaderText" Margin="0,0,12,0"><TextBlock Text="MCP servers" Style="{StaticResource PageTitle}"/><TextBlock Text="Tools, resources and prompts from any Model Context Protocol server" Style="{StaticResource Caption}" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/></StackPanel>
+   <StackPanel x:Name="HeaderActions" Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center"><Button Content="Refresh" Click="Refresh_Click" ToolTip="Re-read this page from the saved settings and the live connections. It does not reconnect anything; use ↻ on a row for that."/><Button Content="Import JSON…" Click="Import_Click"/><Button Content="Export JSON…" Click="Export_Click"/><Button Content="＋  Add server" Style="{StaticResource PrimaryButton}" Click="Add_Click"/></StackPanel>
+  </Grid></Border>
+  <Grid Grid.Row="1"><Grid.ColumnDefinitions><ColumnDefinition Width="1.1*" MinWidth="260"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="1.6*" MinWidth="300"/></Grid.ColumnDefinitions>
+   <Grid Grid.Column="0" Margin="16,10,8,12"><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <ListBox x:Name="Servers" SelectionChanged="Servers_SelectionChanged"><ListBox.ItemTemplate><DataTemplate><Grid Margin="0,2"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+     <!-- Click rather than Checked/Unchecked: a re-render of the list must not look like a user turning a server on. -->
+     <CheckBox IsChecked="{Binding Enabled, Mode=OneWay}" Click="ServerEnabled_Click" VerticalAlignment="Center" Margin="0,0,8,0" ToolTip="Use this server in LiteLLM turns and connect it when the chat opens. Unticking disconnects it now."/>
+     <StackPanel Grid.Column="1"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/><TextBlock Grid.Column="1" Text="{Binding Transport}" Style="{StaticResource Caption}" Margin="8,0,0,0"/></Grid><TextBlock Text="{Binding State}" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/><TextBlock Text="{Binding Claude}" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis"/></StackPanel>
+     <Button Grid.Column="2" Content="↻" Style="{StaticResource SubtleButton}" Click="ServerRefresh_Click" IsEnabled="{Binding CanRefresh}" VerticalAlignment="Center" Margin="8,0,0,0" ToolTip="Reconnect: end this server's session and start it again, re-reading its tools, resources and prompts."/>
+    </Grid></DataTemplate></ListBox.ItemTemplate></ListBox>
+    <WrapPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,6,0,0"><Button Content="Edit" Click="Edit_Click"/><Button Content="Remove" Style="{StaticResource DangerButton}" Click="Remove_Click"/><Button Content="Connect" Click="Connect_Click"/></WrapPanel>
+   </Grid>
+   <Border Grid.Column="1" Width="1" Margin="0,10,0,12" Background="{DynamicResource {x:Static ui:EnvironmentColors.ToolWindowBorderBrushKey}}"/>
+   <Grid Grid.Column="2" Margin="8,10,16,12"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+    <StackPanel Grid.Row="0">
+     <TextBlock x:Name="DetailTitle" Text="Select a server" Style="{StaticResource PageTitle}" TextTrimming="CharacterEllipsis"/>
+     <TextBlock x:Name="DetailStatus" Text="Nothing is selected." Style="{StaticResource Caption}" Margin="0,2,0,0" TextWrapping="Wrap"/>
+     <TextBlock x:Name="DetailNote" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+     <WrapPanel x:Name="DetailActions" Margin="0,8,0,0"><Button Content="Test" Click="Test_Click"/><Button x:Name="BrowseButton" Content="Browse…" Click="Browse_Click"/><Button x:Name="SignInButton" Content="Sign in…" Click="SignIn_Click"/><Button x:Name="SignOutButton" Content="Sign out" Click="SignOut_Click"/><Button x:Name="DisconnectButton" Content="Disconnect" Click="Disconnect_Click"/></WrapPanel>
+    </StackPanel>
+    <TabControl x:Name="DetailTabs" Grid.Row="1" Margin="0,10,0,0">
+     <TabItem Header="Tools"><ListBox x:Name="Tools" ItemTemplate="{StaticResource RowTemplate}"/></TabItem>
+     <TabItem Header="Resources"><ListBox x:Name="ResourceItems" ItemTemplate="{StaticResource RowTemplate}"/></TabItem>
+     <TabItem Header="Prompts"><ListBox x:Name="Prompts" ItemTemplate="{StaticResource RowTemplate}"/></TabItem>
+     <TabItem Header="Logs"><ListBox x:Name="Logs" ItemTemplate="{StaticResource RowTemplate}"/></TabItem>
+    </TabControl>
+   </Grid>
+  </Grid>
+ </Grid>
+</UserControl>

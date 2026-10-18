@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -69,6 +70,29 @@ public sealed class UserSettings
     /// the active editor in the chat's context. On by default; the composer's Auto button turns it off.</summary>
     public bool AutoAttachActiveDocument { get; set; } = true;
     public string LoggingLevel { get; set; } = "Information";
+
+    /// <summary>MCP servers configured in the Dashboard. This list is saved by the Dashboard; the options page
+    /// carries only the global switches, and ApplyOptions must not overwrite it.</summary>
+    public List<McpServerConfiguration> McpServers { get; set; } = new List<McpServerConfiguration>();
+    public bool EnableMcp { get; set; } = true;
+    /// <summary>The global half of the read-only exception. A server can decline it, never grant it on its own.</summary>
+    public bool McpAutoApproveReadOnly { get; set; }
+    /// <summary>Sampling spends the user's tokens on a request the server asked for, so it is off unless chosen.</summary>
+    public bool McpAllowSampling { get; set; }
+    public bool McpAllowElicitation { get; set; } = true;
+    public bool McpAllowRoots { get; set; } = true;
+    public int McpConnectTimeoutSeconds { get; set; } = 30;
+    public int McpToolTimeoutSeconds { get; set; } = 120;
+    public int McpMaxToolsPerTurn { get; set; } = 64;
+    public string McpLogLevel { get; set; } = "info";
+    /// <summary>Only the generated --mcp-config is given to the Claude CLI. Off also loads the user's own Claude
+    /// MCP configuration, which can add tools the Dashboard does not show.</summary>
+    public bool McpStrictClaudeConfig { get; set; } = true;
+
+    /// <summary>Every MCP server whose scope covers <paramref name="solutionRoot"/> and that the user enabled.</summary>
+    public IEnumerable<McpServerConfiguration> EnabledMcpServers(string? solutionRoot) =>
+        (McpServers ?? new List<McpServerConfiguration>())
+            .Where(server => server != null && server.Enabled && server.AppliesTo(solutionRoot));
 }
 public sealed class ModelInfo
 {
@@ -103,6 +127,9 @@ public sealed class StreamUpdate
     public string ReasoningDelta { get; set; } = "";
     public List<ToolCall> ToolCalls { get; set; } = new List<ToolCall>();
     public string FinishReason { get; set; } = "";
+    /// <summary>Set on the last chunk when the request asked the server to include usage; null on every chunk
+    /// that only carries text.</summary>
+    public TokenUsage? Usage { get; set; }
 }
 public sealed class ToolDefinition
 {

@@ -11,7 +11,7 @@ public partial class DashboardControl : UserControl
 {
     private bool _narrow;
     private ExtensionServices Services => LiteLlmPackage.Instance.Services;
-    internal DashboardControl() { InitializeComponent(); VsTheme.Apply(this); Loaded += (s, e) => { Services.ModelsChanged += Changed; Reload(); }; SizeChanged += OnSizeChanged; }
+    internal DashboardControl() { InitializeComponent(); VsTheme.Apply(this); Loaded += (s, e) => { Services.ModelsChanged += Changed; Services.UsageChanged += Changed; Reload(); }; SizeChanged += OnSizeChanged; }
     private void OnSizeChanged(object sender, SizeChangedEventArgs e) => ApplyLayout(e.NewSize.Width < 620);
     private void ApplyLayout(bool narrow)
     {
@@ -30,7 +30,12 @@ public partial class DashboardControl : UserControl
     private void ReloadModels()
     {
         if (Models == null || Search == null || ServerFilter == null) return; var query = Search.Text ?? ""; var server = ServerFilter.SelectedItem as string;
-        Models.ItemsSource = Services.Catalog.GetAll(Services.Settings.Servers.Where(s => s.Enabled).Select(s => s.Id)).Where(m => (string.IsNullOrEmpty(query) || m.Id.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0) && (string.IsNullOrEmpty(server) || server == "All servers" || m.ServerName == server)).Select(m => new ModelRow(m, !Services.Settings.DisabledModelKeys.Contains(m.Key))).ToList();
+        Models.ItemsSource = Services.Catalog.GetAll(Services.Settings.Servers.Where(s => s.Enabled).Select(s => s.Id)).Where(m => (string.IsNullOrEmpty(query) || m.Id.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0) && (string.IsNullOrEmpty(server) || server == "All servers" || m.ServerName == server)).Select(m => new ModelRow(m, !Services.Settings.DisabledModelKeys.Contains(m.Key), Services.Usage.For(m.Key))).ToList();
+        // The totals are read from the ledger on every reload rather than kept in a field: a turn can finish while
+        // this page is open, and the ledger is the one place the number lives.
+        UsageSummary.Text = Services.Usage.Summary;
+        UsageSummary.ToolTip = "Counted from the usage each server reported for its replies. A turn whose server reported none is not included — the "
+            + "number is a floor, not an estimate. Usage from conversations written before this count existed was read from them once.";
     }
     private void Add_Click(object sender, RoutedEventArgs e)
     {
@@ -57,5 +62,21 @@ public partial class DashboardControl : UserControl
     private async void Test_Click(object sender, RoutedEventArgs e) { if (Servers.SelectedItem is ServerConfiguration server) try { await Services.TestAsync(server, CancellationToken.None); MessageBox.Show("Connected. Models were discovered successfully.", "LiteLLM"); } catch (Exception ex) { Services.Log(ex.ToString()); MessageBox.Show(ex.Message, "LiteLLM connection", MessageBoxButton.OK, MessageBoxImage.Warning); } }
     private void ModelEnabled_Changed(object sender, RoutedEventArgs e) { if ((sender as CheckBox)?.DataContext is ModelRow row) { if (row.Enabled) Services.Settings.DisabledModelKeys.Remove(row.Model.Key); else if (!Services.Settings.DisabledModelKeys.Contains(row.Model.Key)) Services.Settings.DisabledModelKeys.Add(row.Model.Key); Services.Save(); } }
     private void Filter_Changed(object sender, EventArgs e) => ReloadModels(); private void Servers_SelectionChanged(object sender, SelectionChangedEventArgs e) { }
-    private sealed class ModelRow { internal ModelRow(ModelInfo model, bool enabled) { Model = model; Enabled = enabled; } internal ModelInfo Model { get; } public string Name => Model.Id; public string Server => Model.ServerName; public bool Enabled { get; set; } }
+    private sealed class ModelRow
+    {
+        internal ModelRow(ModelInfo model, bool enabled, UsageLedgerEntry? usage)
+        {
+            Model = model; Enabled = enabled;
+            Usage = usage?.Short ?? "";
+            UsageDetail = usage?.Detail;
+        }
+        internal ModelInfo Model { get; }
+        public string Name => Model.Id;
+        public string Server => Model.ServerName;
+        public bool Enabled { get; set; }
+        /// <summary>Empty when the model has not been called, or when its server never reported usage. An empty
+        /// cell is honest; "0 tokens" would claim a measurement that was never made.</summary>
+        public string Usage { get; }
+        public string? UsageDetail { get; }
+    }
 }

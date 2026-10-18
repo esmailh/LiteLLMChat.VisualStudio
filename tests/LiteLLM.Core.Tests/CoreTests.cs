@@ -70,6 +70,64 @@ public sealed class CoreTests
         }
         finally { if (File.Exists(file)) File.Delete(file); }
     }
+    [Fact]
+    public void ChatSessionStore_KeepsTheIgnoreHistoryChoice()
+    {
+        var file = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".json");
+        try
+        {
+            var session = ChatSessionStore.NewSession();
+            session.IgnoreHistory = true;
+            var document = new ChatSessionDocument { ActiveSessionId = session.Id, Sessions = new List<ChatSessionState> { session } };
+            new ChatSessionStore(file).Save(document);
+
+            // Per conversation, not per settings file: reopening this chat must not quietly start sending history again.
+            Assert.True(Assert.Single(new ChatSessionStore(file).Load().Sessions).IgnoreHistory);
+        }
+        finally { if (File.Exists(file)) File.Delete(file); }
+    }
+
+    [Fact]
+    public void AnOlderSessionWithoutTheHistoryFieldStillCarriesHistory()
+    {
+        // The switch postdates the field, so a missing one has to read as the behavior that file was written under.
+        var session = Newtonsoft.Json.JsonConvert.DeserializeObject<ChatSessionState>("{\"Title\":\"old\"}");
+        Assert.NotNull(session);
+        Assert.False(session!.IgnoreHistory);
+    }
+
+    [Fact]
+    public void ChatSessionStore_LoadAllSavedReadsEveryScopeAndTheUnscopedFile()
+    {
+        var root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        try
+        {
+            var scoped = Path.Combine(root, "chat-sessions");
+            Directory.CreateDirectory(scoped);
+            SaveOne(Path.Combine(scoped, "one.json"), "first");
+            SaveOne(Path.Combine(scoped, "two.json"), "second");
+            SaveOne(Path.Combine(root, "chat-sessions.json"), "legacy");
+
+            var titles = ChatSessionStore.LoadAllSaved(root)
+                .SelectMany(d => d.Sessions).Select(s => s.Title).OrderBy(t => t, StringComparer.Ordinal).ToList();
+            Assert.Equal(new[] { "first", "legacy", "second" }, titles);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    [Fact]
+    public void ChatSessionStore_LoadAllSavedReturnsNothingForAMissingDirectory()
+    {
+        Assert.Empty(ChatSessionStore.LoadAllSaved(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))));
+    }
+
+    private static void SaveOne(string file, string title)
+    {
+        var session = ChatSessionStore.NewSession();
+        session.Title = title;
+        new ChatSessionStore(file).Save(new ChatSessionDocument { ActiveSessionId = session.Id, Sessions = new List<ChatSessionState> { session } });
+    }
+
     [Fact] public void ChatSessionStore_DeleteMovesTheActivePointerAndNeverEmptiesTheList()
     {
         var older = ChatSessionStore.NewSession(); var newer = ChatSessionStore.NewSession();
