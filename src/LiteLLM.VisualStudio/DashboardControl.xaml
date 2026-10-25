@@ -2,9 +2,9 @@
              xmlns:ui="clr-namespace:Microsoft.VisualStudio.PlatformUI;assembly=Microsoft.VisualStudio.Shell.15.0"
              xmlns:local="clr-namespace:LiteLLM.VisualStudio">
  <UserControl.Resources><ResourceDictionary><ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/LiteLLM.VisualStudio;component/ThemeResources.xaml"/></ResourceDictionary.MergedDictionaries></ResourceDictionary></UserControl.Resources>
- <!-- Two pages rather than one long one: providers and MCP servers are configured at different times, and a
-      provider list that kept scrolling under the MCP controls made both harder to read. The Connections page is the
-      page that was here before; the tab strip is the only thing added around it. -->
+ <!-- Pages rather than one long one: providers, MCP servers and skills are configured at different times, and a
+      provider list that kept scrolling under the other controls made all of them harder to read. The Connections page
+      is the page that was here before; the tab strip is the only thing added around it. -->
  <Grid Background="{DynamicResource {x:Static ui:EnvironmentColors.ToolWindowBackgroundBrushKey}}">
   <TabControl x:Name="Pages">
    <TabItem Header="Connections">
@@ -26,6 +26,9 @@
    </TabItem>
    <TabItem Header="MCP">
     <local:McpDashboardControl x:Name="McpPanel"/>
+   </TabItem>
+   <TabItem Header="Skills">
+    <local:SkillsDashboardControl x:Name="SkillsPanel"/>
    </TabItem>
   </TabControl>
  </Grid>

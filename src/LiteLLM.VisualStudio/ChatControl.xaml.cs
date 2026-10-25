@@ -36,9 +36,17 @@ public partial class ChatControl : UserControl, IAgentView
     private bool _narrow;
     private ChatTurnState? _activeTurn;
     private int _turnStart;
+    /// <summary>What MCP looks like for the open solution, computed when the window loads and when the settings or
+    /// the solution change — not per turn. The chip is the persistent answer to a state, where a transcript row per
+    /// turn repeated the same sentence for every message.</summary>
+    private McpAvailability _mcpAvailability = McpAvailability.For(null, null);
     /// <summary>What the user has attached to the next message. Draft state, like the composer's text: it belongs to
     /// the message being written, not yet to the conversation.</summary>
     private readonly List<ChatContextItem> _attachments = new List<ChatContextItem>();
+    /// <summary>Every prompt drawn in this conversation, with the element it was drawn as, so the header's list can
+    /// jump to one. Kept as it is drawn rather than re-derived from the session: a retry replaces the last turn, and
+    /// the element that is on screen is the one the click has to reach.</summary>
+    private readonly List<PromptEntry> _userPrompts = new List<PromptEntry>();
     /// <summary>Set while a picker is open or the composer is being written to, so the '#' gesture does not fire on our own edits.</summary>
     private bool _picking;
     /// <summary>The file open in the editor, held apart from <see cref="_attachments"/> so that rebuilding it as the
@@ -58,6 +66,9 @@ public partial class ChatControl : UserControl, IAgentView
     /// <summary>True while the popup is showing MCP prompts on the LiteLLM backend rather than the Claude CLI's
     /// own slash commands. The two lists share the popup but not the thing a selection does.</summary>
     private bool _promptMode;
+    /// <summary>True while the popup is showing skill names for <c>/skill</c> rather than MCP prompts or the
+    /// Claude CLI's commands. All three share the popup and its keyboard handling.</summary>
+    private bool _skillMentionMode;
     private int _suggestionRefreshVersion;
     private string? _mentionRoot;
     private IReadOnlyList<FileMentionEntry> _mentionFiles = Array.Empty<FileMentionEntry>();
@@ -89,6 +100,9 @@ public partial class ChatControl : UserControl, IAgentView
         public string Name { get; set; } = "";
         public string Description { get; set; } = "";
         public McpPromptInfo Prompt { get; set; } = new McpPromptInfo();
+        /// <summary>Set when the row is a skill. Under <c>/skill</c> choosing it completes the name word; in the
+        /// plain <c>/</c> list choosing it selects (or unselects) the skill for this conversation at once.</summary>
+        public SkillInfo? Skill { get; set; }
     }
 
     internal ChatControl() { InitializeComponent(); VsTheme.Apply(this); Current = this; Loaded += OnLoaded; Unloaded += OnUnloaded; SizeChanged += OnSizeChanged; }
@@ -142,6 +156,7 @@ public partial class ChatControl : UserControl, IAgentView
         if (!_eventSubscriptionsActive)
         {
             Services.ModelsChanged += ModelsChanged; Services.SessionsChanged += SessionsChanged;
+            Services.SettingsChanged += SettingsChanged;
             Services.Mcp.ToolsChanged += McpToolsChanged;
             Services.Mcp.ServerClosed += McpServerClosed;
             _eventSubscriptionsActive = true;
@@ -154,6 +169,12 @@ public partial class ChatControl : UserControl, IAgentView
         await Services.RefreshSessionScopeAsync();
         if (!IsLoaded || loadVersion != _loadVersion) return;
         ReloadSessions(); RenderSession(); ReloadModels();
+        // One read of the MCP state for this window. Everything after it is a refresh on a change, not a check per
+        // turn: the servers cannot become enabled or disabled by a message.
+        _ = RefreshMcpChipAsync();
+        // The chips and the Skills menu read the same snapshot. Scanning here means the first click on Skills
+        // already has the list, and a selected name left behind by an earlier session gets its real state back.
+        _ = PrepareSkillsAsync(loadVersion);
         // The enabled servers are stated in settings.json, so opening the window is where they come back: a restart
         // must not mean visiting the Dashboard to reconnect each one by hand.
         _ = AutoConnectMcpAsync(loadVersion);
@@ -174,6 +195,7 @@ public partial class ChatControl : UserControl, IAgentView
         if (_eventSubscriptionsActive)
         {
             Services.ModelsChanged -= ModelsChanged; Services.SessionsChanged -= SessionsChanged;
+            Services.SettingsChanged -= SettingsChanged;
             Services.Mcp.ToolsChanged -= McpToolsChanged;
             Services.Mcp.ServerClosed -= McpServerClosed;
             _eventSubscriptionsActive = false;
@@ -229,6 +251,7 @@ public partial class ChatControl : UserControl, IAgentView
         {
             if (!IsLoaded) return;
             RefreshSlashCommands();
+            _ = RefreshMcpChipAsync();
         }));
     }
     /// <summary>A server that ended on its own is said as soon as it happens rather than left for the next tool call:
@@ -243,7 +266,82 @@ public partial class ChatControl : UserControl, IAgentView
             AddToolNote("mcp", "MCP · " + server.Name + " disconnected: " + McpLog.Redact(reason), false, null,
                 "The next turn tries to connect it again; ↻ in the MCP dashboard does it now.", null);
             RefreshSlashCommands();
+            _ = RefreshMcpChipAsync();
         }));
+    }
+    /// <summary>A settings save is the one signal every control that edits MCP goes through, so the chip follows it at
+    /// once rather than waiting for the next message. The event may arrive on the thread that saved; the dispatcher is
+    /// touched before anything that belongs to the window.</summary>
+    private void SettingsChanged(object? sender, EventArgs e)
+    {
+        _ = Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (!IsLoaded) return;
+            _ = RefreshMcpChipAsync();
+        }));
+    }
+    private void McpChip_Click(object sender, MouseButtonEventArgs e)
+    {
+        try { _ = LiteLlmPackage.Instance.ShowDashboardMcpAsync(); }
+        catch (Exception ex) { Services.Log("The MCP dashboard could not be opened: " + ex); }
+    }
+    /// <summary>Recomputes the chip for the solution that is open now. Called when the window loads, when the settings
+    /// are saved, when the solution changes and when a server's tool list does — never from a turn.</summary>
+    private async Task RefreshMcpChipAsync()
+    {
+        try
+        {
+            var root = await SolutionRootAsync();
+            if (!IsLoaded) return;
+            _mcpAvailability = McpAvailability.For(Services.Settings, root);
+            DrawMcpChip();
+        }
+        catch (Exception ex) { Services.Log("MCP status could not be read: " + ex); }
+    }
+    /// <summary>The chip is configuration, so one enabled server is "on" even if it is still connecting: the tooltip
+    /// is where a failed connection belongs, and flipping the chip to "off" would blame the user's setting for a
+    /// network problem.</summary>
+    private void DrawMcpChip()
+    {
+        var availability = _mcpAvailability;
+        var tools = Services.Mcp.Tools;
+        var enabled = availability.IsEnabled;
+        McpChipText.Text = enabled
+            ? (tools.Count > 0
+                ? "MCP · " + tools.Count + (tools.Count == 1 ? " tool" : " tools")
+                : "MCP on · " + availability.EnabledCount + (availability.EnabledCount == 1 ? " server" : " servers"))
+            : "MCP off";
+        // Accent for on, support text for off: the two colours the rest of the composer already uses. Resolved rather
+        // than assigned, so a theme change repaints the dot with everything else.
+        McpDot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty,
+            enabled ? EnvironmentColors.AccentMediumBrushKey : (object)CommonDocumentColors.SupportTextBrushKey);
+        McpChip.SetResourceReference(Border.BorderBrushProperty,
+            enabled ? EnvironmentColors.AccentMediumBrushKey : (object)CommonDocumentColors.ListItemBorderBrushKey);
+
+        var lines = new List<string>();
+        if (!enabled)
+        {
+            lines.Add(availability.Detail);
+        }
+        else
+        {
+            lines.Add(availability.Headline);
+            lines.Add(tools.Count == 1 ? "1 tool is offered right now." : tools.Count + " tools are offered right now.");
+            foreach (var server in availability.EnabledServers)
+            {
+                var status = Services.Mcp.StatusOf(server.Id);
+                var state = status == null
+                    ? "not connected yet"
+                    : status.Connected
+                        ? "connected · " + status.Tools + (status.Tools == 1 ? " tool" : " tools")
+                        : "not connected" + (string.IsNullOrWhiteSpace(status.Error)
+                            ? ""
+                            : ": " + McpLog.Redact(status.Error ?? ""));
+                lines.Add("· " + server.Name + " — " + state);
+            }
+            lines.Add("Click to open Dashboard ▸ MCP.");
+        }
+        McpChip.ToolTip = string.Join("\n", lines);
     }
     /// <summary>Whether MCP is on for this turn and this solution has a server the user enabled that is not
     /// connected — the state in which a typed '#' silently falls back to the file picker. A connected server that
@@ -262,6 +360,7 @@ public partial class ChatControl : UserControl, IAgentView
     {
         ReloadBackend();
         Messages.Children.Clear(); Messages.Children.Add(EmptyState); _history.Clear();
+        _userPrompts.Clear();
         foreach (var turn in Services.ActiveSession.Turns)
         {
             foreach (var message in turn.Messages)
@@ -314,7 +413,7 @@ public partial class ChatControl : UserControl, IAgentView
         }
         ComposerHint.Visibility = Visibility.Collapsed;
         Composer.Clear(); EmptyState.Visibility = Visibility.Collapsed;
-        _history.Add(new ChatMessage { Role = "user", Content = input }); AddMessage("You", input, false);
+        _history.Add(new ChatMessage { Role = "user", Content = input }); ScrollToSent(AddMessage("You", input, false));
         _turnStart = _history.Count - 1;
         var pendingContext = PendingContext(); ClearAttachments();
         var session = Services.ActiveSession;
@@ -363,6 +462,25 @@ public partial class ChatControl : UserControl, IAgentView
                 }
             }
             prompt = "For Git operations, use only the approved LiteLLM.GitWrapper executable. It performs confirmations and authentication; do not invoke git, gh, or glab directly.\n\n" + prompt;
+            if (settings.EnableSkills)
+            {
+                try
+                {
+                    // The CLI owns automatic skill discovery. Only a manual selection is handed over: a skill the
+                    // CLI already knows is named, and one from another location is injected once.
+                    var snapshot = await Services.PrepareSkillsAsync(workingDirectory, token).ConfigureAwait(true);
+                    var rows = new List<SkillTurnRow>();
+                    var skillBlock = SkillPrompt.BuildClaudeBlock(snapshot, session.SelectedSkills, rows);
+                    foreach (var row in rows) AddToolNote("skill", row.Summary, row.Ok, null, row.Detail);
+                    if (!string.IsNullOrEmpty(skillBlock)) prompt = skillBlock + "\n\n" + prompt;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    AddToolNote("skill", "Skills · discovery failed: " + ex.Message, false);
+                    Services.Log("Skill discovery for the Claude backend failed: " + ex);
+                }
+            }
             var result = await runner.RunAsync(settings.ClaudeExecutable, prompt, session.ClaudeSessionId,
                 settings.ClaudeAllowedTools, settings.ClaudeDisallowedTools, workingDirectory, text =>
                 {
@@ -396,6 +514,82 @@ public partial class ChatControl : UserControl, IAgentView
         finally { mcpLease?.Dispose(); if (ReferenceEquals(_generation, generation)) { _ticker?.Stop(); _ticker = null; if (_live != null) FinishStatus(_live); _live = null; _generation = null; SetBusy(false); } generation.Dispose(); if (ReferenceEquals(_activeTurn, turn)) _activeTurn = null; Composer.Focus(); }
     }
 
+    /// <summary>Handles <c>/skill</c> before anything is sent. A handled command is never forwarded as ordinary
+    /// text: its name selects a skill on this conversation and only the user's remaining words become the message.
+    /// A message that does not begin with the exact token is returned unchanged, which is what keeps MCP prompts,
+    /// Claude's own commands and ordinary prose on their previous paths.</summary>
+    private async Task<string?> ApplySkillCommandAsync(string input)
+    {
+        var command = SkillSlashCommand.Parse(input);
+        if (command.Kind == SkillCommandKind.None) return input;
+
+        if (!Services.Settings.EnableSkills)
+        {
+            AddToolNote("skill", "Skills · skills are turned off in the Dashboard's Skills tab.", false);
+            StateText.Text = "Skills are turned off. Enable them in the Dashboard's Skills tab.";
+            return null;
+        }
+
+        if (command.Kind == SkillCommandKind.MissingName)
+        {
+            AddToolNote("skill", "Skill · /skill needs a skill name, such as /skill code-review Create the endpoint.", false);
+            StateText.Text = "Use /skill <name>, or pick a skill with the Skills button.";
+            return null;
+        }
+
+        SkillRegistrySnapshot snapshot;
+        try { snapshot = await Services.PrepareSkillsAsync(await SolutionRootAsync()).ConfigureAwait(true); }
+        catch (Exception ex)
+        {
+            AddToolNote("skill", "Skills · discovery failed: " + ex.Message, false);
+            StateText.Text = "Skills could not be read: " + ex.Message;
+            Services.Log("Skill discovery failed: " + ex);
+            return null;
+        }
+
+        var matches = SkillSlashCommand.Resolve(snapshot.Effective, command.Name, out var ambiguous);
+        if (ambiguous)
+        {
+            var names = string.Join(", ", matches.Take(8).Select(skill => skill.Name)) + (matches.Count > 8 ? ", …" : "");
+            AddToolNote("skill", "Skill · '" + command.Name + "' matches more than one skill: " + names, false);
+            StateText.Text = "That name is ambiguous. Type more of it.";
+            return null;
+        }
+        if (matches.Count == 0)
+        {
+            var suggestions = SkillSlashCommand.Suggest(snapshot.Effective, command.Name);
+            var detail = snapshot.Effective.Count == 0
+                ? "No skill is discovered. Create or import one in the Dashboard's Skills tab."
+                : "Available: " + string.Join(", ", snapshot.Effective.Take(30).Select(skill => skill.Name));
+            AddToolNote("skill",
+                "Skill · '" + command.Name + "' was not found" +
+                (suggestions.Count > 0 ? ". Did you mean " + string.Join(", ", suggestions) + "?" : "."), false, null, detail);
+            StateText.Text = "No skill named '" + command.Name + "'.";
+            return null;
+        }
+
+        var selected = Services.ActiveSession.SelectedSkills;
+        if (!selected.Any(name => string.Equals(name, matches[0].Name, StringComparison.OrdinalIgnoreCase)))
+        {
+            // The same bound the Skills menu applies, so /skill cannot build a selection the turn will not send.
+            if (selected.Count >= ChatSessionStore.MaxSelectedSkills)
+            {
+                AddToolNote("skill", "Skill · a conversation can use at most " + ChatSessionStore.MaxSelectedSkills +
+                                     " skills; remove one with its chip first.", false);
+                StateText.Text = "At most " + ChatSessionStore.MaxSelectedSkills + " skills can be selected in one conversation.";
+                return null;
+            }
+            selected.Add(matches[0].Name);
+            SaveSession();
+            RefreshContextBar();
+        }
+        AddToolNote("skill", "Skill · " + matches[0].Name + " selected for this conversation", true, null,
+            SkillLocations.DisplayPath(matches[0].Directory));
+        // An invocation with no instructions still has to send something, and the command text itself must not be
+        // what the model sees: naming the skill is the instruction.
+        return command.Remaining.Length > 0 ? command.Remaining : "Use the skill '" + matches[0].Name + "' for this request.";
+    }
+
     private async Task SendAsync()
     {
         var input = Composer.Text;
@@ -403,6 +597,8 @@ public partial class ChatControl : UserControl, IAgentView
         // Started before the first reply so the links exist by the time it is drawn; the turn itself never waits for
         // the index, and a solution opened after the window loaded is picked up here.
         _ = EnsureSymbolIndexAsync();
+        input = await ApplySkillCommandAsync(input);
+        if (input == null) return;
         var editsBefore = EditTools.Revisions;
         if (string.Equals(Services.ActiveSession.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase))
         {
@@ -415,7 +611,7 @@ public partial class ChatControl : UserControl, IAgentView
         input = input.Trim();
         ComposerHint.Visibility = Visibility.Collapsed;
         Composer.Clear(); EmptyState.Visibility = Visibility.Collapsed;
-        _history.Add(new ChatMessage { Role = "user", Content = input }); AddMessage("You", input, false);
+        _history.Add(new ChatMessage { Role = "user", Content = input }); ScrollToSent(AddMessage("You", input, false));
         _turnStart = _history.Count - 1;
         // The chips are the context for this message. They move onto the turn now, so the stored conversation records
         // what each answer was given, and the composer goes back to being empty.
@@ -764,6 +960,9 @@ public partial class ChatControl : UserControl, IAgentView
     {
         var bubble = CreateBubble(author, assistant);
         SetContent(bubble, new ChatMessage { Role = "assistant", Content = content });
+        // The prompt list is the same list of turns the user sees, so it is recorded where the bubble is drawn:
+        // replaying a conversation and sending a message both come through here.
+        if (!assistant) _userPrompts.Add(new PromptEntry(content, bubble.Border));
         return bubble.Border;
     }
 
@@ -1009,6 +1208,7 @@ public partial class ChatControl : UserControl, IAgentView
         // disposes it. Nulling it here would leave that block throwing on a null.
         _generation?.Cancel();
         _history.Clear(); _activeTurn = null; _lastExchange = null; _live = null; _follow = true;
+        _userPrompts.Clear();
         Services.NewSession();   // fires SessionsChanged, which is what reloads the session list
         Messages.Children.Clear(); Messages.Children.Add(EmptyState); EmptyState.Visibility = Visibility.Visible;
         Composer.Clear(); ClearAttachments();
@@ -1083,13 +1283,85 @@ public partial class ChatControl : UserControl, IAgentView
         ContextBar.Children.Clear();
         if (_activeFileContext != null) ContextBar.Children.Add(Chip(_activeFileContext, true));
         foreach (var item in _attachments) ContextBar.Children.Add(Chip(item, false));
+        // The selection lives on the conversation, so switching chats has to redraw these as well as the messages.
+        // They are drawn even when the feature is off: the chip's × is the way a name left behind by an earlier
+        // build is removed, and a selection nothing shows on screen would be one the user cannot undo.
+        var selectedSkills = Services.ActiveSession.SelectedSkills ?? new List<string>();
+        foreach (var name in selectedSkills) ContextBar.Children.Add(SkillChip(name));
         // This switch changes what the model is sent without changing a single row on screen, so it needs a chip
         // of its own: a model that silently never saw the earlier turns would otherwise read as a bug.
         var historyOff = Services.ActiveSession.IgnoreHistory
             && !string.Equals(Services.ActiveSession.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase);
         if (historyOff) ContextBar.Children.Add(HistoryChip());
-        ContextBar.Visibility = _activeFileContext != null || _attachments.Count > 0 || historyOff ? Visibility.Visible : Visibility.Collapsed;
+        ContextBar.Visibility = _activeFileContext != null || _attachments.Count > 0 || selectedSkills.Count > 0 || historyOff
+            ? Visibility.Visible
+            : Visibility.Collapsed;
         RefreshComposerState();
+    }
+
+    /// <summary>One skill the user selected for this conversation. The × drops the name from the conversation;
+    /// a name that no longer resolves keeps its chip and is outlined in the error colour, because a selection the
+    /// turn silently ignores would otherwise look like the skill simply did nothing.</summary>
+    private Border SkillChip(string name)
+    {
+        var skill = Services.Skills.Snapshot.Find(name)
+                    ?? Services.Skills.Snapshot.All.FirstOrDefault(item =>
+                        string.Equals(item.Name, name, StringComparison.OrdinalIgnoreCase));
+
+        var row = new StackPanel { Orientation = Orientation.Horizontal };
+        row.Children.Add(new TextBlock
+        {
+            Text = "✦",
+            Margin = new Thickness(0, 0, 5, 0),
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        row.Children.Add(new TextBlock
+        {
+            Text = name,
+            Style = (Style)FindResource("Caption"),
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxWidth = 240
+        });
+        var remove = new Button
+        {
+            Content = "×",
+            Style = (Style)FindResource("SubtleButton"),
+            Padding = new Thickness(5, 0, 5, 0),
+            Margin = new Thickness(4, 0, 0, 0),
+            ToolTip = "Stop using this skill in this conversation"
+        };
+        remove.Click += (s, e) =>
+        {
+            Services.ActiveSession.SelectedSkills.RemoveAll(value => string.Equals(value, name, StringComparison.OrdinalIgnoreCase));
+            SaveSession();
+            RefreshContextBar();
+        };
+        row.Children.Add(remove);
+
+        var problem = "";
+        if (skill == null)
+            problem = "This skill is not in the current scan. Refresh the Skills tab in the Dashboard to look again.";
+        else if (!skill.IsValid)
+            problem = skill.Error ?? "This skill's SKILL.md is invalid.";
+        else if (!skill.Enabled)
+            problem = "This skill is turned off in the Dashboard.";
+        else if (skill.Shadowed)
+            problem = "Another definition of this name is used instead: " + SkillLocations.DisplayPath(skill.ShadowedBy);
+
+        var tooltip = (string.IsNullOrWhiteSpace(skill?.Description) ? "Selected skill" : skill!.Description) +
+                      (skill != null ? "\n" + SkillLocations.DisplayPath(skill.Directory) : "") +
+                      (problem.Length > 0 ? "\n\n" + problem : "");
+        var border = new Border
+        {
+            Style = (Style)FindResource("Tag"),
+            Margin = new Thickness(0, 0, 5, 3),
+            ToolTip = tooltip,
+            Child = row
+        };
+        // Resolved rather than assigned, so a theme change repaints the outline with everything else.
+        border.SetResourceReference(Border.BorderBrushProperty, problem.Length > 0 ? "DangerBrush" : (object)EnvironmentColors.AccentMediumBrushKey);
+        return border;
     }
 
     /// <summary>The chip for a chat that is not sending its earlier turns. Its × turns history back on, so the only
@@ -1174,9 +1446,29 @@ public partial class ChatControl : UserControl, IAgentView
     {
         var previous = Services.Sessions;
         await Services.RefreshSessionScopeAsync();
+        // A solution change is also an MCP-scope change: a server limited to one solution starts or stops applying.
+        _ = RefreshMcpChipAsync();
         if (ReferenceEquals(previous, Services.Sessions)) return;
         RenderSession();
         ReloadModels();
+        // A different solution means different project roots, so the snapshot is rescanned rather than reused.
+        _ = PrepareSkillsAsync(_loadVersion);
+    }
+
+    /// <summary>Scans the configured skill directories and redraws once the answer is in. Failure is logged and
+    /// left to the Dashboard: an unreadable root must not fail a window that is otherwise ready, and the same
+    /// problem is drawn there in full.</summary>
+    private async Task PrepareSkillsAsync(int loadVersion)
+    {
+        try
+        {
+            var snapshot = await Services.PrepareSkillsAsync(await SolutionRootAsync());
+            if (!IsLoaded || loadVersion != _loadVersion) return;
+            foreach (var problem in snapshot.Problems) Services.Log("Skills · " + problem);
+            RefreshContextBar();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { Services.Log("Skill discovery failed: " + ex); }
     }
 
     /// <summary>Turns "send only this turn" on or off for the conversation on screen. The transcript is untouched;
@@ -1229,6 +1521,32 @@ public partial class ChatControl : UserControl, IAgentView
         menu.PlacementTarget = HamburgerButton;
         menu.Placement = PlacementMode.Top;
         menu.IsOpen = true;
+    }
+
+    /// <summary>Adds or removes one name from the conversation's selection. This is a conversation setting, not a
+    /// message: it is saved now and read when the next turn starts, which is also why a toggle during a running
+    /// turn changes the following turn rather than the one already in flight.</summary>
+    private void ToggleSkill(string name)
+    {
+        var selected = Services.ActiveSession.SelectedSkills ?? (Services.ActiveSession.SelectedSkills = new List<string>());
+        var existing = selected.FirstOrDefault(value => string.Equals(value, name, StringComparison.OrdinalIgnoreCase));
+        if (existing != null)
+        {
+            selected.Remove(existing);
+            StateText.Text = "Skill '" + name + "' removed from this conversation";
+        }
+        else
+        {
+            if (selected.Count >= ChatSessionStore.MaxSelectedSkills)
+            {
+                StateText.Text = "A conversation can use at most " + ChatSessionStore.MaxSelectedSkills + " selected skills.";
+                return;
+            }
+            selected.Add(name);
+            StateText.Text = "Skill '" + name + "' selected for this conversation";
+        }
+        SaveSession();
+        RefreshContextBar();
     }
 
     /// <summary>Rebuilds the automatic chip from whatever the editor has open now. Cheap enough to run on every window
@@ -1654,15 +1972,66 @@ public partial class ChatControl : UserControl, IAgentView
         }
 
         _toolMentionMode = false;
+        // /skill is the extension's own command on either backend, so its completion is offered before the
+        // backend's own slash parser can claim the token. The snapshot is read, not rescanned on every keystroke:
+        // the registry refreshes on load, on a turn and when the Skills tab is used.
+        if (Services.Settings.EnableSkills &&
+            SkillSlashCommand.TryGetNameFilter(Composer.Text, Composer.CaretIndex,
+                out _slashTokenStart, out _slashTokenLength, out filter))
+        {
+            _skillMentionMode = true;
+            _promptMode = false;
+            if (Services.Skills.Snapshot.ScannedUtc == DateTime.MinValue)
+            {
+                try { await Services.PrepareSkillsAsync(await SolutionRootAsync()); }
+                catch (Exception ex) { Services.Log("Skill discovery failed: " + ex); }
+                if (refreshVersion != _suggestionRefreshVersion) return;
+                if (!SkillSlashCommand.TryGetNameFilter(Composer.Text, Composer.CaretIndex,
+                        out _slashTokenStart, out _slashTokenLength, out var currentSkillFilter) ||
+                    !string.Equals(filter, currentSkillFilter, StringComparison.Ordinal)) return;
+            }
+            var skills = Services.Skills.Snapshot.Effective
+                .Where(skill => Matches(filter, skill.Name, skill.Description))
+                .Take(50)
+                .Select(skill => new PromptSuggestion
+                {
+                    Name = skill.Name,
+                    Description = (skill.Scope == SkillScope.Project ? "Project" : "Personal") +
+                                  (string.IsNullOrWhiteSpace(skill.Description)
+                                      ? ""
+                                      : " · " + ChatStateLimits.OneLine(skill.Description, 160)),
+                    Skill = skill
+                })
+                .ToList();
+            SlashCommandList.ItemsSource = skills;
+            SlashCommandList.SelectedIndex = skills.Count > 0 ? 0 : -1;
+            SlashCommandPopup.IsOpen = skills.Count > 0;
+            return;
+        }
+        _skillMentionMode = false;
         var claude = string.Equals(Services.ActiveSession.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase);
         if (!ClaudeSlashCommands.TryGetFilter(Composer.Text, Composer.CaretIndex, out _slashTokenStart, out _slashTokenLength, out filter))
         { _promptMode = false; SlashCommandPopup.IsOpen = false; return; }
 
+        // "/" is also the manual skill picker, on either backend. The rows a backend adds come after it, so a
+        // skill is the first thing the list offers while MCP prompts and the CLI's own commands stay reachable.
+        if (Services.Settings.EnableSkills && Services.Skills.Snapshot.ScannedUtc == DateTime.MinValue)
+        {
+            try { await Services.PrepareSkillsAsync(await SolutionRootAsync()); }
+            catch (Exception ex) { Services.Log("Skill discovery failed: " + ex); }
+            if (refreshVersion != _suggestionRefreshVersion) return;
+            if (!ClaudeSlashCommands.TryGetFilter(Composer.Text, Composer.CaretIndex,
+                    out _slashTokenStart, out _slashTokenLength, out var currentFilter) ||
+                !string.Equals(filter, currentFilter, StringComparison.Ordinal)) return;
+        }
+
+        var rows = new List<object>();
+        rows.AddRange(SkillSuggestions(filter));
         if (!claude)
         {
             // The LiteLLM backend has no CLI slash commands of its own, so "/" is where its servers' prompts live.
             _promptMode = true;
-            var prompts = Services.Mcp.Prompts
+            rows.AddRange(Services.Mcp.Prompts
                 .Where(prompt => Matches(filter, prompt.DisplayName, prompt.Name, prompt.Server.Name))
                 .Take(100)
                 .Select(prompt => new PromptSuggestion
@@ -1671,19 +2040,43 @@ public partial class ChatControl : UserControl, IAgentView
                     Description = "MCP · " + prompt.Server.Name +
                                   (string.IsNullOrWhiteSpace(prompt.Description) ? "" : " · " + prompt.Description!.Trim()),
                     Prompt = prompt
-                })
-                .ToList();
-            SlashCommandList.ItemsSource = prompts;
-            SlashCommandList.SelectedIndex = prompts.Count > 0 ? 0 : -1;
-            SlashCommandPopup.IsOpen = prompts.Count > 0;
-            return;
+                }));
         }
+        else
+        {
+            _promptMode = false;
+            rows.AddRange(ClaudeSlashCommands.Filter(filter));
+        }
+        SlashCommandList.ItemsSource = rows;
+        SlashCommandList.SelectedIndex = rows.Count > 0 ? 0 : -1;
+        SlashCommandPopup.IsOpen = rows.Count > 0;
+    }
 
-        _promptMode = false;
-        var commands = ClaudeSlashCommands.Filter(filter);
-        SlashCommandList.ItemsSource = commands;
-        SlashCommandList.SelectedIndex = commands.Count > 0 ? 0 : -1;
-        SlashCommandPopup.IsOpen = commands.Count > 0;
+    /// <summary>The skills "/" offers. This is the manual selection UI: a row the conversation already has is
+    /// ticked, and choosing it takes it back. Only the effective definition of a name is listed; the Dashboard is
+    /// where a shadowed copy and its reason are shown.</summary>
+    private List<PromptSuggestion> SkillSuggestions(string filter)
+    {
+        if (!Services.Settings.EnableSkills) return new List<PromptSuggestion>();
+        var selected = Services.ActiveSession.SelectedSkills ?? new List<string>();
+        return Services.Skills.Snapshot.Effective
+            .Where(skill => Matches(filter, skill.Name, skill.Description))
+            .OrderBy(skill => skill.Name, StringComparer.OrdinalIgnoreCase)
+            .Take(50)
+            .Select(skill =>
+            {
+                var isSelected = selected.Any(name => string.Equals(name, skill.Name, StringComparison.OrdinalIgnoreCase));
+                return new PromptSuggestion
+                {
+                    Name = (isSelected ? "✓ " : "") + skill.Name,
+                    Description = "Skill · " + (skill.Scope == SkillScope.Project ? "Project" : "Personal") +
+                                  (string.IsNullOrWhiteSpace(skill.Description)
+                                      ? ""
+                                      : " · " + ChatStateLimits.OneLine(skill.Description, 160)),
+                    Skill = skill
+                };
+            })
+            .ToList();
     }
 
     /// <summary>Whether a <c>#</c> in the composer can name an MCP tool. The tools come from the snapshot a previous
@@ -1780,6 +2173,36 @@ public partial class ChatControl : UserControl, IAgentView
             }
             finally { _picking = false; }
             if (resource != null) await AttachResourceAsync(resource);
+            Composer.Focus();
+            return;
+        }
+
+        if (SlashCommandList.SelectedItem is PromptSuggestion skillRow && skillRow.Skill != null)
+        {
+            var skillName = skillRow.Skill.Name;
+            _picking = true;
+            try
+            {
+                if (_skillMentionMode)
+                {
+                    // Only the name word is replaced: the /skill command stays in front of it, so the next Enter
+                    // takes the ordinary handled-command path instead of sending a bare name as ordinary text.
+                    Composer.Text = ClaudeSlashCommands.ReplaceToken(Composer.Text, _slashTokenStart,
+                        MentionSpanLength(), skillName);
+                    Composer.CaretIndex = Math.Min(Composer.Text.Length, _slashTokenStart + skillName.Length);
+                }
+                else
+                {
+                    // Chosen from "/": the command word is only the way into this list, so it goes back out and
+                    // the skill itself becomes the conversation's selection. The chip above the composer is then
+                    // where it is dropped, exactly as before.
+                    Composer.Text = FileMentions.RemoveToken(Composer.Text, _slashTokenStart, MentionSpanLength());
+                    Composer.CaretIndex = Math.Min(Composer.Text.Length, _slashTokenStart);
+                }
+                SlashCommandPopup.IsOpen = false;
+            }
+            finally { _picking = false; }
+            if (!_skillMentionMode) ToggleSkill(skillName);
             Composer.Focus();
             return;
         }
@@ -1925,6 +2348,83 @@ public partial class ChatControl : UserControl, IAgentView
     }
     private void ConversationScroll_ScrollChanged(object sender, ScrollChangedEventArgs e) { if (e.ExtentHeightChange == 0) _follow = ConversationScroll.VerticalOffset >= ConversationScroll.ScrollableHeight - 12; }
     private void ScrollIfFollowing() { if (_follow) ConversationScroll.ScrollToEnd(); }
+
+    /// <summary>Sending always returns the view to the newest message, even if the user had scrolled away: otherwise
+    /// the message they just wrote is drawn off-screen and the reply streams where they cannot see it. The scroll is
+    /// queued because the bubble has not been laid out in its final position yet.</summary>
+    private void ScrollToSent(Border message)
+    {
+        _follow = true;
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (!IsLoaded) return;
+            message.BringIntoView();
+            ConversationScroll.ScrollToEnd();
+        }), DispatcherPriority.Loaded);
+    }
+
+    /// <summary>Fills the list from the bubbles that are on screen now. Rebuilt on open rather than kept in step by an
+    /// event: the list is only read when it is shown, and a turn that is still streaming can change it underneath.</summary>
+    private void Prompts_Click(object sender, RoutedEventArgs e)
+    {
+        var rows = new List<PromptRow>(_userPrompts.Count);
+        for (var index = 0; index < _userPrompts.Count; index++)
+            rows.Add(new PromptRow(index + 1, _userPrompts[index]));
+        PromptsList.ItemsSource = rows;
+        if (rows.Count == 0)
+        {
+            StateText.Text = "No messages in this chat yet.";
+            return;
+        }
+        PromptsPopup.IsOpen = true;
+    }
+
+    private void PromptsList_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        // Same guard as the composer's picker: a click on the scrollbar or the empty area must not jump to whatever
+        // row happened to be selected.
+        if (!(PromptsList.SelectedItem is PromptRow row)) return;
+        if (!(ItemsControl.ContainerFromElement(PromptsList, e.OriginalSource as DependencyObject) is ListBoxItem)) return;
+        e.Handled = true;
+        PromptsPopup.IsOpen = false;
+        JumpToPrompt(row.Element);
+    }
+
+    /// <summary>Brings an earlier prompt to the top of the view. Jumping is a deliberate move away from the live
+    /// answer, so following is turned off: the next streamed delta must not drag the view back down.</summary>
+    private void JumpToPrompt(Border element)
+    {
+        if (element == null) return;
+        _follow = false;
+        ConversationScroll.UpdateLayout();
+        var position = element.TranslatePoint(new Point(0, 0), Messages);
+        ConversationScroll.ScrollToVerticalOffset(Math.Max(0, position.Y - 12));
+    }
+
+    /// <summary>One prompt as the transcript drew it.</summary>
+    private sealed class PromptEntry
+    {
+        internal PromptEntry(string text, Border element) { Text = text; Element = element; }
+        internal string Text { get; }
+        internal Border Element { get; }
+    }
+
+    /// <summary>A row in the prompt list. The number is its place in the conversation, so a long list can be scanned
+    /// without reading every line; the full text lives in the tooltip.</summary>
+    private sealed class PromptRow
+    {
+        internal PromptRow(int number, PromptEntry entry)
+        {
+            Number = number.ToString();
+            Text = ChatStateLimits.OneLine(entry.Text, 120);
+            Detail = entry.Text;
+            Element = entry.Element;
+        }
+        public string Number { get; }
+        public string Text { get; }
+        public string Detail { get; }
+        internal Border Element { get; }
+    }
 }
 
 

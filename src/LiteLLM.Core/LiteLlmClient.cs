@@ -72,6 +72,15 @@ public sealed class LiteLlmClient : IDisposable
         }
     }
 
+    /// <summary>One streamed round trip, continued when the server cuts the answer short.
+    ///
+    /// A stream that ends without a finish reason — a reset socket, a proxy that timed out while the model was
+    /// quiet, a worker that restarted — is an unfinished answer rather than a failed one. What has arrived is
+    /// shown and kept, and the same turn is asked to go on from it, up to <see cref="UserSettings.StreamResumeAttempts"/>
+    /// times. Each attempt carries the answer so far as the assistant message, because a model that cannot see
+    /// its own beginning repeats it, and <see cref="StreamContinuationFilter"/> drops the repeat the ones that
+    /// do repeat it emit anyway. A request that never reached the model is simply sent again: nothing of the
+    /// answer exists to be duplicated. A partial tool call is never continued — half a call is not a call.</summary>
     public async Task StreamAsync(ServerConfiguration server, string model, IReadOnlyList<ChatMessage> messages, UserSettings settings, IReadOnlyList<ToolDefinition>? tools, Func<StreamUpdate, Task> onUpdate, CancellationToken cancellationToken)
     {
         LastUsage = null;
@@ -79,16 +88,54 @@ public sealed class LiteLlmClient : IDisposable
         // rejects it outright; a proxied Azure deployment reaches the provider through LiteLLM, which does not.
         // So the field is left off for Azure rather than risking a 400 before the first token.
         var includeUsage = !IsAzure(server);
+        var content = new StringBuilder();           // what has been shown, which is also what a continuation carries
+        var request = messages;                      // the turn as the next request sends it; replaced by a continuation
+        var payloadOfTurn = (JObject?)null;          // the turn's own request, for the copy commands
+        var exchanges = new StringBuilder();          // every attempt's raw stream, for the copy commands
+        TokenUsage? usage = null;
+        var toolCallsSeen = false;
+        var reasoningSeen = false;
+        var delivered = false;                       // anything at all reached the caller in this turn
+        var resumes = 0;
+        var resends = 0;
+        var announceResume = false;                   // the next update says the answer is being continued
+        StreamContinuationFilter? filter = null;      // set once an answer is being continued
+        var deadline = TimeSpan.FromSeconds(Math.Max(5, settings.RequestTimeoutSeconds));
+        var maxResumes = Math.Max(0, settings.StreamResumeAttempts);
+
+        // Whatever the repeat filter is still holding belongs to the answer unless it turns out to be a repeat.
+        // Called when the attempt ends rather than on every chunk, so a held sentence is not stuck on screen.
+        async Task ReleaseHeldAsync()
+        {
+            if (filter == null) return;
+            var rest = filter.Flush();
+            if (rest.Length == 0) return;
+            content.Append(rest);
+            await onUpdate(new StreamUpdate { ContentDelta = rest }).ConfigureAwait(false);
+        }
+
         while (true)
         {
-            var payload = CreatePayload(model, messages, settings, tools, true, includeUsage);
-            using (var request = CreateRequest(server, HttpMethod.Post, "v1/chat/completions", payload))
+            var payload = CreatePayload(model, request, settings, tools, true, includeUsage);
+            if (payloadOfTurn == null) payloadOfTurn = payload;
+            using (var message = CreateRequest(server, HttpMethod.Post, "v1/chat/completions", payload))
             using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
-                timeout.CancelAfter(TimeSpan.FromSeconds(Math.Max(5, settings.RequestTimeoutSeconds)));
+                timeout.CancelAfter(deadline);
                 HttpResponseMessage response;
-                try { response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false); }
-                catch (Exception ex) when (ex is HttpRequestException || ex is TaskCanceledException) { throw NetworkException(ex, cancellationToken); }
+                try { response = await _http.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false); }
+                catch (Exception ex) when (ex is HttpRequestException || ex is TaskCanceledException)
+                {
+                    // Nothing of the answer exists yet, so sending the request again cannot duplicate a word.
+                    // Anything already shown would make this the wrong thing to do, and a continuation is the
+                    // only request worth sending then.
+                    if (!cancellationToken.IsCancellationRequested && content.Length == 0 && resends++ < 2)
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(250 * resends), cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+                    throw NetworkException(ex, cancellationToken);
+                }
                 using (response)
                 {
                     if (!response.IsSuccessStatusCode)
@@ -112,33 +159,128 @@ public sealed class LiteLlmClient : IDisposable
                         Record(server, "v1/chat/completions", Pretty(payload), response, body, false);
                         var fallback = ResponseParser.ParseCompletion(body, out var fallbackUsage);
                         LastUsage = fallbackUsage;
-                        await onUpdate(new StreamUpdate { ContentDelta = fallback.Content, ReasoningDelta = fallback.Reasoning, ToolCalls = fallback.ToolCalls, FinishReason = "stop", Usage = fallbackUsage }).ConfigureAwait(false); return;
+                        // A server that answers a continuation as a whole message gets the same repeat filter.
+                        if (filter != null && fallback.Content.Length > 0) fallback.Content = filter.Accept(fallback.Content) + filter.Flush();
+                        content.Append(fallback.Content);
+                        var wasResumed = announceResume; announceResume = false;
+                        await onUpdate(new StreamUpdate { ContentDelta = fallback.Content, ReasoningDelta = fallback.Reasoning, ToolCalls = fallback.ToolCalls, FinishReason = "stop", Usage = fallbackUsage, Resumed = wasResumed }).ConfigureAwait(false); return;
                     }
                     var accumulated = new Dictionary<int, ToolCall>();
                     var transcript = new StringBuilder();
-                    using (var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
-                        try
+                    var finished = false;
+                    Exception? broken = null;
+                    Stream? stream = null;
+                    try
+                    {
+                        stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+                        await SseParser.ReadAsync(stream, async data =>
                         {
-                            await SseParser.ReadAsync(stream, async data =>
-                            {
-                                transcript.Append("data: ").Append(data).Append('\n');
-                                if (data == "[DONE]") return;
-                                var update = ResponseParser.ParseStreamChunk(data, accumulated);
-                                if (update.Usage != null) LastUsage = update.Usage;
-                                await onUpdate(update).ConfigureAwait(false);
-                            }, timeout.Token).ConfigureAwait(false);
-                        }
-                        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-                        {
-                            LastExchange = new HttpExchange { Url = Url(server, "v1/chat/completions"), RequestBody = Pretty(payload), ResponseBody = transcript.ToString(), Status = 200, Streamed = true };
-                            throw new LiteLlmException("The model stopped responding mid-stream.", "The stream produced nothing for " + Math.Max(5, settings.RequestTimeoutSeconds) + "s.") { Exchange = LastExchange };
-                        }
-                    LastExchange = new HttpExchange { Url = Url(server, "v1/chat/completions"), RequestBody = Pretty(payload), ResponseBody = transcript.ToString(), Status = 200, Streamed = true };
+                            transcript.Append("data: ").Append(data).Append('\n');
+                            if (data == "[DONE]") { finished = true; return; }
+                            var update = ResponseParser.ParseStreamChunk(data, accumulated);
+                            if (announceResume) { update.Resumed = true; announceResume = false; }
+                            if (update.Usage != null) { if (usage == null) usage = update.Usage; else usage.Add(update.Usage); LastUsage = usage; }
+                            if (update.FinishReason.Length > 0) finished = true;
+                            if (update.ReasoningDelta.Length > 0) { reasoningSeen = true; delivered = true; }
+                            if (update.ToolCalls.Count > 0) { toolCallsSeen = true; delivered = true; }
+                            if (filter != null && update.ContentDelta.Length > 0) update.ContentDelta = filter.Accept(update.ContentDelta);
+                            if (update.ContentDelta.Length > 0) delivered = true;
+                            content.Append(update.ContentDelta);
+                            // Each chunk is what the watchdog is waiting for. A long answer that keeps writing is
+                            // not a silent one, and killing it at the request timeout would be a lie about it.
+                            timeout.CancelAfter(deadline);
+                            await onUpdate(update).ConfigureAwait(false);
+                        }, timeout.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        AppendAttempt(exchanges, transcript);
+                        LastExchange = StreamExchange(server, payloadOfTurn, exchanges);
+                        throw new LiteLlmException("The model stopped responding mid-stream.", "The stream produced nothing for " + (int)deadline.TotalSeconds + "s.") { Exchange = LastExchange };
+                    }
+                    catch (IOException ex) { broken = ex; }
+                    finally { stream?.Dispose(); }
+
+                    AppendAttempt(exchanges, transcript);
+                    LastExchange = StreamExchange(server, payloadOfTurn, exchanges);
+                    if (finished)
+                    {
+                        // What the filter still held was not a repeat after all; it belongs to the answer.
+                        await ReleaseHeldAsync().ConfigureAwait(false);
+                        return;
+                    }
+
+                    // The stream ended without a finish reason. An unfinished answer is continued; a request that
+                    // produced nothing at all is simply sent again, because there is nothing to carry over.
+                    if (StreamContinuation.CanContinue(content.Length, toolCallsSeen) && resumes < maxResumes)
+                    {
+                        // A second drop while a repeat is still being judged: if what is held was never a repeat,
+                        // it is part of the answer and has to be shown before the next request is built from it.
+                        await ReleaseHeldAsync().ConfigureAwait(false);
+                        resumes++;
+                        announceResume = true;
+                        filter = new StreamContinuationFilter(content.ToString());
+                        request = StreamContinuation.Messages(messages, content.ToString());
+                        await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+                    // A request that produced nothing — no text, no reasoning, no tool call — may simply be sent
+                    // again. Anything delivered is already on screen and repeating the request would show it twice.
+                    if (!delivered && content.Length == 0 && resends++ < 2)
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(250 * resends), cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+                    // Before reporting the turn over, whatever the filter was still holding is released: a repeat
+                    // comes back empty, and anything else is text the user would otherwise lose.
+                    await ReleaseHeldAsync().ConfigureAwait(false);
+                    throw BrokenStream(broken, content.Length, reasoningSeen, toolCallsSeen, resumes, maxResumes);
                 }
             }
-            return;
         }
     }
+
+    /// <summary>The failure sentence for a stream the server closed. Every one of these keeps the exchange, so
+    /// the part of the answer that did arrive can still be copied out of the transcript.</summary>
+    private LiteLlmException BrokenStream(Exception? broken, int contentLength, bool reasoningSeen, bool toolCallsSeen, int resumes, int maxResumes)
+    {
+        var reset = broken == null ? "" : " (" + broken.Message + ")";
+        string message, detail;
+        if (toolCallsSeen && contentLength == 0)
+        {
+            message = "The server closed the stream while the model was calling a tool.";
+            detail = "A tool call arrives in pieces, so a call the connection cut in half cannot be run. The turn stopped here." + reset;
+        }
+        else if (contentLength == 0)
+        {
+            message = reasoningSeen
+                ? "The server closed the stream while the model was still reasoning."
+                : "The server closed the stream before the model answered.";
+            detail = "Nothing of the answer had arrived to continue from." + reset;
+        }
+        else
+        {
+            message = maxResumes == 0
+                ? "The server closed the stream before the answer was finished."
+                : "The server closed the stream again after the answer was continued.";
+            detail = "The answer was continued " + resumes + " time" + (resumes == 1 ? "" : "s")
+                + " and the connection dropped again. The " + contentLength.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + " characters that arrived are kept." + reset;
+        }
+        return new LiteLlmException(message, detail) { Exchange = LastExchange };
+    }
+
+    /// <summary>One attempt's raw stream, after the first. A comment line marks the join, so the copied response
+    /// reads as one stream rather than as two that happen to follow each other.</summary>
+    private static void AppendAttempt(StringBuilder all, StringBuilder attempt)
+    {
+        if (attempt.Length == 0) return;
+        if (all.Length > 0) all.Append(": the connection dropped and the answer was continued\n\n");
+        all.Append(attempt);
+    }
+
+    private HttpExchange StreamExchange(ServerConfiguration server, JObject? payload, StringBuilder response) =>
+        new HttpExchange { Url = Url(server, "v1/chat/completions"), RequestBody = payload == null ? "" : Pretty(payload), ResponseBody = response.ToString(), Status = 200, Streamed = true };
 
     /// <summary>A refusal rather than a failure on the server's side — the shape a rejected request field
     /// comes back in, and the only status range worth re-sending the same turn for.</summary>

@@ -64,7 +64,7 @@ public sealed class McpToolSelection
         !Narrows || (!string.IsNullOrEmpty(exposedName) && _allowed.Contains(exposedName));
 
     public static McpToolSelection Resolve(McpToolSnapshot? snapshot, string? message,
-        int maxTools = MaxSelectedTools)
+        int maxTools = MaxSelectedTools, IReadOnlyCollection<string>? explained = null)
     {
         snapshot = snapshot ?? McpToolSnapshot.Empty;
         var mentions = McpToolMentions.Parse(message);
@@ -81,6 +81,9 @@ public sealed class McpToolSelection
 
         foreach (var mention in mentions)
         {
+            // A server the user configured but this turn cannot offer is answered by McpDisabledMentions with a
+            // sentence that names it. Reporting it here as well would put two rows on the same word.
+            if (explained != null && explained.Contains(mention.Text)) continue;
             var matches = ResolveToken(snapshot, mention.Text);
 
             if (mention.Kind == McpMentionKind.Hint)
@@ -228,8 +231,9 @@ public sealed class McpToolSelection
         }
         else if (anyExplicit)
         {
-            text.Append("MCP tools\nThe user's current message named an MCP tool that is not offered. The connected " +
-                        "MCP tools remain available. Say plainly that the named tool is unavailable; do not " +
+            text.Append("MCP tools\nThe user's current message named an MCP tool that is not offered. The MCP tools " +
+                        "offered this turn remain available; the named one may be beyond the per-turn cap. Say " +
+                        "plainly that the named tool is unavailable; do not " +
                         "substitute a different tool, and do not claim one ran.\n");
         }
 

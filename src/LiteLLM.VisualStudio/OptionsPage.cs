@@ -7,6 +7,7 @@ public sealed class LiteLlmOptionsPage : DialogPage
 {
     [Category("Chat"), DisplayName("Request timeout (seconds)"), DefaultValue(120)] public int RequestTimeoutSeconds { get; set; } = 120;
     [Category("Chat"), DisplayName("Enable streaming"), DefaultValue(true)] public bool EnableStreaming { get; set; } = true;
+    [Category("Chat"), DisplayName("Continue a dropped stream"), Description("A proxy that times out while the model is quiet, or a server that restarts, cuts a streamed answer short. The text that arrived is kept and the same turn is asked to go on from it, this many times. Each continuation is a new request, so it also spends tokens. Zero keeps the partial answer without asking for the rest."), DefaultValue(2)] public int StreamResumeAttempts { get; set; } = 2;
     [Category("Chat"), DisplayName("Maximum tokens"), Description("Reasoning models spend this budget on thinking before they write anything — keep it generous."), DefaultValue(8192)] public int MaxTokens { get; set; } = 8192;
     [Category("Chat"), DisplayName("Temperature"), DefaultValue(.2)] public double Temperature { get; set; } = .2;
     [Category("Features"), DisplayName("Show reasoning"), DefaultValue(true)] public bool ShowReasoning { get; set; } = true;
@@ -31,7 +32,7 @@ public sealed class LiteLlmOptionsPage : DialogPage
     [Category("MCP"), DisplayName("Allow roots"), Description("Tell a server which directories the open solution covers when it asks."), DefaultValue(true)] public bool McpAllowRoots { get; set; } = true;
     [Category("MCP"), DisplayName("Connect timeout (seconds)"), Description("How long a server may take to start and complete its handshake."), DefaultValue(30)] public int McpConnectTimeoutSeconds { get; set; } = 30;
     [Category("MCP"), DisplayName("Tool timeout (seconds)"), Description("How long one MCP tool call may take before it is reported as timed out."), DefaultValue(120)] public int McpToolTimeoutSeconds { get; set; } = 120;
-    [Category("MCP"), DisplayName("Maximum tools per turn"), Description("The most MCP tools offered to the model in one request. If the cap cuts the list, the turn says how many were left out."), DefaultValue(64)] public int McpMaxToolsPerTurn { get; set; } = 64;
+    [Category("MCP"), DisplayName("Maximum tools per turn"), Description("The most MCP tools offered to the model in one request. Every offered tool is sent as a schema with each request, so a smaller number makes a turn start answering sooner. If the cap cuts the list, the turn says how many were left out; a tool named with # is still subject to the cap."), DefaultValue(16)] public int McpMaxToolsPerTurn { get; set; } = 16;
     [Category("MCP"), DisplayName("Log level"), Description("The level requested from each server at connect time: debug, info, warning, notice, error, critical, alert, emergency."), DefaultValue("info")] public string McpLogLevel { get; set; } = "info";
     [Category("MCP"), DisplayName("Give Claude only these servers"), Description("Pass --strict-mcp-config so the Claude backend sees exactly the servers shown in the Dashboard and not its own configuration."), DefaultValue(true)] public bool McpStrictClaudeConfig { get; set; } = true;
     [Category("Diagnostics"), DisplayName("Logging level"), DefaultValue("Information")] public string LoggingLevel { get; set; } = "Information";

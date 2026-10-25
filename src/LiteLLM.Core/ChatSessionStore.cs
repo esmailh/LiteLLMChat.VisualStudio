@@ -9,6 +9,10 @@ namespace LiteLLM.Core;
 
 public sealed class ChatSessionStore
 {
+    /// <summary>How many skills one conversation may keep selected. The menu and the turn both respect this
+    /// bound, so the stored list cannot be longer than what either of them will use.</summary>
+    public const int MaxSelectedSkills = 12;
+
     private readonly string _path;
     private readonly JsonSerializerSettings _settings = new JsonSerializerSettings
     {
@@ -111,6 +115,16 @@ public sealed class ChatSessionStore
         {
             session.ExecutionBackend = string.Equals(session.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase) ? "claude" : "litellm";
             session.ClaudeSessionId = session.ClaudeSessionId ?? "";
+            // Selected skill names are the user's choice, kept across a reload. Bounded like every other list in a
+            // stored document: a hand-edited file must not make a prompt grow without limit. A name that no longer
+            // matches a skill stays here on purpose — the turn reports it, and the user removes it from the chip.
+            session.SelectedSkills = (session.SelectedSkills ?? new List<string>())
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Select(name => name.Trim())
+                .Where(name => name.Length <= SkillFrontmatter.MaxNameChars)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(MaxSelectedSkills)
+                .ToList();
             session.Turns ??= new List<ChatTurnState>();
             // Laid out as a row of the history drop-down, so it is shaped as one line here rather than at each place that
             // shows it — including the titles already on disk, which is what repairs a conversation an older build

@@ -28,13 +28,20 @@ internal sealed class ExtensionServices : IDisposable
     /// <summary>Every MCP server's connection and the tool list offered with a request. Owned here because the
     /// connections outlive a turn: a server discovered by one message is reused by the next.</summary>
     internal McpClient Mcp { get; }
+    /// <summary>The discovered skills. Owned here because the list is shared by the chat's menu, the Dashboard and
+    /// every turn, and its cache is only useful if those three read the same instance.</summary>
+    internal SkillRegistry Skills { get; } = new SkillRegistry();
     internal event EventHandler? ModelsChanged;
     internal event EventHandler? SessionsChanged;
     internal event EventHandler? UsageChanged;
+    /// <summary>Raised after a save, because the window's MCP chip is drawn from the settings and a server added,
+    /// turned off or imported in the Dashboard has to change it without waiting for the next turn.</summary>
+    internal event EventHandler? SettingsChanged;
     internal ExtensionServices(AsyncPackage package)
     {
         _package = package;
         Settings = _store.Load();
+        NormalizeSkillSettings(Settings);
         Sessions = SessionStore.Load();
         Usage = new UsageLedger();
         Mcp = new McpClient();
@@ -83,7 +90,7 @@ internal sealed class ExtensionServices : IDisposable
     internal void ApplyOptions()
     {
         var o = (LiteLlmOptionsPage)_package.GetDialogPage(typeof(LiteLlmOptionsPage));
-        Settings.RequestTimeoutSeconds = o.RequestTimeoutSeconds; Settings.EnableStreaming = o.EnableStreaming; Settings.MaxTokens = o.MaxTokens; Settings.Temperature = o.Temperature; Settings.ShowReasoning = o.ShowReasoning; Settings.EnableToolCalling = o.EnableToolCalling; Settings.PermissionMode = o.PermissionMode; Settings.MaxToolRounds = o.MaxToolRounds; Settings.LoggingLevel = o.LoggingLevel;
+        Settings.RequestTimeoutSeconds = o.RequestTimeoutSeconds; Settings.StreamResumeAttempts = o.StreamResumeAttempts; Settings.EnableStreaming = o.EnableStreaming; Settings.MaxTokens = o.MaxTokens; Settings.Temperature = o.Temperature; Settings.ShowReasoning = o.ShowReasoning; Settings.EnableToolCalling = o.EnableToolCalling; Settings.PermissionMode = o.PermissionMode; Settings.MaxToolRounds = o.MaxToolRounds; Settings.LoggingLevel = o.LoggingLevel;
         Settings.EnableFileEditing = o.EnableFileEditing; Settings.ConfirmEachEdit = o.ConfirmEachEdit; Settings.VerifyBuildAfterEdits = o.VerifyBuildAfterEdits;
         Settings.EnableTerminalTools = o.EnableTerminalTools; Settings.ConfirmEachCommand = o.ConfirmEachCommand; Settings.CommandTimeoutSeconds = o.CommandTimeoutSeconds;
         // The tests check is offered even when the build check is off; it simply never runs, because it runs
@@ -102,8 +109,31 @@ internal sealed class ExtensionServices : IDisposable
         Settings.McpToolTimeoutSeconds = o.McpToolTimeoutSeconds; Settings.McpMaxToolsPerTurn = o.McpMaxToolsPerTurn;
         Settings.McpLogLevel = o.McpLogLevel; Settings.McpStrictClaudeConfig = o.McpStrictClaudeConfig;
     }
-    internal void Save() { ApplyOptions(); _store.Save(Settings); }
+    internal void Save() { ApplyOptions(); _store.Save(Settings); SettingsChanged?.Invoke(this, EventArgs.Empty); }
     internal void SaveSessions() { SessionStore.Save(Sessions); SessionsChanged?.Invoke(this, EventArgs.Empty); }
+
+    private static void NormalizeSkillSettings(UserSettings settings)
+    {
+        settings.DisabledSkillPaths = (settings.DisabledSkillPaths ?? new List<string>())
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(path => path.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        settings.SkillsPersonalDirectory ??= "";
+        if (string.IsNullOrWhiteSpace(settings.SkillsProjectDirectory))
+            settings.SkillsProjectDirectory = SkillLocations.DefaultProjectDirectory;
+    }
+
+    internal SkillDiscoveryOptions SkillOptions(string? solutionRoot) =>
+        SkillDiscoveryOptions.FromSettings(Settings, solutionRoot);
+
+    /// <summary>Scans the configured directories. The registry caches by a signature of every SKILL.md's path,
+    /// length and last-write time, so calling this before a turn or a menu is cheap when nothing changed.</summary>
+    internal SkillRegistrySnapshot PrepareSkills(string? solutionRoot, CancellationToken token = default) =>
+        Skills.Refresh(SkillOptions(solutionRoot), token);
+
+    internal Task<SkillRegistrySnapshot> PrepareSkillsAsync(string? solutionRoot, CancellationToken token = default) =>
+        Skills.RefreshAsync(SkillOptions(solutionRoot), token);
     /// <summary>Adds a finished turn's server-reported usage to the per-model ledger. A failed write is logged and
     /// not thrown: the turn is over, its transcript row is already drawn, and losing the receipt for one turn must
     /// not become a failed conversation. The event is raised either way, because the in-memory total did change.</summary>
@@ -145,7 +175,7 @@ internal sealed class ExtensionServices : IDisposable
     /// <param name="mcpTools">Null offers the live snapshot, which is what a turn that selected nothing gets. A
     /// non-null list — including an empty one — is offered instead, so a narrowed turn sends exactly the tools the
     /// user selected and nothing else. The built-in tools are never narrowed.</param>
-    internal IReadOnlyList<ToolDefinition> ToolsFor(IReadOnlyList<ToolDefinition>? mcpTools)
+    internal IReadOnlyList<ToolDefinition> ToolsFor(IReadOnlyList<ToolDefinition>? mcpTools, bool skillTools = false)
     {
         if (!Settings.EnableToolCalling) return Array.Empty<ToolDefinition>();
         IEnumerable<ToolDefinition> tools = ContextTools.Definitions;
@@ -155,15 +185,19 @@ internal sealed class ExtensionServices : IDisposable
         // rounds is offered on the next one, and the reverse map dispatch uses is replaced with it. A narrowed
         // turn pins its own list instead, because the selection was resolved against the snapshot it prepared.
         if (Settings.EnableMcp) tools = tools.Concat(mcpTools ?? Mcp.ToolDefinitions);
+        // Only a turn that prepared a skill plan gets the two skill tools. They are not part of the always-on
+        // registry: with skills off, or with no skill discovered, offering load_skill would describe a door with
+        // nothing behind it.
+        if (Settings.EnableSkills && skillTools) tools = tools.Concat(SkillTools.Definitions);
         return tools.ToList();
     }
 
-    internal Task StreamAsync(ModelInfo model, IReadOnlyList<ChatMessage> messages, Func<StreamUpdate, Task> update, CancellationToken token, IReadOnlyList<ToolDefinition>? mcpTools = null)
+    internal Task StreamAsync(ModelInfo model, IReadOnlyList<ChatMessage> messages, Func<StreamUpdate, Task> update, CancellationToken token, IReadOnlyList<ToolDefinition>? mcpTools = null, bool skillTools = false)
     {
         var server = Settings.Servers.First(s => s.Id == model.ServerId); Log("Chat request started: " + model.Id + " on " + server.Name);
-        return _client.StreamAsync(server, model.Id, messages, Settings, ToolsFor(mcpTools), update, token);
+        return _client.StreamAsync(server, model.Id, messages, Settings, ToolsFor(mcpTools, skillTools), update, token);
     }
-    internal async Task<ChatMessage> CompleteAsync(ModelInfo model, IReadOnlyList<ChatMessage> messages, CancellationToken token, IReadOnlyList<ToolDefinition>? mcpTools = null) => await _client.CompleteAsync(Settings.Servers.First(s => s.Id == model.ServerId), model.Id, messages, Settings, ToolsFor(mcpTools), token);
+    internal async Task<ChatMessage> CompleteAsync(ModelInfo model, IReadOnlyList<ChatMessage> messages, CancellationToken token, IReadOnlyList<ToolDefinition>? mcpTools = null, bool skillTools = false) => await _client.CompleteAsync(Settings.Servers.First(s => s.Id == model.ServerId), model.Id, messages, Settings, ToolsFor(mcpTools, skillTools), token);
 
     /// <summary>A call the extension makes on its own behalf rather than one the user asked for: the context
     /// summary. It carries its own settings, because a summary must not be given the session's token budget, and

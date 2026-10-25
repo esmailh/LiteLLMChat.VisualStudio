@@ -244,6 +244,18 @@ public sealed class McpToolSelectionTests
         Assert.Contains("2 selected tools", row.Summary, System.StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Resolve_LeavesAnExplainedMentionToItsOwnRow()
+    {
+        // The disabled-server check names the server and says why; a second "no offered tool matches" row for the
+        // same token would be two answers to one word.
+        var selection = McpToolSelection.Resolve(Snapshot(), "Use #Files.make_it.",
+            explained: new[] { "Files.make_it" });
+
+        Assert.False(selection.Narrows);
+        Assert.Empty(selection.Rows);
+    }
+
     private static McpToolSnapshot Snapshot() =>
         Snapshot(("Orders", new[] { "search_customers", "search" }), ("Files", new[] { "search", "read_file" }));
 

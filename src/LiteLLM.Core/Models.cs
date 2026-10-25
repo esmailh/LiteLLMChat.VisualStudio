@@ -28,6 +28,10 @@ public sealed class UserSettings
     public string ClaudeAllowedTools { get; set; } = "Read,Glob,Grep";
     public string ClaudeDisallowedTools { get; set; } = "WebFetch,WebSearch";
     public int RequestTimeoutSeconds { get; set; } = 120;
+    /// <summary>How many times a streamed answer the server cut off is asked to continue. Each attempt is a
+    /// whole new request, so this is also the most extra requests one dropped connection can cost; zero keeps
+    /// the partial answer but does not ask for the rest.</summary>
+    public int StreamResumeAttempts { get; set; } = 2;
     public bool EnableStreaming { get; set; } = true;
     public int MaxTokens { get; set; } = 8192;
     public double Temperature { get; set; } = .2;
@@ -83,11 +87,31 @@ public sealed class UserSettings
     public bool McpAllowRoots { get; set; } = true;
     public int McpConnectTimeoutSeconds { get; set; } = 30;
     public int McpToolTimeoutSeconds { get; set; } = 120;
-    public int McpMaxToolsPerTurn { get; set; } = 64;
+    /// <summary>Every tool offered is a schema in every request, so this is the main lever on how long a
+    /// turn takes before the model starts answering. A lower cap keeps that prompt small; a tool named with
+    /// # beyond the cap is not offered, so the turn must say how many were left out.</summary>
+    public int McpMaxToolsPerTurn { get; set; } = 16;
     public string McpLogLevel { get; set; } = "info";
     /// <summary>Only the generated --mcp-config is given to the Claude CLI. Off also loads the user's own Claude
     /// MCP configuration, which can add tools the Dashboard does not show.</summary>
     public bool McpStrictClaudeConfig { get; set; } = true;
+
+    /// <summary>Offer Agent Skills to a turn. With no skill discovered this asks for nothing, so the default is
+    /// on: the feature is invisible until the user creates or imports one.</summary>
+    public bool EnableSkills { get; set; } = true;
+    /// <summary>Let the model choose from the skill catalog. Off leaves manual selection and <c>/skill</c>
+    /// working; the catalog is simply not sent.</summary>
+    public bool SkillAutomatic { get; set; } = true;
+    /// <summary>Empty means <see cref="SkillLocations.DefaultPersonalDirectory"/>.</summary>
+    public string SkillsPersonalDirectory { get; set; } = "";
+    /// <summary>Absolute, or relative to the open solution. Empty means <c>.agents/skills</c>.</summary>
+    public string SkillsProjectDirectory { get; set; } = SkillLocations.DefaultProjectDirectory;
+    /// <summary>Also discover <c>.github/skills</c> and <c>.claude/skills</c>. The locations keep their own
+    /// precedence; a skill found there is not automatically usable by every backend.</summary>
+    public bool SkillsIncludeCompatibleLocations { get; set; } = true;
+    /// <summary>Full paths of definitions the user turned off. Path-keyed so disabling one duplicate does not
+    /// disable another copy with the same name.</summary>
+    public List<string> DisabledSkillPaths { get; set; } = new List<string>();
 
     /// <summary>Every MCP server whose scope covers <paramref name="solutionRoot"/> and that the user enabled.</summary>
     public IEnumerable<McpServerConfiguration> EnabledMcpServers(string? solutionRoot) =>
@@ -127,6 +151,9 @@ public sealed class StreamUpdate
     public string ReasoningDelta { get; set; } = "";
     public List<ToolCall> ToolCalls { get; set; } = new List<ToolCall>();
     public string FinishReason { get; set; } = "";
+    /// <summary>Set on the first chunk of a continuation: the previous attempt was cut off by the server and this
+    /// update is the rest of the same answer, not a new one.</summary>
+    public bool Resumed { get; set; }
     /// <summary>Set on the last chunk when the request asked the server to include usage; null on every chunk
     /// that only carries text.</summary>
     public TokenUsage? Usage { get; set; }
