@@ -192,15 +192,35 @@ internal sealed class AgentHarness
             var mcpTools = _selection.Narrows ? _selection.Definitions : null;
 
             if (_services.Settings.EnableStreaming)
-                await _services.StreamAsync(_model, request, async update =>
+                try
                 {
-                    assistant.Content += update.ContentDelta; assistant.Reasoning += update.ReasoningDelta;
-                    if (update.ToolCalls.Count > 0) assistant.ToolCalls = update.ToolCalls;
-                    if (update.FinishReason.Length > 0) finish = update.FinishReason;
-                    _view.Streamed = assistant.Content.Length;
-                    _view.Phase = assistant.Content.Length > 0 ? "Writing" : "Thinking";
-                    await _view.InvokeAsync(() => _view.SetContent(bubble, assistant));
-                }, token, mcpTools, _skillPlan.OffersTools).ConfigureAwait(true);
+                    await _services.StreamAsync(_model, request, async update =>
+                    {
+                        // A continuation is a seam in the answer, so it gets a row of its own: the user has to be
+                        // able to tell a proxy timeout from the model changing its mind about what it was writing.
+                        if (update.Resumed)
+                            await _view.InvokeAsync(() => _view.AddToolNote("stream", "Stream · the connection dropped mid-answer; the rest of the answer was asked for and appended", true, null, null, null));
+                        assistant.Content += update.ContentDelta; assistant.Reasoning += update.ReasoningDelta;
+                        if (update.ToolCalls.Count > 0) assistant.ToolCalls = update.ToolCalls;
+                        if (update.FinishReason.Length > 0) finish = update.FinishReason;
+                        _view.Streamed = assistant.Content.Length;
+                        _view.Phase = assistant.Content.Length > 0 ? "Writing" : "Thinking";
+                        await _view.InvokeAsync(() => _view.SetContent(bubble, assistant));
+                    }, token, mcpTools, _skillPlan.OffersTools).ConfigureAwait(true);
+                }
+                catch
+                {
+                    // A stream the client could not finish still has the text it did deliver, and the bubble is
+                    // already showing it. Recording it is what keeps the partial answer after the session is
+                    // reloaded; an announced tool call is left out, because a call with no result would put the
+                    // stored transcript out of step and Sanitize would have to cut it on the next request.
+                    if (assistant.Content.Length > 0 && assistant.ToolCalls.Count == 0)
+                    {
+                        _view.ActiveTurn?.Messages.Add(ChatStateLimits.CopyMessage(assistant));
+                        _view.SaveSession();
+                    }
+                    throw;
+                }
             else
             {
                 var complete = await _services.CompleteAsync(_model, request, token, mcpTools, _skillPlan.OffersTools).ConfigureAwait(true);

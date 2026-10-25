@@ -118,6 +118,7 @@ Diagnostics appear in **View > Output > LiteLLM**. The status bar reports discov
 - **401/403:** update the key. A blank key field retains the previous value; remove and recreate a server to remove a key.
 - **404:** confirm the URL does not already include `/v1` and that the model route exists.
 - **Timeout/network errors:** increase the timeout in Options and inspect the LiteLLM Output pane.
+- **"An existing connection was forcibly closed by the remote host" mid-answer:** a proxy or the server closed the socket while the answer was streaming — commonly `nginx`'s 60-second `proxy_read_timeout`, Cloudflare's 100-second cap, or a restarted LiteLLM worker. The partial answer is kept and the turn is asked to continue from it (`Continue a dropped stream` in Options, default 2 attempts). For a permanent fix, raise the proxy's read timeout and disable response buffering for the streaming route (`proxy_buffering off; proxy_read_timeout 600s;`), and check the LiteLLM logs for worker restarts around the failure.
 - **VSIX build fails outside Visual Studio:** install the VS extension development workload and build from its Developer Command Prompt; `dotnet build` does not work for these projects.
 
 ## Architecture note

@@ -7,6 +7,7 @@ public sealed class LiteLlmOptionsPage : DialogPage
 {
     [Category("Chat"), DisplayName("Request timeout (seconds)"), DefaultValue(120)] public int RequestTimeoutSeconds { get; set; } = 120;
     [Category("Chat"), DisplayName("Enable streaming"), DefaultValue(true)] public bool EnableStreaming { get; set; } = true;
+    [Category("Chat"), DisplayName("Continue a dropped stream"), Description("A proxy that times out while the model is quiet, or a server that restarts, cuts a streamed answer short. The text that arrived is kept and the same turn is asked to go on from it, this many times. Each continuation is a new request, so it also spends tokens. Zero keeps the partial answer without asking for the rest."), DefaultValue(2)] public int StreamResumeAttempts { get; set; } = 2;
     [Category("Chat"), DisplayName("Maximum tokens"), Description("Reasoning models spend this budget on thinking before they write anything — keep it generous."), DefaultValue(8192)] public int MaxTokens { get; set; } = 8192;
     [Category("Chat"), DisplayName("Temperature"), DefaultValue(.2)] public double Temperature { get; set; } = .2;
     [Category("Features"), DisplayName("Show reasoning"), DefaultValue(true)] public bool ShowReasoning { get; set; } = true;

@@ -28,6 +28,10 @@ public sealed class UserSettings
     public string ClaudeAllowedTools { get; set; } = "Read,Glob,Grep";
     public string ClaudeDisallowedTools { get; set; } = "WebFetch,WebSearch";
     public int RequestTimeoutSeconds { get; set; } = 120;
+    /// <summary>How many times a streamed answer the server cut off is asked to continue. Each attempt is a
+    /// whole new request, so this is also the most extra requests one dropped connection can cost; zero keeps
+    /// the partial answer but does not ask for the rest.</summary>
+    public int StreamResumeAttempts { get; set; } = 2;
     public bool EnableStreaming { get; set; } = true;
     public int MaxTokens { get; set; } = 8192;
     public double Temperature { get; set; } = .2;
@@ -147,6 +151,9 @@ public sealed class StreamUpdate
     public string ReasoningDelta { get; set; } = "";
     public List<ToolCall> ToolCalls { get; set; } = new List<ToolCall>();
     public string FinishReason { get; set; } = "";
+    /// <summary>Set on the first chunk of a continuation: the previous attempt was cut off by the server and this
+    /// update is the rest of the same answer, not a new one.</summary>
+    public bool Resumed { get; set; }
     /// <summary>Set on the last chunk when the request asked the server to include usage; null on every chunk
     /// that only carries text.</summary>
     public TokenUsage? Usage { get; set; }

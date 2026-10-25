@@ -87,7 +87,7 @@ internal sealed class ExtensionServices : IDisposable
     internal void ApplyOptions()
     {
         var o = (LiteLlmOptionsPage)_package.GetDialogPage(typeof(LiteLlmOptionsPage));
-        Settings.RequestTimeoutSeconds = o.RequestTimeoutSeconds; Settings.EnableStreaming = o.EnableStreaming; Settings.MaxTokens = o.MaxTokens; Settings.Temperature = o.Temperature; Settings.ShowReasoning = o.ShowReasoning; Settings.EnableToolCalling = o.EnableToolCalling; Settings.PermissionMode = o.PermissionMode; Settings.MaxToolRounds = o.MaxToolRounds; Settings.LoggingLevel = o.LoggingLevel;
+        Settings.RequestTimeoutSeconds = o.RequestTimeoutSeconds; Settings.StreamResumeAttempts = o.StreamResumeAttempts; Settings.EnableStreaming = o.EnableStreaming; Settings.MaxTokens = o.MaxTokens; Settings.Temperature = o.Temperature; Settings.ShowReasoning = o.ShowReasoning; Settings.EnableToolCalling = o.EnableToolCalling; Settings.PermissionMode = o.PermissionMode; Settings.MaxToolRounds = o.MaxToolRounds; Settings.LoggingLevel = o.LoggingLevel;
         Settings.EnableFileEditing = o.EnableFileEditing; Settings.ConfirmEachEdit = o.ConfirmEachEdit; Settings.VerifyBuildAfterEdits = o.VerifyBuildAfterEdits;
         Settings.EnableTerminalTools = o.EnableTerminalTools; Settings.ConfirmEachCommand = o.ConfirmEachCommand; Settings.CommandTimeoutSeconds = o.CommandTimeoutSeconds;
         // The tests check is offered even when the build check is off; it simply never runs, because it runs
