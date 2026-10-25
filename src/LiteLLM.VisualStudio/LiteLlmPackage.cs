@@ -39,5 +39,12 @@ public sealed class LiteLlmPackage : AsyncPackage
     }
     private static void Add(OleMenuCommandService service, int id, Func<Task> action) => service.AddCommand(new MenuCommand((s, e) => ThreadHelper.JoinableTaskFactory.RunAsync(action), new CommandID(new Guid("38BB4A85-6C8E-489E-9CA4-E08258489996"), id)));
     private async Task ShowAsync(Type type) { var pane = await ShowToolWindowAsync(type, 0, true, DisposalToken); if (pane?.Frame == null) throw new NotSupportedException("Cannot create LiteLLM tool window."); }
+    /// <summary>Opens the Dashboard on its MCP page. The chat's MCP chip is the shortest path from "MCP is off" to
+    /// the control that turns it on, without making the user find the window and the tab.</summary>
+    internal async Task ShowDashboardMcpAsync()
+    {
+        var pane = await ShowToolWindowAsync(typeof(DashboardToolWindow), 0, true, DisposalToken);
+        if (pane?.Content is DashboardControl dashboard) dashboard.ShowMcpPage();
+    }
     protected override void Dispose(bool disposing) { if (disposing && Services != null) Services.Dispose(); base.Dispose(disposing); }
 }

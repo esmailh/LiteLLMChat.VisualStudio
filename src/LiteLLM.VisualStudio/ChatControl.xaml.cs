@@ -36,9 +36,17 @@ public partial class ChatControl : UserControl, IAgentView
     private bool _narrow;
     private ChatTurnState? _activeTurn;
     private int _turnStart;
+    /// <summary>What MCP looks like for the open solution, computed when the window loads and when the settings or
+    /// the solution change — not per turn. The chip is the persistent answer to a state, where a transcript row per
+    /// turn repeated the same sentence for every message.</summary>
+    private McpAvailability _mcpAvailability = McpAvailability.For(null, null);
     /// <summary>What the user has attached to the next message. Draft state, like the composer's text: it belongs to
     /// the message being written, not yet to the conversation.</summary>
     private readonly List<ChatContextItem> _attachments = new List<ChatContextItem>();
+    /// <summary>Every prompt drawn in this conversation, with the element it was drawn as, so the header's list can
+    /// jump to one. Kept as it is drawn rather than re-derived from the session: a retry replaces the last turn, and
+    /// the element that is on screen is the one the click has to reach.</summary>
+    private readonly List<PromptEntry> _userPrompts = new List<PromptEntry>();
     /// <summary>Set while a picker is open or the composer is being written to, so the '#' gesture does not fire on our own edits.</summary>
     private bool _picking;
     /// <summary>The file open in the editor, held apart from <see cref="_attachments"/> so that rebuilding it as the
@@ -148,6 +156,7 @@ public partial class ChatControl : UserControl, IAgentView
         if (!_eventSubscriptionsActive)
         {
             Services.ModelsChanged += ModelsChanged; Services.SessionsChanged += SessionsChanged;
+            Services.SettingsChanged += SettingsChanged;
             Services.Mcp.ToolsChanged += McpToolsChanged;
             Services.Mcp.ServerClosed += McpServerClosed;
             _eventSubscriptionsActive = true;
@@ -160,6 +169,9 @@ public partial class ChatControl : UserControl, IAgentView
         await Services.RefreshSessionScopeAsync();
         if (!IsLoaded || loadVersion != _loadVersion) return;
         ReloadSessions(); RenderSession(); ReloadModels();
+        // One read of the MCP state for this window. Everything after it is a refresh on a change, not a check per
+        // turn: the servers cannot become enabled or disabled by a message.
+        _ = RefreshMcpChipAsync();
         // The chips and the Skills menu read the same snapshot. Scanning here means the first click on Skills
         // already has the list, and a selected name left behind by an earlier session gets its real state back.
         _ = PrepareSkillsAsync(loadVersion);
@@ -183,6 +195,7 @@ public partial class ChatControl : UserControl, IAgentView
         if (_eventSubscriptionsActive)
         {
             Services.ModelsChanged -= ModelsChanged; Services.SessionsChanged -= SessionsChanged;
+            Services.SettingsChanged -= SettingsChanged;
             Services.Mcp.ToolsChanged -= McpToolsChanged;
             Services.Mcp.ServerClosed -= McpServerClosed;
             _eventSubscriptionsActive = false;
@@ -238,6 +251,7 @@ public partial class ChatControl : UserControl, IAgentView
         {
             if (!IsLoaded) return;
             RefreshSlashCommands();
+            _ = RefreshMcpChipAsync();
         }));
     }
     /// <summary>A server that ended on its own is said as soon as it happens rather than left for the next tool call:
@@ -252,7 +266,82 @@ public partial class ChatControl : UserControl, IAgentView
             AddToolNote("mcp", "MCP · " + server.Name + " disconnected: " + McpLog.Redact(reason), false, null,
                 "The next turn tries to connect it again; ↻ in the MCP dashboard does it now.", null);
             RefreshSlashCommands();
+            _ = RefreshMcpChipAsync();
         }));
+    }
+    /// <summary>A settings save is the one signal every control that edits MCP goes through, so the chip follows it at
+    /// once rather than waiting for the next message. The event may arrive on the thread that saved; the dispatcher is
+    /// touched before anything that belongs to the window.</summary>
+    private void SettingsChanged(object? sender, EventArgs e)
+    {
+        _ = Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (!IsLoaded) return;
+            _ = RefreshMcpChipAsync();
+        }));
+    }
+    private void McpChip_Click(object sender, MouseButtonEventArgs e)
+    {
+        try { _ = LiteLlmPackage.Instance.ShowDashboardMcpAsync(); }
+        catch (Exception ex) { Services.Log("The MCP dashboard could not be opened: " + ex); }
+    }
+    /// <summary>Recomputes the chip for the solution that is open now. Called when the window loads, when the settings
+    /// are saved, when the solution changes and when a server's tool list does — never from a turn.</summary>
+    private async Task RefreshMcpChipAsync()
+    {
+        try
+        {
+            var root = await SolutionRootAsync();
+            if (!IsLoaded) return;
+            _mcpAvailability = McpAvailability.For(Services.Settings, root);
+            DrawMcpChip();
+        }
+        catch (Exception ex) { Services.Log("MCP status could not be read: " + ex); }
+    }
+    /// <summary>The chip is configuration, so one enabled server is "on" even if it is still connecting: the tooltip
+    /// is where a failed connection belongs, and flipping the chip to "off" would blame the user's setting for a
+    /// network problem.</summary>
+    private void DrawMcpChip()
+    {
+        var availability = _mcpAvailability;
+        var tools = Services.Mcp.Tools;
+        var enabled = availability.IsEnabled;
+        McpChipText.Text = enabled
+            ? (tools.Count > 0
+                ? "MCP · " + tools.Count + (tools.Count == 1 ? " tool" : " tools")
+                : "MCP on · " + availability.EnabledCount + (availability.EnabledCount == 1 ? " server" : " servers"))
+            : "MCP off";
+        // Accent for on, support text for off: the two colours the rest of the composer already uses. Resolved rather
+        // than assigned, so a theme change repaints the dot with everything else.
+        McpDot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty,
+            enabled ? EnvironmentColors.AccentMediumBrushKey : (object)CommonDocumentColors.SupportTextBrushKey);
+        McpChip.SetResourceReference(Border.BorderBrushProperty,
+            enabled ? EnvironmentColors.AccentMediumBrushKey : (object)CommonDocumentColors.ListItemBorderBrushKey);
+
+        var lines = new List<string>();
+        if (!enabled)
+        {
+            lines.Add(availability.Detail);
+        }
+        else
+        {
+            lines.Add(availability.Headline);
+            lines.Add(tools.Count == 1 ? "1 tool is offered right now." : tools.Count + " tools are offered right now.");
+            foreach (var server in availability.EnabledServers)
+            {
+                var status = Services.Mcp.StatusOf(server.Id);
+                var state = status == null
+                    ? "not connected yet"
+                    : status.Connected
+                        ? "connected · " + status.Tools + (status.Tools == 1 ? " tool" : " tools")
+                        : "not connected" + (string.IsNullOrWhiteSpace(status.Error)
+                            ? ""
+                            : ": " + McpLog.Redact(status.Error ?? ""));
+                lines.Add("· " + server.Name + " — " + state);
+            }
+            lines.Add("Click to open Dashboard ▸ MCP.");
+        }
+        McpChip.ToolTip = string.Join("\n", lines);
     }
     /// <summary>Whether MCP is on for this turn and this solution has a server the user enabled that is not
     /// connected — the state in which a typed '#' silently falls back to the file picker. A connected server that
@@ -271,6 +360,7 @@ public partial class ChatControl : UserControl, IAgentView
     {
         ReloadBackend();
         Messages.Children.Clear(); Messages.Children.Add(EmptyState); _history.Clear();
+        _userPrompts.Clear();
         foreach (var turn in Services.ActiveSession.Turns)
         {
             foreach (var message in turn.Messages)
@@ -323,7 +413,7 @@ public partial class ChatControl : UserControl, IAgentView
         }
         ComposerHint.Visibility = Visibility.Collapsed;
         Composer.Clear(); EmptyState.Visibility = Visibility.Collapsed;
-        _history.Add(new ChatMessage { Role = "user", Content = input }); AddMessage("You", input, false);
+        _history.Add(new ChatMessage { Role = "user", Content = input }); ScrollToSent(AddMessage("You", input, false));
         _turnStart = _history.Count - 1;
         var pendingContext = PendingContext(); ClearAttachments();
         var session = Services.ActiveSession;
@@ -521,7 +611,7 @@ public partial class ChatControl : UserControl, IAgentView
         input = input.Trim();
         ComposerHint.Visibility = Visibility.Collapsed;
         Composer.Clear(); EmptyState.Visibility = Visibility.Collapsed;
-        _history.Add(new ChatMessage { Role = "user", Content = input }); AddMessage("You", input, false);
+        _history.Add(new ChatMessage { Role = "user", Content = input }); ScrollToSent(AddMessage("You", input, false));
         _turnStart = _history.Count - 1;
         // The chips are the context for this message. They move onto the turn now, so the stored conversation records
         // what each answer was given, and the composer goes back to being empty.
@@ -870,6 +960,9 @@ public partial class ChatControl : UserControl, IAgentView
     {
         var bubble = CreateBubble(author, assistant);
         SetContent(bubble, new ChatMessage { Role = "assistant", Content = content });
+        // The prompt list is the same list of turns the user sees, so it is recorded where the bubble is drawn:
+        // replaying a conversation and sending a message both come through here.
+        if (!assistant) _userPrompts.Add(new PromptEntry(content, bubble.Border));
         return bubble.Border;
     }
 
@@ -1115,6 +1208,7 @@ public partial class ChatControl : UserControl, IAgentView
         // disposes it. Nulling it here would leave that block throwing on a null.
         _generation?.Cancel();
         _history.Clear(); _activeTurn = null; _lastExchange = null; _live = null; _follow = true;
+        _userPrompts.Clear();
         Services.NewSession();   // fires SessionsChanged, which is what reloads the session list
         Messages.Children.Clear(); Messages.Children.Add(EmptyState); EmptyState.Visibility = Visibility.Visible;
         Composer.Clear(); ClearAttachments();
@@ -1352,6 +1446,8 @@ public partial class ChatControl : UserControl, IAgentView
     {
         var previous = Services.Sessions;
         await Services.RefreshSessionScopeAsync();
+        // A solution change is also an MCP-scope change: a server limited to one solution starts or stops applying.
+        _ = RefreshMcpChipAsync();
         if (ReferenceEquals(previous, Services.Sessions)) return;
         RenderSession();
         ReloadModels();
@@ -2252,6 +2348,83 @@ public partial class ChatControl : UserControl, IAgentView
     }
     private void ConversationScroll_ScrollChanged(object sender, ScrollChangedEventArgs e) { if (e.ExtentHeightChange == 0) _follow = ConversationScroll.VerticalOffset >= ConversationScroll.ScrollableHeight - 12; }
     private void ScrollIfFollowing() { if (_follow) ConversationScroll.ScrollToEnd(); }
+
+    /// <summary>Sending always returns the view to the newest message, even if the user had scrolled away: otherwise
+    /// the message they just wrote is drawn off-screen and the reply streams where they cannot see it. The scroll is
+    /// queued because the bubble has not been laid out in its final position yet.</summary>
+    private void ScrollToSent(Border message)
+    {
+        _follow = true;
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (!IsLoaded) return;
+            message.BringIntoView();
+            ConversationScroll.ScrollToEnd();
+        }), DispatcherPriority.Loaded);
+    }
+
+    /// <summary>Fills the list from the bubbles that are on screen now. Rebuilt on open rather than kept in step by an
+    /// event: the list is only read when it is shown, and a turn that is still streaming can change it underneath.</summary>
+    private void Prompts_Click(object sender, RoutedEventArgs e)
+    {
+        var rows = new List<PromptRow>(_userPrompts.Count);
+        for (var index = 0; index < _userPrompts.Count; index++)
+            rows.Add(new PromptRow(index + 1, _userPrompts[index]));
+        PromptsList.ItemsSource = rows;
+        if (rows.Count == 0)
+        {
+            StateText.Text = "No messages in this chat yet.";
+            return;
+        }
+        PromptsPopup.IsOpen = true;
+    }
+
+    private void PromptsList_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        // Same guard as the composer's picker: a click on the scrollbar or the empty area must not jump to whatever
+        // row happened to be selected.
+        if (!(PromptsList.SelectedItem is PromptRow row)) return;
+        if (!(ItemsControl.ContainerFromElement(PromptsList, e.OriginalSource as DependencyObject) is ListBoxItem)) return;
+        e.Handled = true;
+        PromptsPopup.IsOpen = false;
+        JumpToPrompt(row.Element);
+    }
+
+    /// <summary>Brings an earlier prompt to the top of the view. Jumping is a deliberate move away from the live
+    /// answer, so following is turned off: the next streamed delta must not drag the view back down.</summary>
+    private void JumpToPrompt(Border element)
+    {
+        if (element == null) return;
+        _follow = false;
+        ConversationScroll.UpdateLayout();
+        var position = element.TranslatePoint(new Point(0, 0), Messages);
+        ConversationScroll.ScrollToVerticalOffset(Math.Max(0, position.Y - 12));
+    }
+
+    /// <summary>One prompt as the transcript drew it.</summary>
+    private sealed class PromptEntry
+    {
+        internal PromptEntry(string text, Border element) { Text = text; Element = element; }
+        internal string Text { get; }
+        internal Border Element { get; }
+    }
+
+    /// <summary>A row in the prompt list. The number is its place in the conversation, so a long list can be scanned
+    /// without reading every line; the full text lives in the tooltip.</summary>
+    private sealed class PromptRow
+    {
+        internal PromptRow(int number, PromptEntry entry)
+        {
+            Number = number.ToString();
+            Text = ChatStateLimits.OneLine(entry.Text, 120);
+            Detail = entry.Text;
+            Element = entry.Element;
+        }
+        public string Number { get; }
+        public string Text { get; }
+        public string Detail { get; }
+        internal Border Element { get; }
+    }
 }
 
 

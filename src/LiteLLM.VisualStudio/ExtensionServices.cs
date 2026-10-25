@@ -34,6 +34,9 @@ internal sealed class ExtensionServices : IDisposable
     internal event EventHandler? ModelsChanged;
     internal event EventHandler? SessionsChanged;
     internal event EventHandler? UsageChanged;
+    /// <summary>Raised after a save, because the window's MCP chip is drawn from the settings and a server added,
+    /// turned off or imported in the Dashboard has to change it without waiting for the next turn.</summary>
+    internal event EventHandler? SettingsChanged;
     internal ExtensionServices(AsyncPackage package)
     {
         _package = package;
@@ -106,7 +109,7 @@ internal sealed class ExtensionServices : IDisposable
         Settings.McpToolTimeoutSeconds = o.McpToolTimeoutSeconds; Settings.McpMaxToolsPerTurn = o.McpMaxToolsPerTurn;
         Settings.McpLogLevel = o.McpLogLevel; Settings.McpStrictClaudeConfig = o.McpStrictClaudeConfig;
     }
-    internal void Save() { ApplyOptions(); _store.Save(Settings); }
+    internal void Save() { ApplyOptions(); _store.Save(Settings); SettingsChanged?.Invoke(this, EventArgs.Empty); }
     internal void SaveSessions() { SessionStore.Save(Sessions); SessionsChanged?.Invoke(this, EventArgs.Empty); }
 
     private static void NormalizeSkillSettings(UserSettings settings)

@@ -12,6 +12,9 @@ public partial class DashboardControl : UserControl
     private bool _narrow;
     private ExtensionServices Services => LiteLlmPackage.Instance.Services;
     internal DashboardControl() { InitializeComponent(); VsTheme.Apply(this); Loaded += (s, e) => { Services.ModelsChanged += Changed; Services.UsageChanged += Changed; Reload(); }; SizeChanged += OnSizeChanged; }
+    /// <summary>Selects the MCP page. Called by the chat's MCP chip so its click lands on the page that explains the
+    /// state rather than on the Connections list.</summary>
+    internal void ShowMcpPage() => Pages.SelectedIndex = 1;
     private void OnSizeChanged(object sender, SizeChangedEventArgs e) => ApplyLayout(e.NewSize.Width < 620);
     private void ApplyLayout(bool narrow)
     {

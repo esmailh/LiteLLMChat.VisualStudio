@@ -37,6 +37,9 @@ internal sealed class AgentHarness
     /// the first user message of the active turn — the same rule as <see cref="ChatSessionState.IgnoreHistory"/>:
     /// editing the message mid-turn changes the next turn, not the running loop.</summary>
     private McpToolSelection _selection = McpToolSelection.Automatic;
+    /// <summary>The MCP block for the system prompt: the selection hint, plus what to say about any server the message
+    /// named that this turn cannot offer.</summary>
+    private string? _mcpHint;
     /// <summary>What this turn's skill scan found, and the instructions built from it. Read by the tool dispatch
     /// and by the round that builds the request; both come from the same snapshot.</summary>
     private SkillPlan _skillPlan = SkillPlan.None;
@@ -60,6 +63,11 @@ internal sealed class AgentHarness
         // and a server that cannot be reached has to say so before the turn starts rather than after it stalls.
         // Only tool-calling turns connect anything — with the tools off the definitions would never be sent.
         var mcp = new McpTurnReport();
+        // A server the user configured but this turn cannot offer is answered once, by name. Doing it before the
+        // selection is also what lets the selection leave those tokens alone, so one word does not draw two rows.
+        // It never connects anything: the answer is a sentence, not a retry.
+        var inactiveMentions = McpDisabledMentions.Find(_services.Settings, solutionRoot, CurrentUserMessage());
+        var explained = inactiveMentions.SelectMany(mention => mention.Tokens).ToList();
         if (_services.Settings.EnableToolCalling && _services.Settings.EnableMcp)
         {
             try
@@ -77,24 +85,19 @@ internal sealed class AgentHarness
             }
             foreach (var row in mcp.Rows) _view.AddToolNote("mcp", row.Summary, row.Ok, null, row.Detail, null);
 
-            // MCP on with every configured server disabled is not a failure — but the turn then silently goes
-            // without the tools the user may be waiting on, so it says so before the first round rather than
-            // leaving the absence to be noticed later.
-            var configured = _services.Settings.McpServers ?? new List<McpServerConfiguration>();
-            if (configured.Count > 0 &&
-                !configured.Any(server => server != null && server.Enabled && server.AppliesTo(solutionRoot)))
-                _view.AddToolNote("mcp",
-                    "MCP · no server is enabled for this solution, so this turn has no MCP tools.", false, null, null,
-                    null);
-
             // What the message itself asked for is resolved against the tools preparation just offered. Doing it
             // here rather than per round means a tools/list_changed mid-turn cannot widen a narrowed turn: the
             // user chose these tools for this message.
             _selection = McpToolSelection.Resolve(_services.Mcp.Snapshot, CurrentUserMessage(),
-                _services.Settings.McpMaxToolsPerTurn);
+                _services.Settings.McpMaxToolsPerTurn, explained);
             foreach (var row in _selection.Rows)
                 _view.AddToolNote("mcp", row.Summary, row.Ok, null, row.Detail, null);
         }
+        foreach (var mention in inactiveMentions)
+            _view.AddToolNote("mcp", mention.Summary, false, null, mention.Detail, null);
+        // The model is told what the window is told: a server named in the message is unavailable, and retrying it
+        // would only spend a round on the same answer. With MCP off entirely this is the only MCP hint there is.
+        _mcpHint = McpDisabledMentions.Combine(_selection.Hint, inactiveMentions);
         // Skills are prepared once per turn, for the same reason the repository instructions are: the folder can
         // change between turns, not between rounds of one turn. The registry's signature makes this a no-op when
         // nothing changed. A failure here costs a row, never the turn: a broken skills directory must not stop a
@@ -183,7 +186,7 @@ internal sealed class AgentHarness
             // rebuilt per request, so this needs no sanitizing, costs the stored conversation nothing, and
             // goes away by itself once the list is clean.
             var errors = BuildDiagnostics.ToStandingNote(await SolutionBuild.ReadErrorListAsync().ConfigureAwait(true));
-            var request = AgentPrompt.Build(history, context, _view.Mode, _services.Settings.EnableToolCalling, _services.Settings.EnableFileEditing, _services.Settings.EnableTerminalTools, repoInstructions, errors, mcp.Instructions, _selection.Hint, _skillPlan.Instructions);
+            var request = AgentPrompt.Build(history, context, _view.Mode, _services.Settings.EnableToolCalling, _services.Settings.EnableFileEditing, _services.Settings.EnableTerminalTools, repoInstructions, errors, mcp.Instructions, _mcpHint, _skillPlan.Instructions);
 
             var bubble = _view.AddAssistantBubble(round == 1 ? "Thinking" : "Reading the tool results");
             _view.Streamed = 0; _view.Phase = round == 1 ? "Thinking" : "Reading the tool results";
