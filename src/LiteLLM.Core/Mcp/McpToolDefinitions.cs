@@ -57,7 +57,7 @@ public sealed class McpToolSnapshot
         var notes = new List<string>();
         if (omitted > 0)
             notes.Add("only the first " + tools.Count + " MCP tools were offered; " + omitted + " more " +
-                      (omitted == 1 ? "was" : "were") + " left out");
+                      (omitted == 1 ? "was" : "were") + " left out by the per-turn cap");
         if (skipped > 0)
             notes.Add(skipped + (skipped == 1
                 ? " MCP tool entry had no name and was ignored"
@@ -108,7 +108,7 @@ public sealed class McpToolSnapshot
         return result;
     }
 
-    public static McpToolSnapshot Build(IEnumerable<McpToolListing> listings, int maxTools = 64)
+    public static McpToolSnapshot Build(IEnumerable<McpToolListing> listings, int maxTools = 16)
     {
         var tools = new List<McpToolInfo>();
         var omitted = 0;

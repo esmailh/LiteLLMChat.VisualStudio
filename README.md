@@ -5,7 +5,7 @@
 
 See [MARKETPLACE.md](MARKETPLACE.md) for the complete user-facing feature guide, setup instructions, privacy notes, and troubleshooting information.
 
-A native WPF VSIX for chatting with any OpenAI-compatible LiteLLM gateway without leaving Visual Studio. It supports multiple servers, model discovery, streaming, reasoning display, read and edit tools, VS Code–style context attachments, MCP servers, a Claude Code backend, diagnostics, DPAPI-protected API keys, and a local conversation history.
+A native WPF VSIX for chatting with any OpenAI-compatible LiteLLM gateway without leaving Visual Studio. It supports multiple servers, model discovery, streaming, reasoning display, read and edit tools, VS Code–style context attachments, MCP servers, Agent Skills, a Claude Code backend, diagnostics, DPAPI-protected API keys, and a local conversation history.
 
 ## Requirements
 
@@ -55,6 +55,17 @@ The extension is an MCP client. Any stdio, Streamable HTTP, or legacy HTTP+SSE s
 Global switches — enable MCP, the read-only exception, sampling, elicitation, roots, timeouts, the per-turn tool cap and the strict Claude configuration — are under **Tools ▸ Options ▸ LiteLLM ▸ MCP**. The server list itself is saved by the Dashboard.
 
 **The Claude backend** is given the servers marked **Expose to Claude** through a per-run `--mcp-config` file written under `%LOCALAPPDATA%`, deleted when the turn ends. Because the CLI runs with `--permission-mode dontAsk`, the extension cannot show its own per-call card inside it; only tools the policy already resolves to *allow* (an explicit allow-list entry or the read-only exception) are put in `--allowedTools`. Everything else is reported by the CLI as denied. Use the LiteLLM backend when the per-call card matters. The file never goes into the repository, and a repository `.mcp.json` is never loaded on its own.
+
+## Skills
+
+A skill is a folder containing `SKILL.md`: a small YAML header (`name`, `description`) and Markdown instructions. Skills are the reusable side of prompting — a code-review checklist, a release procedure, a project's conventions — kept where they can be edited and versioned. The full guide is in [SKILLS.md](SKILLS.md).
+
+- **Where they live.** Personal skills are under `%USERPROFILE%\.llm123\skills`. Project skills are read from `<solution>\.agents\skills`, and optionally from `.github/skills` and `.claude/skills`. Only immediate child folders are scanned, and the folder name must equal the `name` field.
+- **Manage them on Dashboard ▸ Skills.** Search, enable, refresh, create, import, edit and delete. A duplicate name shows every definition and the path that wins; the others are marked *shadowed* rather than hidden, and disabling one copy is keyed to its path, so it does not turn off the other. Deleting or replacing a skill always asks first.
+- **Use them three ways.** Type `/` for the list of skills and pick one to select it for the current conversation (shown as a chip, up to twelve; picking a ticked row deselects it). `/skill code-review review the diff` selects it for the request and sends only the words after the name. With automatic selection on the LiteLLM backend, the model is given names and descriptions and loads a body with `load_skill` when it is relevant.
+- **A skill is guidance, not code.** Its scripts are never executed merely because they exist, and its instructions cannot grant a permission, approve a tool call, or skip an edit or command confirmation.
+- **AI drafts.** **New skill** can ask a configured model for a draft from a name, description, examples and conventions. The draft is text until you press Save; the configured utility model is used when present, otherwise the model the chat is using.
+- **The Claude backend** already reads `.claude/skills`, so the extension names a native skill instead of sending its body twice, and injects only skills the CLI cannot discover.
 
 ## Context attachments
 

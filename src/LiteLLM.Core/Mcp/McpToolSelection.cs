@@ -228,8 +228,9 @@ public sealed class McpToolSelection
         }
         else if (anyExplicit)
         {
-            text.Append("MCP tools\nThe user's current message named an MCP tool that is not offered. The connected " +
-                        "MCP tools remain available. Say plainly that the named tool is unavailable; do not " +
+            text.Append("MCP tools\nThe user's current message named an MCP tool that is not offered. The MCP tools " +
+                        "offered this turn remain available; the named one may be beyond the per-turn cap. Say " +
+                        "plainly that the named tool is unavailable; do not " +
                         "substitute a different tool, and do not claim one ran.\n");
         }
 

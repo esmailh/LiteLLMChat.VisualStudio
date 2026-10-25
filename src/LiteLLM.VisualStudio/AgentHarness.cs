@@ -37,6 +37,9 @@ internal sealed class AgentHarness
     /// the first user message of the active turn — the same rule as <see cref="ChatSessionState.IgnoreHistory"/>:
     /// editing the message mid-turn changes the next turn, not the running loop.</summary>
     private McpToolSelection _selection = McpToolSelection.Automatic;
+    /// <summary>What this turn's skill scan found, and the instructions built from it. Read by the tool dispatch
+    /// and by the round that builds the request; both come from the same snapshot.</summary>
+    private SkillPlan _skillPlan = SkillPlan.None;
 
     internal AgentHarness(IAgentView view, ExtensionServices services, ModelInfo model)
     {
@@ -91,6 +94,28 @@ internal sealed class AgentHarness
                 _services.Settings.McpMaxToolsPerTurn);
             foreach (var row in _selection.Rows)
                 _view.AddToolNote("mcp", row.Summary, row.Ok, null, row.Detail, null);
+        }
+        // Skills are prepared once per turn, for the same reason the repository instructions are: the folder can
+        // change between turns, not between rounds of one turn. The registry's signature makes this a no-op when
+        // nothing changed. A failure here costs a row, never the turn: a broken skills directory must not stop a
+        // chat that never asked to use one.
+        if (_services.Settings.EnableSkills)
+        {
+            try
+            {
+                _view.Phase = "Reading skills";
+                var snapshot = await _services.PrepareSkillsAsync(solutionRoot, token).ConfigureAwait(true);
+                _skillPlan = SkillPrompt.Build(snapshot, _services.ActiveSession.SelectedSkills,
+                    _services.Settings.SkillAutomatic, _services.Settings.EnableToolCalling);
+                foreach (var row in _skillPlan.Rows)
+                    _view.AddToolNote("skill", row.Summary, row.Ok, null, row.Detail, null);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                _view.AddToolNote("skill", "Skills · discovery failed: " + ex.Message, false, null, null, null);
+                _services.Log("Skill discovery failed: " + ex);
+            }
         }
         // Copilot Chat treats the round budget as a setting and asks before spending more rather than dying
         // at a fixed count. Clamp after ApplyOptions so a mid-session change still takes effect this turn.
@@ -158,7 +183,7 @@ internal sealed class AgentHarness
             // rebuilt per request, so this needs no sanitizing, costs the stored conversation nothing, and
             // goes away by itself once the list is clean.
             var errors = BuildDiagnostics.ToStandingNote(await SolutionBuild.ReadErrorListAsync().ConfigureAwait(true));
-            var request = AgentPrompt.Build(history, context, _view.Mode, _services.Settings.EnableToolCalling, _services.Settings.EnableFileEditing, _services.Settings.EnableTerminalTools, repoInstructions, errors, mcp.Instructions, _selection.Hint);
+            var request = AgentPrompt.Build(history, context, _view.Mode, _services.Settings.EnableToolCalling, _services.Settings.EnableFileEditing, _services.Settings.EnableTerminalTools, repoInstructions, errors, mcp.Instructions, _selection.Hint, _skillPlan.Instructions);
 
             var bubble = _view.AddAssistantBubble(round == 1 ? "Thinking" : "Reading the tool results");
             _view.Streamed = 0; _view.Phase = round == 1 ? "Thinking" : "Reading the tool results";
@@ -175,10 +200,10 @@ internal sealed class AgentHarness
                     _view.Streamed = assistant.Content.Length;
                     _view.Phase = assistant.Content.Length > 0 ? "Writing" : "Thinking";
                     await _view.InvokeAsync(() => _view.SetContent(bubble, assistant));
-                }, token, mcpTools).ConfigureAwait(true);
+                }, token, mcpTools, _skillPlan.OffersTools).ConfigureAwait(true);
             else
             {
-                var complete = await _services.CompleteAsync(_model, request, token, mcpTools).ConfigureAwait(true);
+                var complete = await _services.CompleteAsync(_model, request, token, mcpTools, _skillPlan.OffersTools).ConfigureAwait(true);
                 assistant.Content = complete.Content; assistant.Reasoning = complete.Reasoning; assistant.ToolCalls = complete.ToolCalls;
                 _view.SetContent(bubble, assistant);
             }
@@ -355,11 +380,30 @@ internal sealed class AgentHarness
         // ContextTools exactly as it did before MCP existed, so its own "unknown tool" answer is unchanged.
         // A name that exists but was not selected is refused here, before the policy and before the transport: the
         // transcript must still answer the announced call, and the user narrowed the turn on purpose.
-        var result = _services.Mcp.TryResolveTool(call.Name, out var mcpTool)
-            ? _selection.Allows(call.Name)
-                ? await RunMcpToolAsync(call, mcpTool, token).ConfigureAwait(true)
-                : RefuseUnselected(mcpTool)
-            : await ContextTools.ExecuteAsync(LiteLlmPackage.Instance, call.Name, call.Arguments, token).ConfigureAwait(true);
+        // Skill tools are resolved first. They were offered only when this turn prepared a skill plan, and a call
+        // for them when it did not is refused here rather than falling through to ContextTools' "unknown tool".
+        ToolResult result;
+        if (SkillTools.Handles(call.Name))
+        {
+            var skillResult = _skillPlan.OffersTools
+                ? SkillTools.Execute(_skillPlan.Snapshot, call.Name, call.Arguments, token)
+                : new SkillToolResult
+                {
+                    Content = "No skill is available to this turn, so the call was not run. The skills extension is " +
+                              "off, tool calling is off, or no skill is discovered.",
+                    Summary = "Skill · " + call.Name + " is not available this turn",
+                    Ok = false
+                };
+            result = new ToolResult { Content = skillResult.Content, Summary = skillResult.Summary, Ok = skillResult.Ok };
+        }
+        else
+        {
+            result = _services.Mcp.TryResolveTool(call.Name, out var mcpTool)
+                ? _selection.Allows(call.Name)
+                    ? await RunMcpToolAsync(call, mcpTool, token).ConfigureAwait(true)
+                    : RefuseUnselected(mcpTool)
+                : await ContextTools.ExecuteAsync(LiteLlmPackage.Instance, call.Name, call.Arguments, token).ConfigureAwait(true);
+        }
         Append(call, result, revisions);
     }
 

@@ -89,6 +89,19 @@ public sealed class McpToolDefinitionsTests
     }
 
     [Fact]
+    public void Build_DefaultsToSixteenToolsPerTurn()
+    {
+        // The default is the prompt cost of every round, so it is small on purpose. Pinned here because
+        // changing it silently changes how long a turn waits before the model starts answering.
+        var tools = Enumerable.Range(1, 17).Select(index => Tool("tool" + index, "")).ToArray();
+        var snapshot = McpToolSnapshot.Build(new[] { Listing("Files", tools) });
+
+        Assert.Equal(16, snapshot.Tools.Count);
+        Assert.Equal(1, snapshot.Omitted);
+        Assert.Contains("per-turn cap", snapshot.Note!, System.StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Build_ReportsAListedEntryThatHasNoName()
     {
         var snapshot = McpToolSnapshot.Build(new[]

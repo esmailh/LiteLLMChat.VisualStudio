@@ -96,7 +96,7 @@ public sealed class McpClient : IDisposable
     private IReadOnlyList<McpResourceInfo> _resources = Array.Empty<McpResourceInfo>();
     private IReadOnlyList<McpResourceTemplate> _templates = Array.Empty<McpResourceTemplate>();
     private IReadOnlyList<McpPromptInfo> _prompts = Array.Empty<McpPromptInfo>();
-    private int _maxTools = 64;
+    private int _maxTools = 16;
     private int _progressIds;
     private volatile bool _disposed;
 

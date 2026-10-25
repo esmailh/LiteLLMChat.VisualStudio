@@ -11,6 +11,8 @@
   <ItemGroup>
     <Reference Include="System.Design" />
     <Reference Include="System.Net.Http" />
+    <!-- The folder picker: WPF has none, and a skill is imported from a folder rather than a file. -->
+    <Reference Include="System.Windows.Forms" />
     <ProjectReference Include="..\LiteLLM.Core\LiteLLM.Core.csproj" />
     <ProjectReference Include="..\LiteLLM.GitWrapper\LiteLLM.GitWrapper.csproj" ReferenceOutputAssembly="false" />
     <PackageReference Include="Microsoft.VisualStudio.SDK" Version="17.12.40392" ExcludeAssets="runtime" />
@@ -26,6 +28,13 @@
     <Content Include="Resources\Icon.png"><IncludeInVSIX>true</IncludeInVSIX></Content>
     <Content Include="$(MSBuildProjectDirectory)\..\..\README.md">
       <Link>README.md</Link>
+      <IncludeInVSIX>true</IncludeInVSIX>
+      <VSIXSubPath></VSIXSubPath>
+    </Content>
+    <!-- The Skills guide ships beside the README: the feature's settings live in the Dashboard rather than the
+         options page, so the folder layout and precedence need to be readable from the installed extension. -->
+    <Content Include="$(MSBuildProjectDirectory)\..\..\SKILLS.md">
+      <Link>SKILLS.md</Link>
       <IncludeInVSIX>true</IncludeInVSIX>
       <VSIXSubPath></VSIXSubPath>
     </Content>

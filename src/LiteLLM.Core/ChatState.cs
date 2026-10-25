@@ -92,6 +92,11 @@ public sealed class ChatSessionState
     public string ExecutionBackend { get; set; } = "litellm";
     /// <summary>Opaque id emitted by Claude Code. Never synthesized from the extension conversation id.</summary>
     public string ClaudeSessionId { get; set; } = "";
+    /// <summary>Skills the user selected for this conversation. Their bodies are injected into every turn, so the
+    /// choice is a property of the chat rather than of one message. Stored by name so a skill can be moved or its
+    /// folder renamed without rewriting the conversation; a name that no longer resolves is reported, not dropped.
+    /// Selection is not a permission grant.</summary>
+    public List<string> SelectedSkills { get; set; } = new List<string>();
     public List<ChatTurnState> Turns { get; set; } = new List<ChatTurnState>();
 
     [JsonIgnore]
