@@ -5,7 +5,43 @@
 
 See [MARKETPLACE.md](MARKETPLACE.md) for the complete user-facing feature guide, setup instructions, privacy notes, and troubleshooting information.
 
-A native WPF VSIX for chatting with any OpenAI-compatible LiteLLM gateway without leaving Visual Studio. It supports multiple servers, model discovery, streaming, reasoning display, read and edit tools, VS Code–style context attachments, MCP servers, Agent Skills, a Claude Code backend, diagnostics, DPAPI-protected API keys, and a local conversation history.
+A native WPF VSIX for chatting with any OpenAI-compatible LiteLLM gateway without leaving Visual Studio. It supports multiple servers, model discovery, streaming, reasoning display, read and edit tools, VS Code–style context attachments, project folders a conversation can reach beyond the solution, MCP servers, Agent Skills, a Claude Code backend, diagnostics, DPAPI-protected API keys, and a local conversation history.
+
+## Current release — 1.8.6 (2026-11-15)
+
+Version **1.8.6** makes a context summary readable: the **Context summarized** row now opens to show what the briefing replaced (counts of your messages, replies and tool results, with the tool names), the briefing text the model received instead, and the statement that the chat and the saved conversation still keep every message. It also adds project folders to a conversation: the **Project** button in the chat header (a folder-with-plus glyph, beside Delete) adds another folder the agent may read and change, its files are addressed as `Folder/src/Foo.cs`, and `@`, `#`, the file picker and every file tool see them. The list belongs to the chat, is capped at eight folders, and is refused with a reason when a folder is already reachable or contains an existing project. Commands, Git, and the automatic build and test check stay on the solution, as the prompt and the rows say; on the Claude backend each added project is passed as `--add-dir`. Install `LiteLLM.VisualStudio.vsix` and verify **1.8.6** in Manage Extensions. Live visual verification remains outstanding.
+
+Version **1.8.5** stretches the inline Plan content to the panel width and separates status markers from bidirectional text. Persian step text wraps right-aligned with its marker on the right; English remains LTR. Install `LiteLLM.VisualStudio.vsix` and verify **1.8.5** in Manage Extensions. Live visual verification remains outstanding.
+
+Version **1.8.4** adds automatic RTL direction for Persian/Arabic plan steps, explanations, manual-plan input and step evidence. English remains LTR; source diffs remain LTR. Install the stable-name `LiteLLM.VisualStudio.vsix` and verify **1.8.4** in Manage Extensions. Visual verification inside the IDE is still required.
+
+Version **1.8.3** adds agent-owned structured plans through LiteLLM `update_plan` and observation of Claude `TodoWrite` inputs in the inline Plan panel. Install `LiteLLM.VisualStudio.vsix` and verify **1.8.3** in Manage Extensions. Live IDE/provider verification remains outstanding.
+
+Version **1.8.2** packages the inline Changes/Plan sections and green running indicator, removes the extra workspace buttons/features described below, and retains the 1.8.1 thread and Tools-menu fixes. Install `LiteLLM.VisualStudio.vsix` and verify **1.8.2** in Manage Extensions.
+
+Patch 1.8.1 marshals streaming progress/Activity updates onto the UI dispatcher to fix cross-thread WPF access. It also removes Refresh Models, Test Connection and Clear Chat from the Tools menu; Dashboard and in-chat controls remain available. Install the stable-name `LiteLLM.VisualStudio.vsix` and verify version **1.8.1** in Manage Extensions. The workspace features below were introduced in 1.8.0.
+
+### Agent workspace additions
+
+**Agent-owned plans (1.8.3):** LiteLLM receives a built-in `update_plan` tool that replaces the active turn's structured plan. The same collapsible Plan panel shows pending, in-progress and completed steps, the revision explanation and the owning turn's status. Plans persist with the turn; model-reported completion is not user approval or build/test success. The manual plan remains separate below it. Models must actually call the tool; prose alone is not parsed. Claude's structured `TodoWrite` inputs are observed when emitted by the CLI; other task/event formats are not synthesized or enabled automatically. Existing permissions remain unchanged.
+
+Current source simplifies the workspace without extra header buttons:
+
+- **Activity:** green dot in the chat header and a green-circle glyph beside **LiteLLM Chat** in the tool-window caption while running without keyboard focus. Approval waiting is amber. The shell owns tab background colours; no private shell styling is used. No activity window or sound.
+- **Changes:** collapsed per-turn sections inside the transcript, with expandable file diffs, native VS comparison and conflict-checked restore of an edit or turn. In-memory LiteLLM file edits only—not Claude, terminal or MCP edits. Temporary comparison files contain source under the user temp directory.
+- **Plan:** collapsible panel above the composer, editable/persisted steps, explicit approval/execution/review. A completed response does not automatically prove success. Plans remain user-authored/pasted; normal tool approvals apply. Plan text follows its own direction: Persian and Arabic steps read right-to-left with their marker on the right, while source diffs stay left-to-right.
+
+Queue, conversation search/export/bookmarks, the context-share dialog and related-test selection have been removed. Existing conversation selection, model-aware budgeting and full discovered post-build tests remain. These changes are included in the 1.8.2 installer.
+
+Auto-hide keeps turns and approval cards alive. WPF/DTE workflows still require manual Visual Studio verification; Core tests do not validate IDE interaction.
+
+The current installer is **`LiteLLM.VisualStudio.vsix`**. Version numbers are maintained in `src/LiteLLM.VisualStudio/LiteLLM.VisualStudio.csproj` and `source.extension.vsixmanifest`, not in the installer filename.
+
+- Includes model-aware request budgeting and pre-compaction accounting for selected MCP schemas, instructions and attachments.
+- Retains the 300000-character maximum; a smaller model can receive a lower estimated allowance after reserving response space and headroom.
+- Includes optional RTK Git-output filtering, local EXE MCP imports, confirmed Git/GitLab workflows, Claude progress/authentication diagnostics and the reliability fixes described below.
+
+**Install or update:** close Visual Studio, run `LiteLLM.VisualStudio.vsix`, complete the VSIX Installer and reopen Visual Studio. Verify **1.8.6** under **Extensions > Manage Extensions > Installed**. Do not choose an older filename-suffixed copy. Updating the installer does not update a running IDE automatically.
 
 ## Requirements
 
@@ -18,7 +54,7 @@ The VSIX is produced below `src\LiteLLM.VisualStudio\bin\Release`. Run it to ins
 
 ## Use
 
-Open **Tools > LiteLLM: Open Chat**, choose a conversation and model, and enter a prompt. Enter sends; Shift+Enter inserts a line. **Stop** cancels generation. **New chat** starts a fresh conversation and **Delete** removes the one the history drop-down is showing, after a confirmation; the buttons are live only when there is something for them to act on, and the open draft and its attachments survive a deletion. Deleting the last conversation leaves one empty conversation behind rather than an empty list, so the pane always has something to render. The view renders basic Markdown, fenced code with Copy Code, optional reasoning, tool progress, and request failures. It does not force-scroll after you scroll away from the bottom. Right-click an assistant response and choose **Retry response** to regenerate the latest completed or failed turn.
+Open **Tools > LiteLLM: Open Chat**, choose a conversation and model, and enter a prompt. Enter sends; Shift+Enter inserts a line. **Stop** cancels generation. **New chat** starts a fresh conversation and **Delete** removes the one the history drop-down is showing, after a confirmation; the buttons are live only when there is something for them to act on, and the open draft and its attachments survive a deletion. Deleting the last conversation leaves one empty conversation behind rather than an empty list, so the pane always has something to render. The view renders basic Markdown, fenced code with Copy Code, optional reasoning, tool progress, and request failures. It does not force-scroll after you scroll away from the bottom. Right-click an assistant response and choose **Retry response** to regenerate the latest completed or failed turn. **Project** in the header — the folder-with-a-plus button beside **Delete**, distinct from the `＋` of **New chat** — widens this conversation to another folder; see [Projects beyond the solution](#projects-beyond-the-solution).
 
 The composer's menu (☰) has **History — ignore earlier turns in this chat** on the LiteLLM backend. With it on, the transcript and the stored session keep every message, but the next request is built from the current turn alone — its own tool calls and results still travel, because the pairing depends on them — and a **History off** chip above the composer shows the state with a `×` to turn it back on. The flag is read once when a turn starts, so flipping it mid-turn changes the next one, not the running loop. The Claude backend owns its own conversation state, so the item is disabled there.
 
@@ -30,11 +66,78 @@ A reply's file references and C# declarations are links. A path — bare, in `pa
 
 The header and the composer reflow with the pane. Below about 820px the conversation and model drop-downs and the composer's buttons move onto their own wrapping rows, so a narrow tool window stays readable instead of drawing controls over each other. Each drop-down is the width of its box: an entry longer than that ends in an ellipsis rather than stretching the open list past the width of the header, and a conversation's name is one line by the same rule the store keeps for titles, so it is shortened rather than wrapped onto a second row.
 
+## Recent improvements
+
+- **Readable context summaries:** the **Context summarized** row opens to show what the briefing replaced — how many of your messages, replies and tool results, and which tools — the briefing text the model received instead, and the statement that the chat and the saved conversation keep every message.
+- **Project folders beyond the solution:** the **Project** button in the chat header adds a folder to this conversation only; its files are addressed as `Folder/src/Foo.cs` and are reachable from `@`, `#`, the picker and every file tool, while commands, Git, and the automatic build and test check stay on the solution.
+- **Auto-hide lifecycle fix:** hiding an unpinned chat no longer cancels a running LiteLLM or Claude turn. Reopening preserves live messages, busy state and pending approval cards. Required approvals still wait for your choice; hiding never approves them. Cancellation/cleanup belongs to actual tool-window disposal rather than WPF `Unloaded`.
+
+- **Model-aware context budgets:** reserve response space, instructions, attachments and selected MCP schemas before compaction; configurable capacity fallback/overrides, with a final 300000-character ceiling.
+- **Optional RTK:** Auto/Off post-execution compression for supported successful Git output, with bounded raw details and no command re-execution.
+- **Full GitLab CLI access:** confirmed `run_glab` commands and automatic, separately approved browser sign-in when credentials are missing; shared with Claude through the packaged wrapper.
+- **Claude editing and diagnostics:** explicit turn-level editing consent in Agent mode; startup/tool progress and actionable authentication-retry failures instead of silent Thinking.
+- **Local EXE MCP import:** argv-array commands and OpenCode-style containers, without requiring an HTTP endpoint.
+- **Verification and safety:** explicit build outcomes, same-round test gating, dispatch-time permission checks, fail-closed approvals and linked-path rejection for workspace file tools.
+- **Session reliability:** saving a running turn no longer cancels it; interrupted-turn recovery occurs on load.
+
+These describe the **1.8.6** source/release. The installer keeps the stable name **LiteLLM.VisualStudio.vsix**; its version is recorded in the project and manifest. Builds and unit tests do not replace manual IDE, OAuth or provider checks.
+
+## Model-aware request budgeting (LiteLLM)
+
+Before history compaction, the extension reserves serialized space for system instructions, attachments and the exact offered tool definitions (including selected MCP tools). Remaining history is summarized/trimmed on the request copy only; saved history and tool-call/result pairing are preserved. The final serialized request is checked again before sending.
+
+Context capacity is read from optional `/v1/models` metadata (`context_window`, `context_length`, `max_model_len`, or `model_info.max_input_tokens`). Under **Tools → Options → LiteLLM → General**, the **Context** category has **Fallback context tokens** (128000 by default for missing metadata) and **Model context overrides** (`model-id=32768;other-model=200000`; a server-specific model key is also accepted). Overrides take precedence over metadata. Check the fallback against your server: it is an assumption, not a discovered model limit.
+
+For example, a reported 32768-token context with 8192 response tokens reserved receives an estimated **42600-character** request allowance after headroom, not the full 300000-character ceiling. Instructions, attachments and tool schemas then reduce the history allowance further. Refresh the model list to retrieve newly supplied server metadata; use an override when the endpoint omits or misreports capacity. Increasing a fallback/override cannot increase the provider's real context window.
+
+The estimate reserves configured response tokens and 10% headroom (at least 1024 tokens), then allows two serialized characters per remaining token, capped at the 300000-character safety ceiling. This is **not exact tokenization** and does not change server-reported usage totals. Token-dense/non-Latin content may still exceed a provider's true limit. A context row explains the estimated total/history allowances. If fixed inputs alone exhaust the allowance, the turn stops explicitly; tools are never silently removed. Claude Code retains its own context management.
+
+Folding is reported rather than silent. When older rounds are replaced by a briefing, the transcript gains a **Context summarized** row that opens to show what it covered — how many of your messages, replies and tool results, and which tools — the briefing text the model was given instead, and a sentence confirming that the chat and the saved conversation still hold every message. Only the request copy carries the briefing; nothing is removed from the transcript or from the stored session, and the row comes back with them when the conversation is reopened.
+
+## Local EXE MCP servers
+
+MCP servers do not need an HTTP endpoint. A local executable communicates over **stdio** and is launched when you enable its row in **Dashboard → MCP**. The importer accepts `mcpServers`, OpenCode's `mcp.servers`, an `mcp` server map, or a standalone named server map. Both a string `command` plus `args` and an argv-array `command` are supported; the first array element is the executable and the rest are exact arguments.
+
+Save this as a JSON file and use the MCP tab's **Import** action:
+
+```json
+{
+  "codebase-memory-mcp": {
+    "type": "local",
+    "command": ["C:/Tools/codebase-memory-mcp/codebase-memory-mcp.exe"]
+  }
+}
+```
+
+Review the imported path, enable MCP globally if necessary, then enable the server's checkbox to connect. Imports stay disabled until reviewed; no HTTP URL is required and importing never launches the EXE. The process uses the solution working directory by default. This is configuration-format compatibility, not emulation of OpenCode's Code Mode or all of its configuration fields.
+
+## Optional RTK output compression (LiteLLM)
+
+**Tools → Options → LiteLLM → General**, category **Terminal**, option **RTK output**, offers **Auto** (default) and **Off**. There is no dedicated Dashboard tab. Install RTK separately under `%ProgramFiles%\rtk\rtk.exe`; the automatic helper does not search the repository or PATH. Auto uses `rtk pipe` after a successful command to compress stdout for simple `git status`, `git log`, and `git diff` calls, including `run_git`. Outputs below 1000 characters, complex shell expressions, quoted commands, machine-readable format flags, failed/cancelled/timed-out commands and already truncated results stay raw. This deliberately conservative initial scope excludes GitLab mutations, automatic build/test verification and Claude's independent harness.
+
+Commands and approvals are unchanged: the real command executes exactly once, its stderr/exit code remain intact, and RTK only reads captured stdout. Filtering is bounded to five seconds in a temporary working directory (not the repository). Missing/broken RTK or ineffective compression retains raw output with a notice, without rerunning anything. Compressed results are marked in the transcript, with bounded raw stdout available in the tool row's details. Existing history compaction remains enabled and independent; no exact token savings are claimed.
+
+Tool rows show **RTK** after compression or **RTK kept raw** after an attempted filter retains the original output. Right-click the row and choose **Copy full detail** for the bounded raw stdout. Short/unsupported commands do not trigger an RTK notice.
+
+## GitLab CLI
+
+With terminal tools enabled, the LiteLLM backend offers `run_glab` with an exact `arguments` array. It supports the complete installed GitLab CLI command set (MRs, issues, CI, releases, API and authentication), without invoking a shell. For example: `{"arguments":["mr","create","--source-branch","feature/example","--target-branch","main","--title","Example","--description","Summary"]}`. Review the confirmation before allowing any command. Permissions to GitLab projects still depend on your GitLab account.
+
+Install `glab` separately. Before a remote operation, the extension detects the host from `--repo`, `GITLAB_HOST`, or the repository's `origin`, then checks saved credentials. If sign-in is needed, a separate confirmation opens a **visible login window** using browser OAuth. Complete any remaining prompts there; credentials are verified before the original command runs, once. You do not need to type a login command or paste a token. A failed or declined sign-in never runs the pending operation. Never paste access tokens into chat or CLI arguments. The executable is resolved from trusted absolute PATH entries or `%USERPROFILE%\.local\bin\glab.exe`. The Claude backend uses the same sign-in flow through the packaged confirmation wrapper: `LiteLLM.GitWrapper.exe --glab <arguments>`. No MR is created automatically by installing or building this extension.
+
+The host can also be specified with `--hostname`. A GitHub origin is not silently treated as GitLab: select a GitLab repository explicitly. Login checks precede the pending operation; an ambiguous failed API mutation is not automatically retried, avoiding duplicate MRs. OAuth may still require interaction in the visible login window, and repository permissions remain those of the signed-in account.
+
 ## Claude Code backend
 
 The header's execution-backend selector is independent of Ask, Agent, and Plan mode. **LiteLLM** retains the existing gateway/model behavior. **Claude Code** starts exactly one `claude -p` process per submitted turn with stream JSON, verbose output, and explicit `--permission-mode dontAsk`.
 
-Configure the executable and least-privilege allowed/disallowed tool lists under **Tools > Options > LiteLLM**. Claude allowlisting is explicit automatic approval in the noninteractive process; it is separate from LiteLLM's per-edit and per-command confirmation UI. The Visual Studio `run_git` tool is intentionally not injected into Claude's independent subprocess: the current Claude CLI integration has no narrow Visual Studio tool bridge, and enabling general `Bash` merely to reach Git would bypass the extension's executable policy and confirmation flow. Use the LiteLLM backend for confirmed Git operations until a dedicated narrow bridge is available. File-write tools (`Edit`, `Write`, and `NotebookEdit`) may be allowlisted only when file editing is enabled and per-edit confirmation is explicitly disabled. `Bash` may be allowlisted only when terminal tools are enabled and per-command confirmation is explicitly disabled. Unsafe combinations are rejected before launch. Tool names are matched case-insensitively, and comma/whitespace-separated permission rules such as `Edit(src/**)` and `Bash(git status:*)` are supported. Defaults allow local read/search tools and deny web tools. Stop terminates the Windows process job, including descendants. A conversation resumes only after Claude explicitly returns a session ID; that opaque ID is persisted separately from the extension conversation ID. Input, including slash-command text, is passed to Claude unchanged. When Claude Code is selected, typing `/` at the start of a composer line opens a filtered list of validated prompt-invoked commands. Use Up/Down to select, Enter or Tab to insert, Escape to dismiss, or click an item; insertion never sends automatically. Terminal-local interactive commands such as `/help`, `/clear`, `/config`, and `/resume` are intentionally not suggested because the extension runs Claude in noninteractive print mode.
+Configure the executable and least-privilege allowed/disallowed tool lists under **Tools > Options > LiteLLM > General**, category **Claude Code**. Claude allowlisting is automatic approval in its noninteractive process, not the LiteLLM per-call UI. The extension provides a narrow rule for the packaged `LiteLLM.GitWrapper.exe` to perform confirmed Git/GitLab operations; it does not grant general Bash merely to reach Git. Broad Bash requires terminal tools on and per-command confirmation off; unsafe configured combinations are rejected before launch.
+
+In **Agent** mode, when settings would otherwise keep Claude read-only, a prompt offers file-editing consent for this turn. Accepting permits `Edit`, `Write`, and `NotebookEdit` for that run without changing saved settings or enabling general shell access. This is **turn-level**, not per-edit consent. Explicit disallowed tools still take precedence. Configured write permissions without turn consent require editing on and per-edit confirmation off.
+
+Startup hooks, model connection, API retries and tool use update the progress status; an `authentication_failed` retry stops with an actionable failure rather than staying silently on Thinking. A CLI that reports signed in can still fail authentication to its configured model/provider. Claude uses its own credentials, model settings and context management, not the LiteLLM endpoint's credentials or RTK/compaction loop.
+
+Tool names are matched case-insensitively; comma/whitespace-separated permission rules are supported. Defaults allow local read/search and deny web tools. Stop terminates the Windows process job, including descendants. A conversation resumes only after Claude returns a session ID, persisted separately from the extension conversation ID. Typing `/` at the start of a composer line lists validated prompt-invoked commands; selection inserts without sending. Terminal-local interactive commands such as `/help`, `/clear`, `/config`, and `/resume` are not suggested in print mode.
 
 ## MCP servers
 
@@ -42,7 +145,7 @@ The extension is an MCP client. Any stdio, Streamable HTTP, or legacy HTTP+SSE s
 
 - **Add, edit, test.** The server dialog changes with the transport: a command, arguments and environment for stdio; a URL, headers, bearer token or OAuth sign-in for HTTP. **Test connection** starts the server and lists its tools so the allow lists can be filled from real names.
 - **Enable, disable, refresh.** Each row has a checkbox and a ↻. Ticking a server connects it at once, and a ticked server is connected again when the chat window opens, so closing and reopening Visual Studio does not mean reconnecting each one by hand. Unticking disconnects it immediately and it stays disconnected. The checkboxes drive the LiteLLM backend only; the Claude CLI starts its own connections from the per-run configuration. **↻** is a full reconnect: the session (and any stdio process) is dropped, started again, and its tools, resources and prompts are re-read — which is also how a server whose command was just fixed is retried. **Refresh** in the header of the page only re-reads the page; it connects nothing.
-- **Import and export.** **Import JSON…** reads a Claude/Cursor `mcpServers` file; nothing is connected or launched until you review and enable each entry. **Export JSON…** writes the same shape without secrets, so the file can be pasted into a ticket or another client.
+- **Import and export.** **Import JSON…** accepts Claude/Cursor `mcpServers`, OpenCode-style `mcp.servers` or `mcp` maps, standalone named maps and single-server objects. Local commands may be strings plus `args` or executable-first argv arrays; `environment` is accepted alongside `env`. EXEs need no HTTP URL. Nothing launches until you review and enable the entry. **Export JSON…** writes Claude-compatible configuration without secrets.
 - **When a server is not connected.** The extension says so instead of letting a turn wait on tools that are not there: a server that drops on its own draws a row in the chat as it happens, a turn that starts with every configured server disabled opens with a row saying it has no MCP tools, and typing `#` with nothing connected says so before the file picker opens. The Dashboard row keeps naming the last failure, and its detail pane explains a disabled server or a globally disabled MCP.
 - **Approval.** Every MCP tool call asks first, showing the server, the tool, its risk hints and its arguments with secret-looking values redacted. **Always allow this tool** writes to that server's allow list. A tool the server marks read-only runs without a card only when both the global switch and the server's own switch are on; destructive and open-world tools always ask. A denied call still answers the model with a tool row, so the conversation stays valid.
 - **Browse.** The detail pane lists tools, resources, prompts and the server's log. **Browse…** opens a larger window with a form generated from each tool's input schema, a resource reader, a prompt form and the live log. This is the manual side of MCP: nothing here is offered to the model.
@@ -52,7 +155,7 @@ The extension is an MCP client. Any stdio, Streamable HTTP, or legacy HTTP+SSE s
 - **Logging.** `logging` messages and stderr go to the server's Log tab and, for warnings and errors, to **View > Output > LiteLLM**. Values that look like credentials are masked before they are stored in either place.
 - **OAuth.** HTTP servers that advertise protected-resource metadata can be signed in to from the MCP page: authorization code with PKCE in the system browser, tokens kept under `%LOCALAPPDATA%\LiteLLM.VisualStudio\mcp-tokens.json` with Windows Data Protection. A revoked grant is cleared; a manual bearer header still takes precedence.
 
-Global switches — enable MCP, the read-only exception, sampling, elicitation, roots, timeouts, the per-turn tool cap and the strict Claude configuration — are under **Tools ▸ Options ▸ LiteLLM ▸ MCP**. The server list itself is saved by the Dashboard.
+Global switches — enable MCP, the read-only exception, sampling, elicitation, roots, timeouts, the per-turn tool cap and the strict Claude configuration — are under **Tools > Options > LiteLLM > General**, category **MCP**. The server list itself is saved by the Dashboard.
 
 **The Claude backend** is given the servers marked **Expose to Claude** through a per-run `--mcp-config` file written under `%LOCALAPPDATA%`, deleted when the turn ends. Because the CLI runs with `--permission-mode dontAsk`, the extension cannot show its own per-call card inside it; only tools the policy already resolves to *allow* (an explicit allow-list entry or the read-only exception) are put in `--allowedTools`. Everything else is reported by the CLI as denied. Use the LiteLLM backend when the per-call card matters. The file never goes into the repository, and a repository `.mcp.json` is never loaded on its own.
 
@@ -69,11 +172,11 @@ A skill is a folder containing `SKILL.md`: a small YAML header (`name`, `descrip
 
 ## Context attachments
 
-Attach things to a message the way VS Code does. Type `@` at the start of a word for a keyboard-first, incrementally filtered list of solution files; when MCP servers are connected, their resources appear first in the same list. Use Up/Down, Enter or Tab, Escape, or the mouse to choose one. The selected path becomes an attachment chip rather than remaining in the prompt; a resource chip carries the text the server returned for it. The 📎 button opens **Add context**. On the LiteLLM backend with MCP tools connected, `#` at the start of a word opens the tool list described under [MCP servers](#mcp-servers), whose last row opens the full multi-select picker; with no MCP tools, or on the Claude backend, `#` opens that picker directly:
+Attach things to a message the way VS Code does. Type `@` at the start of a word for a keyboard-first, incrementally filtered list of the solution's files and the files of any project folder added to this conversation; when MCP servers are connected, their resources appear first in the same list. Use Up/Down, Enter or Tab, Escape, or the mouse to choose one. The selected path becomes an attachment chip rather than remaining in the prompt; a resource chip carries the text the server returned for it. The 📎 button opens **Add context**. On the LiteLLM backend with MCP tools connected, `#` at the start of a word opens the tool list described under [MCP servers](#mcp-servers), whose last row opens the full multi-select picker; with no MCP tools, or on the Claude backend, `#` opens that picker directly:
 
 | Menu item | What it does |
 | --- | --- |
-| **Files & Folders…** | Searchable multi-select picker over the solution. Only files the read tools can open are listed. |
+| **Files & Folders…** | Searchable multi-select picker over the solution and the projects added to this conversation. Only files the read tools can open are listed. |
 | **Selection** | The current editor selection. |
 | **Problems** | Errors and warnings from the Error List. Empty until the solution has been built. |
 | **Symbols** / **Source Control** / **Terminal Selection** / **Codebase** | Listed but disabled, with the reason in the tooltip. |
@@ -84,9 +187,23 @@ Each attachment becomes a chip above the composer: click its name to open the fi
 
 **Retry response** puts back what the turn was asked with — the prompt *and* its attachments — rather than the words alone.
 
+## Projects beyond the solution
+
+A conversation is not limited to the folder the solution lives in. **Project** in the chat header — the folder-with-a-plus button beside **Delete**, so it is not mistaken for the plain `＋` of **New chat** — adds another folder the agent may read and change. The same menu removes one again and copies the paths.
+
+- **The list belongs to the conversation.** It is saved with the chat rather than with the settings, so a new conversation starts with the solution alone, and reopening a chat restores exactly what it could reach.
+- **Paths name the folder.** A file in an added folder is written `OtherApp/src/Foo.cs`, in both directions: the model is told to spell it that way, and the rows, the picker, the `@` list and the links show the same form. A path with no such prefix is the solution's, and the solution wins a path it already has, so a folder of the solution that shares the added folder's name stays reachable. Two added folders with the same name are numbered (`App (2)`) rather than shadowed.
+- **Everything that reads or writes follows it.** `read_file`, `list_files`, `search_files`, `open_file`, the edit tools, the file picker and `@` all accept the added folders. A listing or search with no path covers every one of them and says which folders it looked in, and an edit records the folder it landed in so Undo checks the right one.
+- **The bound is bounded and explained.** Up to eight folders. One that is already reachable, or that contains a folder already in the list, is refused with the reason rather than added — either would make a listing show the same files twice.
+- **Commands and the build stay on the solution.** A working directory is one folder, so the terminal, Git and GitLab tools run from the solution, and the automatic build and test check covers the open solution only. The prompt says so, and the row drawn when a project is added repeats it. To verify an added folder, ask the agent to run that folder's own build command.
+- **On the Claude backend** each added folder is handed to the CLI as `--add-dir` and named in the prompt, so Claude's own tools can reach it.
+- **Removing is immediate but not destructive.** Taking a folder out of the list stops further reads and writes there; edits already applied stay applied, and each one is still listed among the turn's changes with its own Undo.
+
 ## Tools
 
 Tool results are shown as compact progress rows and added to history; send another message to continue after a tool result. Reading tools: `read_file`, `list_files`, `search_files`, `open_file`, `get_current_file_path`, `get_selected_text`, `get_solution_name`, `get_project_name`.
+
+Every path a tool takes may be solution-relative, absolute inside one of the conversation's folders, or `ProjectName/…` for a project added to it (see [Projects beyond the solution](#projects-beyond-the-solution)). With no path, `list_files` and `search_files` walk every folder the conversation may reach and name the folders they searched.
 
 Writing tools, using the same names and parameters as GitHub Copilot Chat's agent mode: `apply_patch`, `create_file`, `replace_string_in_file`, `multi_replace_string_in_file`, `create_directory`. They exist so the chat edits your files instead of printing a corrected snippet for you to paste.
 
@@ -98,7 +215,13 @@ When terminal tools are enabled, LiteLLM Agent mode also exposes the shell-free 
 - After the agent changes a file, the solution is built automatically and the result gets its own row — on by default in Agent mode under **Tools ▸ Options ▸ LiteLLM ▸ Features ▸ Verify the build after edits**. When the build reports errors they are handed straight back to the model, which fixes them and is built again, up to three times in a turn so a solution that will not compile cannot spin. Nothing is reported as compiling on the model's word alone: the build result is what says so. The build is Visual Studio's own **Build Solution**, so a solution of any project type — C#, C++, Python, Node, and the rest — is built the way its project system expects.
 - **Verify the tests after edits** (off by default, under the same page) runs the solution's test assemblies with `vstest.console.exe` once a build has passed **in this round**, and hands any failures and their text back to the model. The order is the point: tests never run against assemblies from an earlier round, because a green result from code that has already been replaced is worse than no result. A solution with no test project is left alone; a missing runner, a timed-out run, an empty report or a run that could not start each get their own row saying so rather than counting as a pass.
 - The model list on the Dashboard has a per-model usage column and a total above it, counted from the usage each server reported — prompt and completion tokens, turns, and last use. A turn whose server reported none is not recorded as zero, so the number is a floor; the ledger is `token-usage.json` under `%LOCALAPPDATA%\LiteLLM.VisualStudio`, which is why deleting a chat does not shrink it. It is filled once from conversations written before the count existed, marked so a later launch cannot add them twice. The Claude backend does not write to it.
-- Reads and writes are confined to the solution root: a path outside it is refused outright, and `..\..` traversal is resolved before the check. Nothing runs a command, a task, or a network request.
+- Workspace file reads/writes are confined to the solution and the project folders added to this conversation: outside paths, traversal and reparse-point/junction paths are rejected, per folder. This is a file-tool guard, not a sandbox for approved terminal commands or MCP processes, which can execute code or access the network.
+
+Permission switches are checked again when a tool is dispatched, not just when its schema is offered. A missing edit/command approval handler denies execution; directory creation also requires approval. Denials still answer announced tool calls, preserving transcript validity. Edit revision tracking remains monotonic even when the undo list reaches its cap.
+
+Build success comes from Visual Studio build events, not an empty Error List. Failed, cancelled, unavailable and timed-out builds are distinct and never authorize tests; contradictory error diagnostics also prevent tests. The current Error List is read into each round's system prompt rather than saved as history or treated as proof that this turn built successfully.
+
+Saving a pending/streaming turn preserves its live state. On loading stored sessions, interrupted turns are recovered as cancelled; saving during a running response no longer cancels that response.
 
 A turn may use up to **Maximum tool rounds** (Tools ▸ Options ▸ LiteLLM, default 25, ceiling 200) before the chat stops and asks *Continue to iterate?* — the same checkpoint Copilot Chat uses. **Continue** raises the budget by half (25 → 38 → 57 → …) and keeps working from the results already gathered; **Stop** ends the turn with those results intact, so your next message continues from them. Because the budget is only consulted once a round's tool results are in, the model is never handed a half-finished exchange.
 
@@ -113,6 +236,11 @@ The dialogs take Visual Studio's own dialog styles as well, so their buttons, te
 Diagnostics appear in **View > Output > LiteLLM**. The status bar reports discovered models and enabled servers.
 
 ## Troubleshooting
+
+- **Request context exceeds the safety budget:** the final serialized messages and tool schemas exceed the model-aware estimate or the 300000-character ceiling. No request is sent. Start a new chat, remove attachments or select fewer MCP tools with `#`; verify capacity metadata/fallback/overrides before raising an assumed limit. Compaction cannot shrink fixed instructions or protected recent rounds indefinitely.
+- **RTK is not visible:** open **Tools > Options > LiteLLM > General**, category **Terminal**. There is no RTK Dashboard tab, and Claude/short/unsupported commands do not use this filter.
+- **A file in another project is not found:** check the **Project** button in the header. A folder has to be added to *this* conversation, and its files are addressed with the folder's name in front (`OtherApp/src/Foo.cs`); an unprefixed path is looked for in the solution first, and a name the solution already has resolves there.
+- **Claude stays on Thinking or cannot authenticate:** check the progress/failure row and the CLI's own model/provider settings and login. LiteLLM credentials do not configure Claude; a saved login does not prove the selected provider accepts it. Startup hooks and MCP connections may also delay CLI startup.
 
 - **No models:** verify the base URL and that `<base>/v1/models` is reachable; use Dashboard **Test**.
 - **401/403:** update the key. A blank key field retains the previous value; remove and recreate a server to remove a key.

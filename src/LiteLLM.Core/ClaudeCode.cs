@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -20,7 +21,8 @@ public sealed class ClaudeCodeResult
 public static class ClaudeCodeArguments
 {
     public static string Build(string sessionId, string allowedTools, string disallowedTools,
-        string? mcpConfigPath = null, IReadOnlyList<string>? mcpAllowedTools = null, bool strictMcp = false)
+        string? mcpConfigPath = null, IReadOnlyList<string>? mcpAllowedTools = null, bool strictMcp = false,
+        IReadOnlyList<string>? additionalDirectories = null)
     {
         var a = new List<string> { "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk" };
         // The CLI reads one comma-separated allow-list, so the MCP entries the extension resolved are merged into
@@ -35,6 +37,12 @@ public static class ClaudeCodeArguments
             if (strictMcp) a.Add("--strict-mcp-config");
         }
         if (!string.IsNullOrWhiteSpace(sessionId)) { a.Add("--resume"); a.Add(sessionId); }
+        // Each added project is named as its own directory: the working directory is the solution, and the
+        // conversation may have widened it. Repeating the flag is how the CLI takes them, so the list keeps the
+        // order the user added them in rather than being collapsed into one value.
+        if (additionalDirectories != null)
+            foreach (var directory in additionalDirectories)
+                if (!string.IsNullOrWhiteSpace(directory)) { a.Add("--add-dir"); a.Add(directory); }
         return string.Join(" ", a.ConvertAll(Quote));
     }
     private static void AddList(List<string> args, string option, string value)
@@ -72,6 +80,16 @@ public sealed class ClaudeToolPolicyOptions
 
 public static class ClaudeToolPolicy
 {
+    public static string WithFileEditing(string configuredTools)
+    {
+        var names = ParseAllowedToolNames(configuredTools);
+        var result = new List<string>();
+        if (!string.IsNullOrWhiteSpace(configuredTools)) result.Add(configuredTools.Trim());
+        foreach (var tool in FileWriteTools)
+            if (!names.Contains(tool)) result.Add(tool);
+        return string.Join(",", result);
+    }
+
     public static string ComposeWithTrustedExecutable(string configuredTools, string executablePath)
     {
         if (string.IsNullOrWhiteSpace(executablePath) || !Path.IsPathRooted(executablePath))
@@ -140,6 +158,9 @@ public sealed class ClaudeStreamParser
     public string SessionId { get; private set; } = "";
     public string Text => _text.ToString();
     public bool HasRecognizedRecord { get; private set; }
+    public string Status { get; private set; } = "Starting Claude Code";
+    public string Failure { get; private set; } = "";
+    public AgentPlan? Plan { get; private set; }
     public bool Accept(string line)
     {
         if (string.IsNullOrWhiteSpace(line)) return false;
@@ -148,6 +169,19 @@ public sealed class ClaudeStreamParser
         var sid = o.Value<string>("session_id");
         if (SessionId.Length == 0 && !string.IsNullOrWhiteSpace(sid)) SessionId = sid!;
         var type = o.Value<string>("type") ?? ""; string candidate = "";
+        if (type == "system")
+        {
+            HasRecognizedRecord = true;
+            var subtype = o.Value<string>("subtype") ?? "";
+            if (subtype == "init") Status = "Claude connected · waiting for model";
+            else if (subtype == "hook_started") Status = "Claude · running startup hook";
+            else if (subtype == "api_retry")
+            {
+                Status = "Claude · API retry";
+                if (o.Value<string>("error") == "authentication_failed")
+                    Failure = "Claude API authentication failed. The CLI is retrying but cannot authenticate to the configured model/provider. Check Claude Code login and its model/provider settings; extension LiteLLM credentials are not used by Claude.";
+            }
+        }
         if (type == "assistant")
         {
             var blocks = o.SelectToken("message.content") as JArray;
@@ -155,7 +189,24 @@ public sealed class ClaudeStreamParser
             HasRecognizedRecord = true;
             var text = new StringBuilder();
             foreach (var block in blocks)
+            {
                 if (string.Equals(block.Value<string>("type"), "text", StringComparison.Ordinal)) text.Append(block.Value<string>("text") ?? "");
+                else if (block.Value<string>("type") == "tool_use")
+                {
+                    Status = "Claude · using " + (block.Value<string>("name") ?? "tool");
+                    if (block.Value<string>("name") == "TodoWrite" && block.SelectToken("input.todos") is JArray todos)
+                    {
+                        var steps = new JArray();
+                        foreach (var todo in todos)
+                        {
+                            if (!(todo is JObject entry)) { steps.Clear(); break; }
+                            steps.Add(new JObject { ["step"] = entry["content"]?.DeepClone(), ["status"] = entry["status"]?.DeepClone() });
+                        }
+                        if (AgentPlan.TryRead(new JObject { ["plan"] = steps }.ToString(), out var plan, out _)) Plan = plan;
+                    }
+                }
+                else if (block.Value<string>("type") == "thinking") Status = "Claude · model thinking";
+            }
             candidate = text.ToString();
         }
         else if (type == "result") { HasRecognizedRecord = true; candidate = o.Value<string>("result") ?? ""; }
@@ -272,7 +323,7 @@ public sealed class ClaudeCodeExecutable
 
 public sealed class ClaudeCodeRunner
 {
-    public async Task<ClaudeCodeResult> RunAsync(string executable, string prompt, string sessionId, string allowedTools, string disallowedTools, string workingDirectory, Action<string> update, Action<string>? sessionStarted, ClaudeToolPolicyOptions? policy, CancellationToken token, string trustedExecutablePath = "", string? mcpConfigPath = null, IReadOnlyList<string>? mcpAllowedTools = null, bool strictMcp = false)
+    public async Task<ClaudeCodeResult> RunAsync(string executable, string prompt, string sessionId, string allowedTools, string disallowedTools, string workingDirectory, Action<string> update, Action<string>? sessionStarted, ClaudeToolPolicyOptions? policy, CancellationToken token, string trustedExecutablePath = "", string? mcpConfigPath = null, IReadOnlyList<string>? mcpAllowedTools = null, bool strictMcp = false, Action<string>? progress = null, Action<AgentPlan>? planUpdated = null, IReadOnlyList<string>? additionalDirectories = null)
     {
         if (policy == null) throw new ArgumentNullException(nameof(policy), "Claude tool policy is required at the process-launch boundary.");
         policy.Validate(allowedTools);
@@ -280,7 +331,7 @@ public sealed class ClaudeCodeRunner
         if (string.IsNullOrWhiteSpace(workingDirectory)) throw new ArgumentException("A working directory is required.", nameof(workingDirectory));
         if (!Directory.Exists(workingDirectory)) throw new DirectoryNotFoundException("Claude Code working directory does not exist: " + workingDirectory);
         var resolved = ClaudeCodeExecutable.Resolve(executable);
-        var psi = new ProcessStartInfo(resolved.FileName, resolved.BuildArguments(ClaudeCodeArguments.Build(sessionId, allowedTools, disallowedTools, mcpConfigPath, mcpAllowedTools, strictMcp)))
+        var psi = new ProcessStartInfo(resolved.FileName, resolved.BuildArguments(ClaudeCodeArguments.Build(sessionId, allowedTools, disallowedTools, mcpConfigPath, mcpAllowedTools, strictMcp, additionalDirectories)))
         {
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
             RedirectStandardOutput = true, RedirectStandardError = true,
@@ -294,9 +345,14 @@ public sealed class ClaudeCodeRunner
             try { job.Assign(process); }
             catch { try { process.Kill(); } catch { } throw; }
             var parser = new ClaudeStreamParser(); var errors = new StringBuilder(); var noise = new StringBuilder(); var reportedSession = false;
+            AgentPlan? reportedPlan = null;
             var stdout = DrainAsync(process.StandardOutput, line =>
             {
                 var recognized = parser.HasRecognizedRecord; var changed = parser.Accept(line);
+                if (parser.Failure.Length > 0) throw new InvalidOperationException(parser.Failure);
+                progress?.Invoke(parser.Status);
+                if (parser.Plan != null && !ReferenceEquals(reportedPlan, parser.Plan))
+                { reportedPlan = parser.Plan; planUpdated?.Invoke(reportedPlan); }
                 if (!reportedSession && parser.SessionId.Length > 0) { reportedSession = true; sessionStarted?.Invoke(parser.SessionId); }
                 if (!recognized && !parser.HasRecognizedRecord) AppendCapped(noise, line, 4096);
                 if (changed) update?.Invoke(parser.Text);

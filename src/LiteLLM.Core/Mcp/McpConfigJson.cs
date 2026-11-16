@@ -26,7 +26,7 @@ public static class McpConfigJson
         "command", "args", "env", "cwd", "workingDirectory", "url", "serverUrl", "httpUrl", "headers", "type",
         "enabled", "disabled", "exposeToClaude", "protocolVersion", "allowedTools", "disabledTools",
         "autoApproveReadOnly", "timeout", "timeoutSeconds", "connectTimeoutSeconds", "solutionRoot",
-        "scopes", "useOAuth"
+        "scopes", "useOAuth", "environment", "name"
     };
 
     public static McpImportResult Import(string? json)
@@ -48,14 +48,18 @@ public static class McpConfigJson
 
         JObject declared;
         if (root["mcpServers"] is JObject servers) declared = servers;
+        else if (root["mcp"] is JObject mcp && mcp["servers"] is JObject nestedServers) declared = nestedServers;
+        else if (root["mcp"] is JObject serverMap) declared = serverMap;
         else if (LooksLikeServer(root))
         {
             var name = root["name"]?.ToString();
             declared = new JObject { [string.IsNullOrWhiteSpace(name) ? "Imported server" : name!] = root };
         }
+        else if (root.Properties().Any() && root.Properties().All(p => p.Value is JObject entry && LooksLikeServer(entry)))
+            declared = root;
         else
         {
-            result.Warnings.Add("The JSON has no mcpServers object.");
+            result.Warnings.Add("The JSON has no mcpServers, mcp.servers, or named server map.");
             return result;
         }
 
@@ -129,7 +133,28 @@ public static class McpConfigJson
 
     private static McpServerConfiguration? Read(string name, JObject body, List<string> warnings)
     {
-        var command = Text(body["command"]);
+        var commandToken = body["command"];
+        var commandArguments = new List<string>();
+        string command;
+        if (commandToken is JArray commandArray)
+        {
+            // An argv array is executable + exact arguments, never a shell command or JSON-encoded path.
+            if (commandArray.Count == 0 || commandArray.Any(item => item.Type != JTokenType.String || item.Value<string>()!.IndexOf('\0') >= 0) ||
+                string.IsNullOrWhiteSpace(commandArray[0].Value<string>()))
+            {
+                warnings.Add("'" + name + "': command must be a nonempty array of strings with an executable first; server skipped.");
+                return null;
+            }
+            command = commandArray[0].Value<string>()!;
+            commandArguments.AddRange(commandArray.Skip(1).Select(item => item.Value<string>()!));
+        }
+        else if (commandToken == null || commandToken.Type == JTokenType.Null || commandToken.Type == JTokenType.String)
+            command = Text(commandToken);
+        else
+        {
+            warnings.Add("'" + name + "': command must be a string or argv array; server skipped.");
+            return null;
+        }
         var url = FirstText(body, "url", "serverUrl", "httpUrl");
         var type = Text(body["type"]);
 
@@ -153,8 +178,10 @@ public static class McpConfigJson
             ProtocolVersion = string.IsNullOrWhiteSpace(Text(body["protocolVersion"])) ? "auto" : Text(body["protocolVersion"])
         };
 
+        server.Args.AddRange(commandArguments);
         foreach (var arg in Strings(body["args"], name, "args", warnings)) server.Args.Add(arg);
-        server.Environment = ReadDictionary(body["env"], name, "env", warnings);
+        server.Environment = ReadDictionary(body["environment"], name, "environment", warnings);
+        foreach (var pair in ReadDictionary(body["env"], name, "env", warnings)) server.Environment[pair.Key] = pair.Value;
         server.Headers = ReadDictionary(body["headers"], name, "headers", warnings);
 
         if (body["enabled"]?.Type == JTokenType.Boolean) server.Enabled = body["enabled"]!.Value<bool>();

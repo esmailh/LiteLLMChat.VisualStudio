@@ -59,7 +59,9 @@ internal static class GitTools
                 name => name.Equals("git.exe", StringComparison.OrdinalIgnoreCase) ? gitPath : resolver.Resolve(name));
             var outcome = await orchestrator.ExecuteAsync(arguments, timeout,
                 message => confirm(new CommandProposal { Shell = CommandShell.Cmd, Command = message }), token).ConfigureAwait(false);
-            return Format(outcome.Result, root, display, outcome.Authentication);
+            var filtered = await RtkTerminalOutput.CompressAsync("git " + GitSupport.BuildCommandLine(arguments), outcome.Result, token).ConfigureAwait(false);
+            var formatted = Format(outcome.Result, root, display, outcome.Authentication, filtered);
+            return formatted;
         }
         catch (Exception ex) { return Fail(Sanitize(ex.Message), "git - failed"); }
     }
@@ -77,7 +79,7 @@ internal static class GitTools
         return values;
     }
 
-    private static ToolResult Format(CommandExecutionResult result, string root, string display, string auth)
+    private static ToolResult Format(CommandExecutionResult result, string root, string display, string auth, RtkOutput filtered)
     {
         var text = new StringBuilder();
         text.AppendLine("Working directory: " + root);
@@ -87,10 +89,11 @@ internal static class GitTools
         text.AppendLine("Duration: " + result.Duration.TotalSeconds.ToString("0.###") + " seconds");
         if (result.TimedOut) text.AppendLine("Status: timed out"); else if (result.Cancelled) text.AppendLine("Status: cancelled");
         if (result.OutputTruncated) text.AppendLine("Output was truncated.");
-        text.AppendLine("stdout:"); text.AppendLine(result.StandardOutput.Length == 0 ? "(empty)" : Sanitize(result.StandardOutput));
+        if (filtered.Notice.Length > 0) text.AppendLine(filtered.Notice);
+        text.AppendLine("stdout:"); text.AppendLine(filtered.Text.Length == 0 ? "(empty)" : Sanitize(filtered.Text));
         text.AppendLine("stderr:"); text.AppendLine(result.StandardError.Length == 0 ? "(empty)" : Sanitize(result.StandardError));
         var ok = Succeeded(result);
-        return new ToolResult { Content = text.ToString(), Summary = "git - " + (ok ? "exit 0" : result.TimedOut ? "timed out" : result.Cancelled ? "cancelled" : "exit " + (result.ExitCode?.ToString() ?? "?")), Ok = ok };
+        return new ToolResult { Content = text.ToString(), Summary = "git - " + (ok ? "exit 0" : result.TimedOut ? "timed out" : result.Cancelled ? "cancelled" : "exit " + (result.ExitCode?.ToString() ?? "?")) + (filtered.Raw.Length > 0 ? " · RTK" : filtered.Notice.Length > 0 ? " · RTK kept raw" : ""), Detail = filtered.Notice.Length > 0 ? filtered.Notice + "\nRaw stdout (bounded):\n" + Sanitize(result.StandardOutput) : null, Ok = ok };
     }
 
     private static string Sanitize(string value)

@@ -39,11 +39,17 @@ internal interface IAgentView
 
     /// <summary>The one-line status under the composer.</summary>
     string Status { get; set; }
+    void RefreshAgentPlan();
 
     Bubble AddAssistantBubble(string status);
     void SetContent(Bubble bubble, ChatMessage message);
     void FinishStatus(Bubble bubble);
     void AddToolNote(string name, string summary, bool ok, HttpExchange? exchange, string? detail, AppliedEdit? edit);
+
+    /// <summary>One row for a context briefing: what it replaced, and the text the model was given instead. Its
+    /// own member rather than an <see cref="AddToolNote"/> because a tool row can only carry a tooltip, and the
+    /// point of this row is that the user can open it and read what happened to their conversation.</summary>
+    void AddContextSummaryNote(ContextSummaryReport report);
 
     /// <summary>One row for the edits the turn applied, offering to put all of them back. Live-only: the row
     /// holds the edits themselves, and those are this session's memory rather than the conversation's.</summary>

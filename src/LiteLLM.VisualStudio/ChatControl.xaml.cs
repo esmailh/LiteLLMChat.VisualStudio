@@ -56,6 +56,8 @@ public partial class ChatControl : UserControl, IAgentView
     private DTE? _dte;
     private bool _eventSubscriptionsActive;
     private int _loadVersion;
+    private bool _disposed;
+    private object? _renderedSession;
     private WindowEvents? _windowEvents;
     private int _slashTokenStart;
     private int _slashTokenLength;
@@ -150,8 +152,10 @@ public partial class ChatControl : UserControl, IAgentView
     private static bool _themeReported;
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
+        if (_disposed) return;
         var loadVersion = ++_loadVersion;
         Current = this;
+        UpdateActivity();
         if (!_themeReported) { _themeReported = true; Services.Log(VsTheme.Describe()); }
         if (!_eventSubscriptionsActive)
         {
@@ -166,9 +170,17 @@ public partial class ChatControl : UserControl, IAgentView
         EditTools.Confirm = AskToApplyEditAsync;
         TerminalTools.Confirm = AskToRunCommandAsync;
         McpApproval.Confirm = AskToApproveMcpToolAsync;
-        await Services.RefreshSessionScopeAsync();
+        // Auto-hide is a visual detach, not a new conversation or a new turn. In particular, do not
+        // replace the session underneath a running harness when the pane becomes visible again.
+        if (_generation == null) await Services.RefreshSessionScopeAsync();
         if (!IsLoaded || loadVersion != _loadVersion) return;
-        ReloadSessions(); RenderSession(); ReloadModels();
+        ReloadSessions();
+        if (_generation == null && !ReferenceEquals(_renderedSession, Services.ActiveSession)) RenderSession();
+        if (_generation == null) ReloadModels();
+        // The projects chip is a property of the conversation, so it is drawn here as well as from RenderSession:
+        // a reload with the same conversation selected still has to show what the last launch added.
+        RefreshProjectChip();
+        SetBusy(_generation != null);
         // One read of the MCP state for this window. Everything after it is a refresh on a change, not a check per
         // turn: the servers cannot become enabled or disabled by a message.
         _ = RefreshMcpChipAsync();
@@ -191,6 +203,20 @@ public partial class ChatControl : UserControl, IAgentView
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         ++_loadVersion;
+        // WPF also unloads an auto-hidden pane. The turn, live cards and approval handlers belong
+        // to the tool window's lifetime; only editor visibility subscriptions end here.
+        try { if (_windowEvents != null) _windowEvents.WindowActivated -= OnWindowActivated; } catch (Exception) { }
+        _windowEvents = null; _dte = null;
+    }
+
+    internal void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        UpdateActivity();
+        OnUnloaded(this, new RoutedEventArgs());
+        Loaded -= OnLoaded;
+        Unloaded -= OnUnloaded;
         _generation?.Cancel();
         if (_eventSubscriptionsActive)
         {
@@ -200,8 +226,6 @@ public partial class ChatControl : UserControl, IAgentView
             Services.Mcp.ServerClosed -= McpServerClosed;
             _eventSubscriptionsActive = false;
         }
-        try { if (_windowEvents != null) _windowEvents.WindowActivated -= OnWindowActivated; } catch (Exception) { }
-        _windowEvents = null; _dte = null;
         if (ReferenceEquals(EditTools.Confirm?.Target, this)) EditTools.Confirm = null;
         if (ReferenceEquals(TerminalTools.Confirm?.Target, this)) TerminalTools.Confirm = null;
         if (ReferenceEquals(McpApproval.Confirm?.Target, this)) McpApproval.Confirm = null;
@@ -262,7 +286,7 @@ public partial class ChatControl : UserControl, IAgentView
         // Same rule as ToolsChanged: IsLoaded belongs to the UI thread, so the check moves inside the dispatch.
         _ = Dispatcher.BeginInvoke(new Action(() =>
         {
-            if (!IsLoaded) return;
+            if (_disposed) return;
             AddToolNote("mcp", "MCP · " + server.Name + " disconnected: " + McpLog.Redact(reason), false, null,
                 "The next turn tries to connect it again; ↻ in the MCP dashboard does it now.", null);
             RefreshSlashCommands();
@@ -354,10 +378,11 @@ public partial class ChatControl : UserControl, IAgentView
         (Services.Settings.McpServers ?? new List<McpServerConfiguration>())
             .Any(server => server != null && server.Enabled && server.AppliesTo(root) &&
                            !(Services.Mcp.StatusOf(server.Id)?.Connected ?? false));
-    private void ReloadSessions() { SessionBox.ItemsSource = null; SessionBox.ItemsSource = Services.Sessions.Sessions; SessionBox.SelectedValuePath = "Id"; SessionBox.SelectedValue = Services.Sessions.ActiveSessionId; RefreshDeleteButton(false); }
+    private void ReloadSessions() { SessionBox.ItemsSource = null; SessionBox.ItemsSource = Services.Sessions.Sessions; SessionBox.SelectedValuePath = "Id"; SessionBox.SelectedValue = Services.Sessions.ActiveSessionId; RefreshDeleteButton(_generation != null); }
     private void ReloadModels() { var selected = Services.ActiveSession.SelectedModelKey.Length > 0 ? Services.ActiveSession.SelectedModelKey : Services.Settings.SelectedModelKey; ModelBox.ItemsSource = null; ModelBox.ItemsSource = Services.Models; ModelBox.SelectedItem = Services.Models.FirstOrDefault(m => m.Key == selected) ?? Services.Models.FirstOrDefault(); if (ModelBox.SelectedItem is ModelInfo model) ModelBox.ToolTip = model.Id; StateText.Text = Services.Models.Count == 0 ? "Configure a server in the Dashboard" : string.Empty; }
     private void RenderSession()
     {
+        _renderedSession = Services.ActiveSession;
         ReloadBackend();
         Messages.Children.Clear(); Messages.Children.Add(EmptyState); _history.Clear();
         _userPrompts.Clear();
@@ -379,7 +404,7 @@ public partial class ChatControl : UserControl, IAgentView
             // Same reasoning as the build row: the briefing is the model's own text standing in for messages that
             // are still here, so it is replayed from the turn rather than re-derived, and the rows come back in
             // the order they were drawn in a live turn.
-            foreach (var summary in turn.Summaries) AddToolNote("", summary.Summary, true, null, summary.Detail);
+            foreach (var summary in turn.Summaries) AddContextSummaryNote(summary);
             // Last, as it was drawn last. A turn stored by a build that did not count usage has none.
             if (turn.Usage != null) AddToolNote("", turn.Usage.Line, true, null, null, null);
         }
@@ -387,6 +412,9 @@ public partial class ChatControl : UserControl, IAgentView
         // The chip strip follows the conversation, and this switch lives on the conversation, so switching chats
         // must redraw it as well as the messages.
         RefreshContextBar();
+        RefreshPlanSection();
+        RefreshProjectChip();
+        foreach (var turn in Services.ActiveSession.Turns) RefreshChanges(turn.Id);
     }
     private void SaveSession() => SaveSession(Services.ActiveSession, (ModelBox.SelectedItem as ModelInfo)?.Key);
     private void SaveSession(ChatSessionState session, string? selectedModelKey = null) { session.UpdatedUtc = DateTime.UtcNow; session.SelectedModelKey = selectedModelKey ?? session.SelectedModelKey; if (session.HasMessages && session.Title == "New chat") { var first = session.Turns.SelectMany(t => t.Messages).FirstOrDefault(m => m.Role == "user"); if (first != null) session.Title = ChatStateLimits.OneLine(first.Content, 42); } Services.SaveSessions(); }
@@ -396,6 +424,7 @@ public partial class ChatControl : UserControl, IAgentView
     {
         Services.ApplyOptions();
         var settings = Services.Settings;
+        var claudeAllowedTools = settings.ClaudeAllowedTools;
         var policy = new ClaudeToolPolicyOptions
         {
             EnableFileEditing = settings.EnableFileEditing,
@@ -403,7 +432,25 @@ public partial class ChatControl : UserControl, IAgentView
             EnableTerminalTools = settings.EnableTerminalTools,
             ConfirmEachCommand = settings.ConfirmEachCommand
         };
-        try { policy.Validate(settings.ClaudeAllowedTools); }
+        // Print-mode Claude cannot display per-edit cards. Ask explicitly for this turn instead of silently
+        // granting writes or sending an editing request to a read-only CLI.
+        if (_mode == "agent")
+        {
+            var needsConsent = !policy.EnableFileEditing || policy.ConfirmEachEdit;
+            if (needsConsent)
+            {
+                var answer = MessageBox.Show("Allow Claude to edit files for this turn? Claude Code runs noninteractively and cannot ask before each edit. Choose No to keep the existing read-only permissions. This does not change your saved settings.",
+                    "Claude file editing", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                if (answer == MessageBoxResult.Yes)
+                {
+                    policy.EnableFileEditing = true;
+                    policy.ConfirmEachEdit = false;
+                }
+            }
+            if (policy.EnableFileEditing && !policy.ConfirmEachEdit)
+                claudeAllowedTools = ClaudeToolPolicy.WithFileEditing(claudeAllowedTools);
+        }
+        try { policy.Validate(claudeAllowedTools); }
         catch (Exception ex)
         {
             StateText.Text = ex.Message;
@@ -461,7 +508,13 @@ public partial class ChatControl : UserControl, IAgentView
                     Services.Log("MCP configuration for the Claude backend failed: " + ex);
                 }
             }
-            prompt = "For Git operations, use only the approved LiteLLM.GitWrapper executable. It performs confirmations and authentication; do not invoke git, gh, or glab directly.\n\n" + prompt;
+              prompt = "For Git operations use the approved wrapper at " + wrapperPath + ". For all GitLab operations (merge requests, issues, pipelines, releases and API), invoke that same wrapper with --glab followed by the exact glab arguments. It asks for confirmation. Do not invoke git, gh or glab directly.\n\n" + prompt;
+            // The CLI starts in the solution. A project the user added to this conversation is handed over as an
+            // extra directory, and named in the prompt, so the CLI's own tools know it is in scope — the
+            // extension's tools are not the ones running on this backend.
+            var extraRoots = (session.ExtraRoots ?? new List<string>()).ToList();
+            var workspaceNotes = new Workspace(workingDirectory, extraRoots).Describe();
+            if (workspaceNotes.Length > 0) prompt = "Projects in this workspace\n" + workspaceNotes + "\n\n" + prompt;
             if (settings.EnableSkills)
             {
                 try
@@ -482,7 +535,7 @@ public partial class ChatControl : UserControl, IAgentView
                 }
             }
             var result = await runner.RunAsync(settings.ClaudeExecutable, prompt, session.ClaudeSessionId,
-                settings.ClaudeAllowedTools, settings.ClaudeDisallowedTools, workingDirectory, text =>
+                  claudeAllowedTools, settings.ClaudeDisallowedTools, workingDirectory, text =>
                 {
                     assistant.Content = text;
                     Dispatcher.BeginInvoke(new Action(() =>
@@ -500,7 +553,16 @@ public partial class ChatControl : UserControl, IAgentView
                         session.ClaudeSessionId = id;
                         SaveSession(session, "claude-code");
                     }));
-                }, policy, token, wrapperPath, mcpLease?.Path, mcpLease?.AllowedTools, mcpLease?.Strict ?? false).ConfigureAwait(true);
+                 }, policy, token, wrapperPath, mcpLease?.Path, mcpLease?.AllowedTools, mcpLease?.Strict ?? false,
+                 progress => Dispatcher.BeginInvoke(new Action(() =>
+                 {
+                     if (ReferenceEquals(_activeTurn, turn) && ReferenceEquals(Services.ActiveSession, session)) _phase = progress;
+                 })), plan => Dispatcher.Invoke(new Action(() =>
+                 {
+                     turn.AgentPlan = plan;
+                     SaveSession(session, "claude-code");
+                     if (ReferenceEquals(Services.ActiveSession, session)) RefreshPlanSection();
+                 })), extraRoots).ConfigureAwait(true);
             assistant.Content = result.Text;
             if (ReferenceEquals(_activeTurn, turn) && ReferenceEquals(Services.ActiveSession, session)) { SetContent(view, assistant); FinishStatus(view); }
             if (string.IsNullOrWhiteSpace(session.ClaudeSessionId) && !string.IsNullOrWhiteSpace(result.SessionId)) session.ClaudeSessionId = result.SessionId;
@@ -511,7 +573,7 @@ public partial class ChatControl : UserControl, IAgentView
         }
         catch (OperationCanceledException) { if (assistant.Content.Length > 0) turn.Messages.Add(ChatStateLimits.CopyMessage(assistant)); turn.Status = ChatTurnStatus.Cancelled; turn.CompletedUtc = DateTime.UtcNow; SaveSession(session, "claude-code"); if (ReferenceEquals(Services.ActiveSession, session)) StateText.Text = "Stopped"; }
         catch (Exception ex) { if (assistant.Content.Length > 0) turn.Messages.Add(ChatStateLimits.CopyMessage(assistant)); turn.Status = ChatTurnStatus.Failed; turn.Error = ex.Message; turn.CompletedUtc = DateTime.UtcNow; SaveSession(session, "claude-code"); if (ReferenceEquals(Services.ActiveSession, session)) { AddToolNote("error", ex.Message, false, null, ex.ToString()); StateText.Text = ex.Message; } Services.Log(ex.ToString()); }
-        finally { mcpLease?.Dispose(); if (ReferenceEquals(_generation, generation)) { _ticker?.Stop(); _ticker = null; if (_live != null) FinishStatus(_live); _live = null; _generation = null; SetBusy(false); } generation.Dispose(); if (ReferenceEquals(_activeTurn, turn)) _activeTurn = null; Composer.Focus(); }
+        finally { mcpLease?.Dispose(); if (ReferenceEquals(_generation, generation)) { _ticker?.Stop(); _ticker = null; if (_live != null) FinishStatus(_live); _live = null; _generation = null; SetBusy(false); } generation.Dispose(); if (ReferenceEquals(_activeTurn, turn)) _activeTurn = null; if (IsVisible && !_disposed) Composer.Focus(); }
     }
 
     /// <summary>Handles <c>/skill</c> before anything is sent. A handled command is never forwarded as ordinary
@@ -592,13 +654,14 @@ public partial class ChatControl : UserControl, IAgentView
 
     private async Task SendAsync()
     {
+        if (_disposed) return;
         var input = Composer.Text;
         if (string.IsNullOrWhiteSpace(input) || _generation != null) return;
         // Started before the first reply so the links exist by the time it is drawn; the turn itself never waits for
         // the index, and a solution opened after the window loaded is picked up here.
         _ = EnsureSymbolIndexAsync();
         input = await ApplySkillCommandAsync(input);
-        if (input == null) return;
+        if (input == null || _disposed) return;
         var editsBefore = EditTools.Revisions;
         if (string.Equals(Services.ActiveSession.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase))
         {
@@ -641,7 +704,7 @@ public partial class ChatControl : UserControl, IAgentView
             SaveSession(); StateText.Text = ex.Message;
             Services.Log(detail);
         }
-        finally { _ticker?.Stop(); _ticker = null; if (_live != null) FinishStatus(_live); _live = null; _generation.Dispose(); _generation = null; SetBusy(false); _activeTurn = null; Composer.Focus(); if (EditTools.Revisions > editsBefore) _symbolIndex = null; }
+        finally { if (_activeTurn != null) CaptureTurnChanges(_activeTurn.Id, editsBefore); _ticker?.Stop(); _ticker = null; if (_live != null) FinishStatus(_live); _live = null; _generation.Dispose(); _generation = null; SetBusy(false); _activeTurn = null; if (IsVisible && !_disposed) Composer.Focus(); if (EditTools.Revisions > editsBefore) _symbolIndex = null; }
     }
 
     /// <summary>What <see cref="AgentHarness"/> may ask of this window. Explicit rather than making the methods
@@ -652,13 +715,15 @@ public partial class ChatControl : UserControl, IAgentView
     ChatTurnState? IAgentView.ActiveTurn => _activeTurn;
     HttpExchange? IAgentView.LastExchange { get => _lastExchange; set => _lastExchange = value; }
     string IAgentView.Mode => _mode;
-    string IAgentView.Phase { get => _phase; set => _phase = value; }
+    string IAgentView.Phase { get => _phase; set { _phase = value; UpdateActivity(); } }
     int IAgentView.Streamed { get => _streamed; set => _streamed = value; }
     string IAgentView.Status { get => StateText.Text; set => StateText.Text = value; }
+    void IAgentView.RefreshAgentPlan() => RefreshPlanSection();
     Bubble IAgentView.AddAssistantBubble(string status) => AddAssistantBubble(status);
     void IAgentView.SetContent(Bubble bubble, ChatMessage message) => SetContent(bubble, message);
     void IAgentView.FinishStatus(Bubble bubble) => FinishStatus(bubble);
     void IAgentView.AddToolNote(string name, string summary, bool ok, HttpExchange? exchange, string? detail, AppliedEdit? edit) => AddToolNote(name, summary, ok, exchange, detail, edit);
+    void IAgentView.AddContextSummaryNote(ContextSummaryReport report) => AddContextSummaryNote(report);
     void IAgentView.AddUndoAllNote(IReadOnlyList<AppliedEdit> edits) => AddToolNote("", edits.Count == 1
         ? "Edited 1 file this turn — right-click to undo it"
         : "Edited " + edits.Count + " files this turn — right-click to undo them all", true, null, null, null, edits);
@@ -694,13 +759,14 @@ public partial class ChatControl : UserControl, IAgentView
         Messages.Children.Add(card);
         ScrollIfFollowing();
 
+        ApprovalWaiting(true);
         bool keepGoing;
         try
         {
             // Only the task is completed from the token callback: it can fire on any thread, so it must not touch the UI.
             using (token.Register(() => source.TrySetResult(false))) keepGoing = await source.Task.ConfigureAwait(true);
         }
-        finally { answered = true; Messages.Children.Remove(card); }
+        finally { ApprovalWaiting(false); answered = true; Messages.Children.Remove(card); }
 
         token.ThrowIfCancellationRequested();   // stopping during the pause ends the turn as Stopped, like any other stop
         AddToolNote("", keepGoing
@@ -713,6 +779,14 @@ public partial class ChatControl : UserControl, IAgentView
     /// offered on the row's menu rather than printed into the transcript.</summary>
     private void AddToolNote(string name, string summary, bool ok, HttpExchange? exchange = null, string? detail = null, AppliedEdit? edit = null, IReadOnlyList<AppliedEdit>? undoAll = null)
     {
+        if (_activeTurn != null && (edit != null || undoAll != null))
+        {
+            if (!_checkpoints.TryGetValue(_activeTurn.Id, out var captured))
+                _checkpoints[_activeTurn.Id] = captured = new List<AppliedEdit>();
+            if (edit != null && !captured.Contains(edit)) captured.Add(edit);
+            if (undoAll != null) foreach (var change in undoAll) if (!captured.Contains(change)) captured.Add(change);
+            RefreshChanges(_activeTurn.Id);
+        }
         var row = new StackPanel { Orientation = Orientation.Horizontal };
         row.Children.Add(new TextBlock { Text = ok ? "🔧" : "⚠", Margin = new Thickness(0, 0, 6, 0) });
         row.Children.Add(new TextBlock { Text = summary, Style = (Style)FindResource("Caption"), TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap });
@@ -741,6 +815,73 @@ public partial class ChatControl : UserControl, IAgentView
         entries.Add(Item("Copy response (JSON)", () => Copy(exchange?.ResponseBody, "Response"), exchange != null));
         border.ContextMenu = Menu(entries.ToArray());
         border.ToolTip = edit != null ? edit.Diff : full.Length > 0 ? full : (name.Length > 0 ? name : summary);
+        Messages.Children.Add(border);
+        ScrollIfFollowing();
+    }
+
+    /// <summary>A context briefing, drawn as a row that can be opened. A tool row keeps its detail in a tooltip,
+    /// which is enough for "which file was read" and not enough for "part of your conversation was folded away":
+    /// what the fold covered and what the model was given instead have to be readable in the transcript itself,
+    /// or the user cannot tell a housekeeping step from lost work. Collapsed by default, so a turn that
+    /// summarized several times still fits on the screen.</summary>
+    private void AddContextSummaryNote(ContextSummaryReport report)
+    {
+        var body = new StackPanel { Margin = new Thickness(0, 8, 0, 2) };
+        body.Children.Add(new TextBlock
+        {
+            Text = report.Covered.Length > 0
+                ? report.Covered
+                : "The opening messages of this conversation now travel to the model as one briefing.",
+            Style = (Style)FindResource("Caption"),
+            TextWrapping = TextWrapping.Wrap
+        });
+        if (report.Detail.Length > 0)
+            body.Children.Add(new ScrollViewer
+            {
+                Content = Directed(report.Detail),
+                MaxHeight = 260,
+                Margin = new Thickness(0, 8, 0, 0),
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+            });
+        // Said in as many words, because this is the sentence that decides whether the row reads as work
+        // thrown away: the fold is of the request, not of the chat.
+        body.Children.Add(new TextBlock
+        {
+            Text = "Nothing was removed from this chat: the transcript and the saved conversation keep every message. Only the request sent to the model carries this briefing in their place.",
+            Style = (Style)FindResource("Caption"),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 8, 0, 0)
+        });
+
+        var expander = new Expander
+        {
+            Header = report.Summary,
+            Content = body,
+            IsExpanded = false,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            // Direction from the briefing, like a reply: the coverage line is the extension's own sentence, but
+            // the text the user opened the row to read is the model's, and it decides the direction here.
+            FlowDirection = TextDirection.For(report.Detail.Length > 0 ? report.Detail : report.Covered)
+        };
+        var border = new Border
+        {
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(2),
+            Padding = new Thickness(10, 6, 10, 6),
+            Margin = new Thickness(0, 3, 0, 12),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            MaxWidth = 900,
+            Child = expander
+        };
+        border.SetResourceReference(Border.BackgroundProperty, CommonDocumentColors.ListItemBackgroundBrushKey);
+        border.SetResourceReference(Border.BorderBrushProperty, CommonDocumentColors.ListItemBorderBrushKey);
+        border.ContextMenu = Menu(
+            Item("Copy what it covered", () => Copy(report.Covered, "Coverage"), report.Covered.Length > 0),
+            Item("Copy briefing", () => Copy(report.Detail, "Briefing"), report.Detail.Length > 0),
+            null,
+            Item("Copy whole conversation", () => Copy(Transcript(), "Conversation"), _history.Count > 0));
+        border.ToolTip = report.Summary;
         Messages.Children.Add(border);
         ScrollIfFollowing();
     }
@@ -774,6 +915,7 @@ public partial class ChatControl : UserControl, IAgentView
     /// Allow — a confirmation that only offers a way forward is not a confirmation.</summary>
     private async Task<bool> AskToApplyEditAsync(EditProposal proposal)
     {
+        if (_disposed) return false;
         if (AllowAllPermissions) return true;
         if (!Services.Settings.ConfirmEachEdit) return true;
 
@@ -805,6 +947,7 @@ public partial class ChatControl : UserControl, IAgentView
         Messages.Children.Add(card);
         ScrollIfFollowing();
 
+        ApprovalWaiting(true);
         bool apply;
         try
         {
@@ -812,7 +955,7 @@ public partial class ChatControl : UserControl, IAgentView
             using ((_generation?.Token ?? CancellationToken.None).Register(() => source.TrySetResult(false)))
                 apply = await source.Task.ConfigureAwait(true);
         }
-        finally { answered = true; Messages.Children.Remove(card); }
+        finally { ApprovalWaiting(false); answered = true; Messages.Children.Remove(card); }
         return apply;
     }
 
@@ -825,6 +968,7 @@ public partial class ChatControl : UserControl, IAgentView
     /// read-only one unless the global exception and the server's own switch are both on.</summary>
     private async Task<bool> AskToApproveMcpToolAsync(McpApprovalRequest request)
     {
+        if (_disposed) return false;
         if (AllowAllPermissions) return true;
         var tool = request.Tool;
         var server = tool.Server;
@@ -908,13 +1052,14 @@ public partial class ChatControl : UserControl, IAgentView
         Messages.Children.Add(card);
         ScrollIfFollowing();
 
+        ApprovalWaiting(true);
         bool approvedResult;
         try
         {
             using ((_generation?.Token ?? CancellationToken.None).Register(() => source.TrySetResult(false)))
                 approvedResult = await source.Task.ConfigureAwait(true);
         }
-        finally { answered = true; Messages.Children.Remove(card); }
+        finally { ApprovalWaiting(false); answered = true; Messages.Children.Remove(card); }
         return approvedResult;
     }
 
@@ -938,6 +1083,7 @@ public partial class ChatControl : UserControl, IAgentView
 
     private async Task<bool> AskToRunCommandAsync(CommandProposal proposal)
     {
+        if (_disposed) return false;
         if (AllowAllPermissions) return true;
         if (!Services.Settings.ConfirmEachCommand) return true;
         var body = new StackPanel();
@@ -952,8 +1098,9 @@ public partial class ChatControl : UserControl, IAgentView
         skip.Click += (s, e) => source.TrySetResult(false);
         allow.Click += (s, e) => source.TrySetResult(true);
         Messages.Children.Add(card); ScrollIfFollowing();
+        ApprovalWaiting(true);
         try { using ((_generation?.Token ?? CancellationToken.None).Register(() => source.TrySetResult(false))) return await source.Task.ConfigureAwait(true); }
-        finally { Messages.Children.Remove(card); }
+        finally { ApprovalWaiting(false); Messages.Children.Remove(card); }
     }
 
     private Border AddMessage(string author, string content, bool assistant)
@@ -1183,6 +1330,7 @@ public partial class ChatControl : UserControl, IAgentView
     /// <summary>Keeps a visible clock on the message being generated, so a slow first token never looks like a hang.</summary>
     private void RefreshStatus()
     {
+        UpdateActivity();
         if (_live?.Status == null) return;
         var elapsed = (DateTime.UtcNow - _started).TotalSeconds;
         _live.Status.Text = _phase + "… " + elapsed.ToString("0.0") + "s" + (_streamed > 0 ? " · " + _streamed.ToString("N0") + " chars" : "");
@@ -1190,6 +1338,9 @@ public partial class ChatControl : UserControl, IAgentView
 
     private void SetBusy(bool value)
     {
+        _wasBusy = value;
+        UpdateActivity();
+        if (!value) RefreshPlanSection();
         StopButton.IsEnabled = value; BackendBox.IsEnabled = !value; ModeBox.IsEnabled = !value; SessionBox.IsEnabled = !value;
         ModelBox.IsEnabled = !value && !string.Equals(Services.ActiveSession.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase);
         // One slot, two meanings, the way the chat view in Visual Studio Code swaps its send button for a stop button
@@ -1560,8 +1711,8 @@ public partial class ChatControl : UserControl, IAgentView
             ChatContextItem? next = null;
             if (path.Length > 0)
             {
-                var root = await SolutionRootAsync();
-                next = new ChatContextItem { Label = ContextTools.Relative(root, path).Replace('\\', '/'), Kind = "file", Preview = path };
+                var workspace = Services.WorkspaceFor(await SolutionRootAsync());
+                next = new ChatContextItem { Label = workspace.Relative(path).Replace('\\', '/'), Kind = "file", Preview = path };
             }
             if (Same(_activeFileContext, next)) return;
             _activeFileContext = next;
@@ -1616,9 +1767,9 @@ public partial class ChatControl : UserControl, IAgentView
     {
         try
         {
-            var root = await SolutionRootAsync();
-            if (root == null) { StateText.Text = "Open a solution first"; return; }
-            var path = PathGuard.Resolve(root, reference.Path);
+            var workspace = Services.WorkspaceFor(await SolutionRootAsync());
+            if (workspace.Roots.Count == 0) { StateText.Text = "Open a solution first"; return; }
+            var path = workspace.Resolve(reference.Path);
             if (!File.Exists(path)) { StateText.Text = "Referenced file was not found"; return; }
 
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
@@ -1633,7 +1784,7 @@ public partial class ChatControl : UserControl, IAgentView
                 else selection.GotoLine(reference.Line.Value, false);
             }
         }
-        catch (ArgumentException) { StateText.Text = "Referenced file is outside the solution"; }
+        catch (ArgumentException) { StateText.Text = "Referenced file is outside the open projects"; }
         catch (Exception ex) { StateText.Text = "Could not open referenced file"; Services.Log(ex.ToString()); }
     }
 
@@ -1738,26 +1889,27 @@ public partial class ChatControl : UserControl, IAgentView
 
     private async Task PickFilesAsync()
     {
-        var root = await SolutionRootAsync();
-        if (root == null) { StateText.Text = "Open a solution first"; return; }
-        await PickIntoAsync(root);
+        var workspace = Services.WorkspaceFor(await SolutionRootAsync());
+        if (workspace.Roots.Count == 0) { StateText.Text = "Open a solution first"; return; }
+        await PickIntoAsync(workspace);
     }
 
-    /// <summary>The picker shared by the paperclip and the '#' gesture.</summary>
-    private async Task PickIntoAsync(string root)
+    /// <summary>The picker shared by the paperclip and the '#' gesture. It lists every root of the workspace, so
+    /// a file in an added project is picked with the same label the tools will accept.</summary>
+    private async Task PickIntoAsync(Workspace workspace)
     {
         var chosen = new List<string>();
         _picking = true;
         try
         {
-            var dialog = new FilePickerDialog(root) { Owner = System.Windows.Window.GetWindow(this) };
+            var dialog = new FilePickerDialog(workspace) { Owner = System.Windows.Window.GetWindow(this) };
             if (dialog.ShowDialog() != true) return;
             chosen.AddRange(dialog.Selected);
         }
         finally { _picking = false; }
 
         foreach (var path in chosen)
-            Attach(new ChatContextItem { Label = ContextTools.Relative(root, path).Replace('\\', '/'), Kind = "file", Preview = path });
+            Attach(new ChatContextItem { Label = workspace.Relative(path).Replace('\\', '/'), Kind = "file", Preview = path });
         if (chosen.Count > 0) StateText.Text = chosen.Count + (chosen.Count == 1 ? " file attached" : " files attached");
         Composer.Focus();
     }
@@ -1859,13 +2011,13 @@ public partial class ChatControl : UserControl, IAgentView
         try { Composer.Text = text.Substring(0, text.Length - 1); Composer.CaretIndex = Composer.Text.Length; }
         finally { _picking = false; }
 
-        var root = await SolutionRootAsync();
-        if (root == null) { StateText.Text = "Open a solution first"; return; }
+        var workspace = Services.WorkspaceFor(await SolutionRootAsync());
+        if (workspace.Roots.Count == 0) { StateText.Text = "Open a solution first"; return; }
         // The picker still opens — '#' keeps its old meaning with no tools — but not before saying why there is
         // nothing to mention: a user who expected tools should not have to discover that from a silent fallback.
-        if (McpEnabledButNotConnected(root))
+        if (McpEnabledButNotConnected(workspace.Primary))
             StateText.Text = "MCP is not connected — enable a server in the Dashboard or press ↻ on its row";
-        await PickIntoAsync(root);
+        await PickIntoAsync(workspace);
     }
     private async void Composer_PreviewKeyDown(object sender, KeyEventArgs e)
     {
@@ -1902,11 +2054,14 @@ public partial class ChatControl : UserControl, IAgentView
             _fileMentionMode = true;
             _toolMentionMode = false;
             _promptMode = false;
-            var root = await SolutionRootAsync();
-            if (root != null && !string.Equals(root, _mentionRoot, StringComparison.OrdinalIgnoreCase))
+            var workspace = Services.WorkspaceFor(await SolutionRootAsync());
+            // Keyed on every root, not just the solution: adding a project changes what the list should hold, and
+            // the previous build's list would otherwise keep hiding that project's files until a reload.
+            var key = string.Join("|", workspace.Roots);
+            if (key.Length > 0 && !string.Equals(key, _mentionRoot, StringComparison.OrdinalIgnoreCase))
             {
-                _mentionRoot = root;
-                _mentionFiles = await Task.Run(() => ReadMentionFiles(root));
+                _mentionRoot = key;
+                _mentionFiles = await Task.Run(() => ReadMentionFiles(workspace));
             }
             if (refreshVersion != _suggestionRefreshVersion ||
                 !FileMentions.TryGetFilter(Composer.Text, Composer.CaretIndex, out _, out _, out var currentFilter) ||
@@ -1924,7 +2079,7 @@ public partial class ChatControl : UserControl, IAgentView
                     Description = "MCP resource · " + resource.Uri,
                     Resource = resource
                 }));
-            if (root != null)
+            if (workspace.Roots.Count > 0)
                 matches.AddRange(_mentionFiles.Where(f => filter.Length == 0 || f.Name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0).Take(100));
             SlashCommandList.ItemsSource = matches;
             SlashCommandList.SelectedIndex = matches.Count > 0 ? 0 : -1;
@@ -2096,15 +2251,20 @@ public partial class ChatControl : UserControl, IAgentView
         return false;
     }
 
-    private static IReadOnlyList<FileMentionEntry> ReadMentionFiles(string root)
+    private static IReadOnlyList<FileMentionEntry> ReadMentionFiles(Workspace workspace)
     {
         var files = new List<FileMentionEntry>();
         try
         {
-            foreach (var path in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+            foreach (var root in workspace.Roots)
             {
-                if (ContextTools.IsNoise(path) || Array.IndexOf(ContextTools.ScannableExtensions, Path.GetExtension(path).ToLowerInvariant()) < 0) continue;
-                files.Add(new FileMentionEntry { FullPath = path, Name = ContextTools.Relative(root, path).Replace('\\', '/') });
+                if (!Directory.Exists(root)) continue;
+                foreach (var path in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+                {
+                    if (ContextTools.IsNoise(path) || Array.IndexOf(ContextTools.ScannableExtensions, Path.GetExtension(path).ToLowerInvariant()) < 0) continue;
+                    files.Add(new FileMentionEntry { FullPath = path, Name = workspace.Relative(path).Replace('\\', '/') });
+                    if (files.Count >= 6000) break;
+                }
                 if (files.Count >= 6000) break;
             }
         }
@@ -2131,9 +2291,9 @@ public partial class ChatControl : UserControl, IAgentView
                     SlashCommandPopup.IsOpen = false;
                 }
                 finally { _picking = false; }
-                var root = await SolutionRootAsync();
-                if (root == null) { StateText.Text = "Open a solution first"; return; }
-                await PickIntoAsync(root);
+                var pickerWorkspace = Services.WorkspaceFor(await SolutionRootAsync());
+                if (pickerWorkspace.Roots.Count == 0) { StateText.Text = "Open a solution first"; return; }
+                await PickIntoAsync(pickerWorkspace);
                 Composer.Focus();
                 return;
             }

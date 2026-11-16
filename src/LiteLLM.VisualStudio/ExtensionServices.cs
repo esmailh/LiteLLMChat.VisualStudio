@@ -93,6 +93,9 @@ internal sealed class ExtensionServices : IDisposable
         Settings.RequestTimeoutSeconds = o.RequestTimeoutSeconds; Settings.StreamResumeAttempts = o.StreamResumeAttempts; Settings.EnableStreaming = o.EnableStreaming; Settings.MaxTokens = o.MaxTokens; Settings.Temperature = o.Temperature; Settings.ShowReasoning = o.ShowReasoning; Settings.EnableToolCalling = o.EnableToolCalling; Settings.PermissionMode = o.PermissionMode; Settings.MaxToolRounds = o.MaxToolRounds; Settings.LoggingLevel = o.LoggingLevel;
         Settings.EnableFileEditing = o.EnableFileEditing; Settings.ConfirmEachEdit = o.ConfirmEachEdit; Settings.VerifyBuildAfterEdits = o.VerifyBuildAfterEdits;
         Settings.EnableTerminalTools = o.EnableTerminalTools; Settings.ConfirmEachCommand = o.ConfirmEachCommand; Settings.CommandTimeoutSeconds = o.CommandTimeoutSeconds;
+        Settings.RtkOutputMode = o.RtkOutputMode;
+        Settings.FallbackContextTokens = o.FallbackContextTokens;
+        Settings.ModelContextOverrides = o.ModelContextOverrides;
         // The tests check is offered even when the build check is off; it simply never runs, because it runs
         // only against assemblies a passing build has just produced. Reading the value in either way is what
         // keeps the dialog's state and the saved state the same thing.
@@ -146,6 +149,10 @@ internal sealed class ExtensionServices : IDisposable
         UsageChanged?.Invoke(this, EventArgs.Empty);
     }
     internal ChatSessionState ActiveSession => Sessions.Sessions.First(s => s.Id == Sessions.ActiveSessionId);
+    /// <summary>The folders the active conversation may read and change: the solution, plus whatever the user
+    /// added to this chat. Built on demand rather than stored, because the solution is read from the environment
+    /// and the extras belong to the session — a cached one would answer for the wrong conversation after a switch.</summary>
+    internal Workspace WorkspaceFor(string? solutionRoot) => new Workspace(solutionRoot, ActiveSession?.ExtraRoots);
     internal void ActivateSession(Guid id)
     {
         if (!Sessions.Sessions.Any(s => s.Id == id)) return;
@@ -179,8 +186,9 @@ internal sealed class ExtensionServices : IDisposable
     {
         if (!Settings.EnableToolCalling) return Array.Empty<ToolDefinition>();
         IEnumerable<ToolDefinition> tools = ContextTools.Definitions;
+        tools = tools.Concat(new[] { AgentPlanTool.Definition });
         if (Settings.EnableFileEditing) tools = tools.Concat(EditTools.Definitions);
-        if (Settings.EnableTerminalTools) tools = tools.Concat(TerminalTools.Definitions).Concat(new[] { GitTools.Definition });
+        if (Settings.EnableTerminalTools) tools = tools.Concat(TerminalTools.Definitions).Concat(new[] { GitTools.Definition, GlabTools.Definition });
         // Read per request from the snapshot the turn prepared: a tools/list_changed that arrives between
         // rounds is offered on the next one, and the reverse map dispatch uses is replaced with it. A narrowed
         // turn pins its own list instead, because the selection was resolved against the snapshot it prepared.
@@ -194,10 +202,17 @@ internal sealed class ExtensionServices : IDisposable
 
     internal Task StreamAsync(ModelInfo model, IReadOnlyList<ChatMessage> messages, Func<StreamUpdate, Task> update, CancellationToken token, IReadOnlyList<ToolDefinition>? mcpTools = null, bool skillTools = false)
     {
+        var tools = ToolsFor(mcpTools, skillTools);
+        RequestBudget.EnsureFits(messages, tools, ModelRequestBudget.Limit(model, Settings));
         var server = Settings.Servers.First(s => s.Id == model.ServerId); Log("Chat request started: " + model.Id + " on " + server.Name);
-        return _client.StreamAsync(server, model.Id, messages, Settings, ToolsFor(mcpTools, skillTools), update, token);
+        return _client.StreamAsync(server, model.Id, messages, Settings, tools, update, token);
     }
-    internal async Task<ChatMessage> CompleteAsync(ModelInfo model, IReadOnlyList<ChatMessage> messages, CancellationToken token, IReadOnlyList<ToolDefinition>? mcpTools = null, bool skillTools = false) => await _client.CompleteAsync(Settings.Servers.First(s => s.Id == model.ServerId), model.Id, messages, Settings, ToolsFor(mcpTools, skillTools), token);
+    internal async Task<ChatMessage> CompleteAsync(ModelInfo model, IReadOnlyList<ChatMessage> messages, CancellationToken token, IReadOnlyList<ToolDefinition>? mcpTools = null, bool skillTools = false)
+    {
+        var tools = ToolsFor(mcpTools, skillTools);
+        RequestBudget.EnsureFits(messages, tools, ModelRequestBudget.Limit(model, Settings));
+        return await _client.CompleteAsync(Settings.Servers.First(s => s.Id == model.ServerId), model.Id, messages, Settings, tools, token);
+    }
 
     /// <summary>A call the extension makes on its own behalf rather than one the user asked for: the context
     /// summary. It carries its own settings, because a summary must not be given the session's token budget, and

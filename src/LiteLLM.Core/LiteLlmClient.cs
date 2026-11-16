@@ -41,7 +41,7 @@ public sealed class LiteLlmClient : IDisposable
             try
             {
                 var data = JObject.Parse(body)["data"] as JArray ?? throw new JsonException("Missing data array.");
-                return data.Select(x => new ModelInfo { Id = (string?)x["id"] ?? "", OwnedBy = (string?)x["owned_by"] ?? "", ServerId = server.Id, ServerName = server.Name }).Where(x => x.Id.Length > 0).ToList();
+                return data.Select(x => new ModelInfo { Id = (string?)x["id"] ?? "", OwnedBy = (string?)x["owned_by"] ?? "", ServerId = server.Id, ServerName = server.Name, ContextWindowTokens = ModelRequestBudget.ReadContextTokens(x) }).Where(x => x.Id.Length > 0).ToList();
             }
             catch (JsonException ex) { throw new LiteLlmException("The server returned an invalid model list.", ex.Message, ex) { Exchange = LastExchange }; }
         }

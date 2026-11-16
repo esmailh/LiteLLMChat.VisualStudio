@@ -31,24 +31,28 @@ internal static class TerminalTools
         var command = (string?)args["command"] ?? "";
         if (string.IsNullOrWhiteSpace(command)) return Fail("A command is required.", "command · missing");
         var shell = name == "run_powershell" ? CommandShell.PowerShell : CommandShell.Cmd;
-        if (Confirm != null && !await Confirm(new CommandProposal { Shell = shell, Command = command }).ConfigureAwait(true))
+        var confirm = Confirm;
+        if (confirm == null) return Fail("Command confirmation is unavailable.", "command · confirmation unavailable");
+        if (!await confirm(new CommandProposal { Shell = shell, Command = command }).ConfigureAwait(true))
             return Fail("The user declined this command.", "command · skipped");
         try
         {
             var result = await CommandExecutor.ExecuteAsync(shell, command, root,
                 TimeSpan.FromSeconds(Math.Max(1, Math.Min(3600, timeoutSeconds))), token).ConfigureAwait(false);
             var text = new StringBuilder();
+            var filtered = await RtkTerminalOutput.CompressAsync(command, result, token).ConfigureAwait(false);
             text.AppendLine("Working directory: " + root);
             text.AppendLine("Exit code: " + (result.ExitCode?.ToString() ?? "unavailable"));
             text.AppendLine("Duration: " + result.Duration.TotalSeconds.ToString("0.###") + " seconds");
             if (result.TimedOut) text.AppendLine("Status: timed out");
             else if (result.Cancelled) text.AppendLine("Status: cancelled");
             if (result.OutputTruncated) text.AppendLine("Output was truncated.");
-            text.AppendLine("stdout:"); text.AppendLine(result.StandardOutput.Length == 0 ? "(empty)" : result.StandardOutput);
+            if (filtered.Notice.Length > 0) text.AppendLine(filtered.Notice);
+            text.AppendLine("stdout:"); text.AppendLine(filtered.Text.Length == 0 ? "(empty)" : filtered.Text);
             text.AppendLine("stderr:"); text.AppendLine(result.StandardError.Length == 0 ? "(empty)" : result.StandardError);
             var ok = !result.TimedOut && !result.Cancelled && result.ExitCode == 0;
             var status = result.TimedOut ? "timed out" : result.Cancelled ? "cancelled" : "exit " + (result.ExitCode?.ToString() ?? "?");
-            return new ToolResult { Content = text.ToString(), Summary = name + " · " + status, Ok = ok };
+            return new ToolResult { Content = text.ToString(), Summary = name + " · " + status + (filtered.Raw.Length > 0 ? " · RTK" : filtered.Notice.Length > 0 ? " · RTK kept raw" : ""), Detail = filtered.Notice.Length > 0 ? filtered.Notice + "\nRaw stdout (bounded):\n" + result.StandardOutput : null, Ok = ok };
         }
         catch (Exception ex)
         {

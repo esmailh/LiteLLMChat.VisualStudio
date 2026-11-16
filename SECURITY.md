@@ -28,7 +28,7 @@ DPAPI-protected secret stores live under `%LOCALAPPDATA%\LiteLLM.VisualStudio`.
 
 Reports that are in scope include, for example:
 
-- reading or writing outside the open solution root through the workspace tools;
+- reading or writing outside the open solution and the project folders added to that conversation through the workspace tools;
 - an MCP tool call that runs without the approval the policy requires;
 - secrets (API keys, MCP bearer tokens, OAuth grants) appearing in logs, exports, the usage
   ledger, or a saved conversation;

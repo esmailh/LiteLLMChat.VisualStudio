@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 namespace LiteLLM.Core;
@@ -157,12 +158,47 @@ public static class ContextSummary
             + "\n\n[End of briefing. Continue from the messages below.]"
     };
 
-    public static ContextSummaryReport Report(int messages, string text) => new ContextSummaryReport
+    public static ContextSummaryReport Report(int messages, string text, string covered = "") => new ContextSummaryReport
     {
         Messages = messages,
         Summary = Label(messages),
-        Detail = text
+        Detail = text,
+        Covered = covered
     };
+
+    /// <summary>What the folded part of the conversation was, in terms the reader can check against the
+    /// transcript: how many messages of each kind, and which tools ran inside them. A row that said only how
+    /// many messages were replaced left the user unable to tell a fold of three tool results from a fold of
+    /// everything they had typed, which is exactly the difference that matters to them.</summary>
+    public static string Describe(IReadOnlyList<ChatMessage>? messages, int through)
+    {
+        if (messages == null || through <= 0) return "";
+        var end = Math.Min(through, messages.Count);
+        var fromYou = 0; var replies = 0; var results = 0;
+        var tools = new List<string>();
+        for (var i = 0; i < end; i++)
+        {
+            var message = messages[i];
+            if (message == null) continue;
+            if (message.Role == "user") fromYou++;
+            else if (message.Role == "assistant")
+            {
+                replies++;
+                foreach (var call in message.ToolCalls)
+                    if (!tools.Contains(call.Name, StringComparer.Ordinal)) tools.Add(call.Name);
+            }
+            else if (message.Role == "tool") results++;
+        }
+
+        var parts = new List<string>();
+        if (fromYou > 0) parts.Add(fromYou + (fromYou == 1 ? " message from you" : " messages from you"));
+        if (replies > 0) parts.Add(replies + (replies == 1 ? " reply" : " replies"));
+        if (results > 0) parts.Add(results + (results == 1 ? " tool result" : " tool results"));
+        var text = "Folded the first " + end + " message" + (end == 1 ? "" : "s") + " of this conversation into the briefing below: "
+            + (parts.Count > 0 ? string.Join(", ", parts) : "no messages with content") + ".";
+        if (tools.Count > 0) text += " Tools in them: " + string.Join(", ", tools) + ".";
+        return ChatStateLimits.OneLine(text, 400);
+    }
 
     /// <summary>The row's label: what was replaced, and by what. One line by construction, as the row is one
     /// line.</summary>

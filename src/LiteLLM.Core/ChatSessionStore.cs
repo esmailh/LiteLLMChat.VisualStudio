@@ -70,7 +70,7 @@ public sealed class ChatSessionStore
         try
         {
             var document = JsonConvert.DeserializeObject<ChatSessionDocument>(File.ReadAllText(_path), _settings) ?? NewDocument();
-            Normalize(document);
+            Normalize(document, recoverInterrupted: true);
             return document;
         }
         catch (Exception ex) when (ex is IOException || ex is JsonException || ex is UnauthorizedAccessException)
@@ -107,7 +107,7 @@ public sealed class ChatSessionStore
         Normalize(document);
     }
 
-    private static void Normalize(ChatSessionDocument document)
+    private static void Normalize(ChatSessionDocument document, bool recoverInterrupted = false)
     {
         if (document.Version <= 0) document.Version = 1;
         document.Sessions ??= new List<ChatSessionState>();
@@ -118,12 +118,25 @@ public sealed class ChatSessionStore
             // Selected skill names are the user's choice, kept across a reload. Bounded like every other list in a
             // stored document: a hand-edited file must not make a prompt grow without limit. A name that no longer
             // matches a skill stays here on purpose — the turn reports it, and the user removes it from the chip.
+            session.Plan = (session.Plan ?? new List<PlanStep>()).Where(step => step != null).Take(50).ToList();
+            foreach (var step in session.Plan) step.Instruction = ChatStateLimits.Clip(step.Instruction ?? "", 4000);
             session.SelectedSkills = (session.SelectedSkills ?? new List<string>())
                 .Where(name => !string.IsNullOrWhiteSpace(name))
                 .Select(name => name.Trim())
                 .Where(name => name.Length <= SkillFrontmatter.MaxNameChars)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Take(MaxSelectedSkills)
+                .ToList();
+            // Added project folders are a property of the conversation, and each one widens what a tool may read and
+            // write. Normalized to the full form the resolver compares against, deduplicated the way Windows compares
+            // folders, and capped — a hand-edited file must not turn one conversation into a disk-wide grant. The
+            // solution itself is not stored here: it is read from the environment, so adding it would be a second
+            // spelling of a root that is already the first one.
+            session.ExtraRoots = (session.ExtraRoots ?? new List<string>())
+                .Select(Workspace.Normalize)
+                .Where(root => root.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(Workspace.MaxExtraRoots)
                 .ToList();
             session.Turns ??= new List<ChatTurnState>();
             // Laid out as a row of the history drop-down, so it is shaped as one line here rather than at each place that
@@ -184,10 +197,13 @@ public sealed class ChatSessionStore
                     {
                         Messages = Math.Max(0, s.Messages),
                         Summary = ChatStateLimits.OneLine(s.Summary, 200),
+                        // The coverage line is a sentence built from the transcript, so it is bounded like the
+                        // label it sits beside rather than trusted at whatever length it was written.
+                        Covered = ChatStateLimits.OneLine(s.Covered ?? "", 400),
                         Detail = ChatStateLimits.Clip(s.Detail ?? "", ContextSummary.MaxSummaryChars)
                     })
                     .ToList();
-                if (turn.Status == ChatTurnStatus.Pending || turn.Status == ChatTurnStatus.Streaming)
+                if (recoverInterrupted && (turn.Status == ChatTurnStatus.Pending || turn.Status == ChatTurnStatus.Streaming))
                 {
                     turn.Status = ChatTurnStatus.Cancelled;
                     turn.Error = "The previous Visual Studio session ended while this response was running.";

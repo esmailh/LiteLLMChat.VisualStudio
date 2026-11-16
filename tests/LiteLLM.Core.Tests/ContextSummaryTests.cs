@@ -176,6 +176,35 @@ public sealed class ContextSummaryTests
     }
 
     [Fact]
+    public void ContextSummary_DescribesWhatTheFoldedPartContained()
+    {
+        var messages = Transcript(3);
+        var text = ContextSummary.Describe(messages, 3);   // the user's message, then one whole tool round
+
+        Assert.Contains("first 3 messages", text, StringComparison.Ordinal);
+        Assert.Contains("1 message from you", text, StringComparison.Ordinal);
+        Assert.Contains("1 reply", text, StringComparison.Ordinal);
+        Assert.Contains("1 tool result", text, StringComparison.Ordinal);
+        Assert.Contains("read_file", text, StringComparison.Ordinal);
+        // One line, because the row it fills is a caption under an expander header.
+        Assert.DoesNotContain("\n", text);
+
+        // Nothing was folded, so there is nothing to explain — and a null transcript must not throw.
+        Assert.Equal("", ContextSummary.Describe(messages, 0));
+        Assert.Equal("", ContextSummary.Describe(null, 3));
+    }
+
+    [Fact]
+    public void ContextSummary_KeepsTheCoverageSentenceWithTheReport()
+    {
+        var report = ContextSummary.Report(4, "the briefing", "what it covered");
+
+        Assert.Equal("what it covered", report.Covered);
+        // A report built without one is still valid: an older stored summary has no sentence to say.
+        Assert.Equal("", ContextSummary.Report(4, "the briefing").Covered);
+    }
+
+    [Fact]
     public void ContextSummary_ReportsWhatWasReplaced()
     {
         var report = ContextSummary.Report(12, "the briefing text");

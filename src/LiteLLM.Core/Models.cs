@@ -63,6 +63,9 @@ public sealed class UserSettings
     public bool ConfirmEachCommand { get; set; } = true;
     /// <summary>Maximum duration of one command before its process is terminated.</summary>
     public int CommandTimeoutSeconds { get; set; } = 120;
+    public RtkMode RtkOutputMode { get; set; } = RtkMode.Auto;
+    public int FallbackContextTokens { get; set; } = 128000;
+    public string ModelContextOverrides { get; set; } = "";
     /// <summary>Tool-calling rounds allowed before the chat asks whether to continue.</summary>
     public int MaxToolRounds { get; set; } = ChatStateLimits.DefaultToolRounds;
     /// <summary>Model the extension uses for its own calls — summarizing a long conversation's older messages
@@ -120,6 +123,7 @@ public sealed class UserSettings
 }
 public sealed class ModelInfo
 {
+    public int ContextWindowTokens { get; set; }
     public string Id { get; set; } = "";
     public Guid ServerId { get; set; }
     public string ServerName { get; set; } = "";

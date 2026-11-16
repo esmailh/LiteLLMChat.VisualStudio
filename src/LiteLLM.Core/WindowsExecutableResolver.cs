@@ -59,6 +59,11 @@ public sealed class WindowsExecutableResolver
         }
         else
         {
+            if (name.Equals("glab.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                if (!string.IsNullOrWhiteSpace(profile)) yield return Path.Combine(profile, ".local", "bin", name);
+            }
             foreach (var appPath in RegistryValues(@"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\" + name, null))
                 yield return appPath;
             if (name.Equals("gh.exe", StringComparison.OrdinalIgnoreCase))

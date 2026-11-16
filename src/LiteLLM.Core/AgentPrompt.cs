@@ -27,9 +27,11 @@ public static class AgentPrompt
     /// that can read them. Shared across the attachments of one message, so ten files cannot add up to a novel.</summary>
     private const int MaxInlineFileChars = 8000;
 
-    public static List<ChatMessage> Build(IEnumerable<ChatMessage> history, IReadOnlyList<ChatContextItem>? attachments, string mode, bool toolCalling, bool fileEditing, bool terminalTools = false, string? repoInstructions = null, string? solutionErrors = null, string? mcpInstructions = null, string? mcpToolSelection = null, string? skillsInstructions = null)
+    public static List<ChatMessage> Build(IEnumerable<ChatMessage> history, IReadOnlyList<ChatContextItem>? attachments, string mode, bool toolCalling, bool fileEditing, bool terminalTools = false, string? repoInstructions = null, string? solutionErrors = null, string? mcpInstructions = null, string? mcpToolSelection = null, string? skillsInstructions = null, string? workspaceRoots = null)
     {
-        var messages = new List<ChatMessage> { new ChatMessage { Role = "system", Content = Instructions(mode, toolCalling, fileEditing, terminalTools, repoInstructions, solutionErrors, mcpInstructions, mcpToolSelection, skillsInstructions) } };
+        var messages = new List<ChatMessage> { new ChatMessage { Role = "system", Content = Instructions(mode, toolCalling, fileEditing, terminalTools, repoInstructions, solutionErrors, mcpInstructions, mcpToolSelection, skillsInstructions, workspaceRoots) } };
+        if (toolCalling && terminalTools)
+            messages[0].Content += "\nGitLab: use run_glab with an exact arguments array for all GitLab CLI capabilities, including merge requests (mr create/view/list/merge), issues, pipelines, releases and API. Commands require user confirmation. Do not claim an MR exists until the command succeeds and returns its URL. Never include credentials in arguments.";
         messages.AddRange(history.Where(m => m != null).Select(ChatStateLimits.CopyMessage));
 
         var attached = (attachments ?? new List<ChatContextItem>()).Where(a => a != null && a.Label.Length > 0).ToList();
@@ -106,8 +108,8 @@ public static class AgentPrompt
 
     public static string Instructions(bool toolCalling, bool fileEditing) => Instructions("agent", toolCalling, fileEditing, false);
 
-    public static string Instructions(string mode, bool toolCalling, bool fileEditing, bool terminalTools = false, string? repoInstructions = null, string? solutionErrors = null, string? mcpInstructions = null, string? mcpToolSelection = null, string? skillsInstructions = null) =>
-        WithErrors(WithMcp(WithRepo(WithSkills(WithToolSelection(BaseInstructions(mode, toolCalling, fileEditing, terminalTools), mcpToolSelection), skillsInstructions), repoInstructions), mcpInstructions), solutionErrors);
+    public static string Instructions(string mode, bool toolCalling, bool fileEditing, bool terminalTools = false, string? repoInstructions = null, string? solutionErrors = null, string? mcpInstructions = null, string? mcpToolSelection = null, string? skillsInstructions = null, string? workspaceRoots = null) =>
+        WithErrors(WithMcp(WithRepo(WithSkills(WithToolSelection(WithWorkspace(BaseInstructions(mode, toolCalling, fileEditing, terminalTools), toolCalling ? workspaceRoots : null), mcpToolSelection), skillsInstructions), repoInstructions), mcpInstructions), solutionErrors);
 
     /// <summary>What the extension itself tells the model, before the project has its say. A project's own
     /// instructions are added after this rather than woven into it, so that the promises below stay one readable
@@ -179,6 +181,12 @@ Verifying the build
   when it reports no errors you may say the change compiles.");
         return text.ToString();
     }
+
+    /// <summary>The other projects the user added to this conversation, from <see cref="Workspace.Describe"/>. It
+    /// sits directly after the extension's own rules and before anything the user or a server wrote, because it
+    /// describes how a path is addressed — the one thing every tool below depends on.</summary>
+    private static string WithWorkspace(string instructions, string? workspaceRoots) =>
+        string.IsNullOrEmpty(workspaceRoots) ? instructions : instructions + "\n\nProjects in this workspace\n" + workspaceRoots;
 
     /// <summary>The tools the user's own message selected for this turn, written by the extension. It sits before
     /// the project's instructions because a repository file may describe the work, not redefine which tools exist or

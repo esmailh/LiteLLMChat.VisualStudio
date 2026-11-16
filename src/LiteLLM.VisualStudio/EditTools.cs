@@ -15,8 +15,11 @@ namespace LiteLLM.VisualStudio;
 /// transcript.</summary>
 internal sealed class AppliedEdit
 {
+    public override string ToString() => Label + " · " + Note + (Undone ? " (restored)" : "");
     internal string Path = "";
-    /// <summary>Solution-relative, which is the only form the chat shows.</summary>
+    internal string Root = "";
+    /// <summary>Workspace-relative, which is the only form the chat shows: a path in an added project keeps its
+    /// folder's name in front of it.</summary>
     internal string Label = "";
     /// <summary>What happened, in a few words: "edited", "created", "removed".</summary>
     internal string Note = "";
@@ -24,6 +27,7 @@ internal sealed class AppliedEdit
     internal string Summary = "";
     /// <summary>The file's text before the edit, kept for undo.</summary>
     internal string Before = "";
+    internal string After = "";
     internal bool Existed;
     internal bool Removed;
     /// <summary>How the file was encoded and ended its lines, so undo writes it back the same way.</summary>
@@ -66,9 +70,9 @@ internal static class EditTools
             + "\"*** End of File\" anchors a hunk to the end of the file. Every context line must match the file exactly.",
             new JObject { ["input"] = Str("The complete patch"), ["explanation"] = Str("One short sentence on what the patch does, shown to the user") }, "input"),
         Define("create_file",
-            "Create a new file in the solution and write its content. Use it for a file that does not exist yet; "
+            "Create a new file in the workspace and write its content. Use it for a file that does not exist yet; "
             + "it fails if the file is already there, and it creates any missing parent folders.",
-            new JObject { ["filePath"] = Str("Solution-relative or absolute path"), ["content"] = Str("The complete contents of the new file") }, "filePath", "content"),
+            new JObject { ["filePath"] = Str("Solution-relative, absolute, or ProjectName/ path for an added project"), ["content"] = Str("The complete contents of the new file") }, "filePath", "content"),
         Define("replace_string_in_file",
             "Replace one string in an existing file. oldString must occur exactly once in the file, so include enough "
             + "surrounding lines to identify the one place you mean. To make several changes at once, use "
@@ -105,8 +109,8 @@ internal static class EditTools
                 }
             }, "replacements"),
         Define("create_directory",
-            "Create a directory in the solution, including any missing parent directories.",
-            new JObject { ["dirPath"] = Str("Solution-relative or absolute path of the directory") }, "dirPath")
+            "Create a directory in the workspace, including any missing parent directories.",
+            new JObject { ["dirPath"] = Str("Solution-relative, absolute, or ProjectName/ path for an added project") }, "dirPath")
     };
 
     private static readonly string[] Names = { "apply_patch", "create_file", "replace_string_in_file", "multi_replace_string_in_file", "create_directory" };
@@ -143,17 +147,21 @@ internal static class EditTools
         return since;
     }
 
-    internal static async Task<ToolResult> ExecuteAsync(DTE? dte, string? root, string name, JObject args)
+    internal static async Task<ToolResult> ExecuteAsync(DTE? dte, Workspace workspace, string name, JObject args)
     {
         try
         {
             switch (name)
             {
-                case "apply_patch": return await PatchAsync(dte, root, args).ConfigureAwait(true);
-                case "create_file": return await CreateAsync(dte, root, args).ConfigureAwait(true);
-                case "create_directory": return CreateDirectory(root, args);
-                case "replace_string_in_file": return await ReplaceAsync(dte, root, args).ConfigureAwait(true);
-                case "multi_replace_string_in_file": return await MultiReplaceAsync(dte, root, args).ConfigureAwait(true);
+                case "apply_patch": return await PatchAsync(dte, workspace, args).ConfigureAwait(true);
+                case "create_file": return await CreateAsync(dte, workspace, args).ConfigureAwait(true);
+                case "create_directory":
+                    var confirm = Confirm;
+                    if (confirm == null || !await confirm(new EditProposal { Label = "directory", Summary = "Create directory", Diff = args.ToString() }).ConfigureAwait(true))
+                        return Fail("Directory creation was not approved.", "directory · not approved");
+                    return CreateDirectory(workspace, args);
+                case "replace_string_in_file": return await ReplaceAsync(dte, workspace, args).ConfigureAwait(true);
+                case "multi_replace_string_in_file": return await MultiReplaceAsync(dte, workspace, args).ConfigureAwait(true);
                 default: return Fail("Unknown tool: " + name, "unknown tool");
             }
         }
@@ -170,7 +178,7 @@ internal static class EditTools
 
     // ---------------------------------------------------------------- the tools
 
-    private static async Task<ToolResult> PatchAsync(DTE? dte, string? root, JObject args)
+    private static async Task<ToolResult> PatchAsync(DTE? dte, Workspace workspace, JObject args)
     {
         var patch = Text(args, "input");
         if (patch.Trim().Length == 0) return Fail("apply_patch was called without a patch in `input`.", "patch · no input");
@@ -178,7 +186,7 @@ internal static class EditTools
         var plans = new List<Plan>();
         foreach (var file in PatchApply.Parse(patch))
         {
-            var plan = Prepare(dte, root, file.Path);
+            var plan = Prepare(dte, workspace, file.Path);
             if (file.IsAdd)
             {
                 if (plan.Existed) throw new EditFailure("Cannot add " + plan.Label + ": the file already exists. Use an update hunk to change it.");
@@ -201,7 +209,7 @@ internal static class EditTools
 
             if (file.MoveTo is { Length: > 0 } target && !file.Delete)
             {
-                var moved = Prepare(dte, root, target);
+                var moved = Prepare(dte, workspace, target);
                 if (moved.Existed) throw new EditFailure("Cannot move " + plan.Label + " to " + moved.Label + ": the destination already exists.");
                 plan.Note = "moved to " + moved.Label;
                 moved.Note = "created";
@@ -220,11 +228,11 @@ internal static class EditTools
         return Commit(dte, plans);
     }
 
-    private static async Task<ToolResult> CreateAsync(DTE? dte, string? root, JObject args)
+    private static async Task<ToolResult> CreateAsync(DTE? dte, Workspace workspace, JObject args)
     {
         var path = Text(args, "filePath");
         if (path.Length == 0) path = Text(args, "path");
-        var plan = Prepare(dte, root, path);
+        var plan = Prepare(dte, workspace, path);
         if (plan.Existed) return Fail("Cannot create " + plan.Label + ": the file already exists. Edit it with apply_patch or replace_string_in_file instead.", "create refused · exists");
         plan.Note = "created";
         plan.After = Text(args, "content");
@@ -233,23 +241,23 @@ internal static class EditTools
         return Commit(dte, new List<Plan> { plan });
     }
 
-    private static ToolResult CreateDirectory(string? root, JObject args)
+    private static ToolResult CreateDirectory(Workspace workspace, JObject args)
     {
         var path = Text(args, "dirPath");
         if (path.Length == 0) path = Text(args, "path");
         if (path.Length == 0) return Fail("create_directory needs a dirPath.", "directory · no path");
-        var full = PathGuard.Resolve(root, path);
-        var label = PathGuard.Relative(root, full);
+        var full = workspace.Resolve(path);
+        var label = workspace.Relative(full);
         if (Directory.Exists(full)) return Result("The directory " + label + " already exists.", "directory " + label + " · already there");
         Directory.CreateDirectory(full);
         return Result("Created the directory " + label + ".", "created directory " + label);
     }
 
-    private static async Task<ToolResult> ReplaceAsync(DTE? dte, string? root, JObject args)
+    private static async Task<ToolResult> ReplaceAsync(DTE? dte, Workspace workspace, JObject args)
     {
         var path = Text(args, "filePath");
         if (path.Length == 0) path = Text(args, "path");
-        var plan = Prepare(dte, root, path);
+        var plan = Prepare(dte, workspace, path);
         if (!plan.Existed) return Fail("No such file: " + plan.Label + ". Use create_file for a new one.", "edit refused · not found");
 
         plan.Note = "edited";
@@ -259,7 +267,7 @@ internal static class EditTools
         return Commit(dte, new List<Plan> { plan });
     }
 
-    private static async Task<ToolResult> MultiReplaceAsync(DTE? dte, string? root, JObject args)
+    private static async Task<ToolResult> MultiReplaceAsync(DTE? dte, Workspace workspace, JObject args)
     {
         var replacements = args["replacements"] as JArray;
         if (replacements == null || replacements.Count == 0) return Fail("multi_replace_string_in_file needs at least one entry in `replacements`.", "edit · no replacements");
@@ -280,11 +288,11 @@ internal static class EditTools
             {
                 if (entry == null) throw new EditFailure("entry " + (i + 1) + " is missing filePath, oldString or newString");
 
-                var full = PathGuard.Resolve(root, (string?)entry["filePath"] ?? "");
-                label = PathGuard.Relative(root, full);
+                var full = workspace.Resolve((string?)entry["filePath"] ?? "");
+                label = workspace.Relative(full);
                 if (!files.TryGetValue(full, out var plan))
                 {
-                    plan = Prepare(dte, root, (string?)entry["filePath"] ?? "");
+                    plan = Prepare(dte, workspace, (string?)entry["filePath"] ?? "");
                     if (!plan.Existed) throw new EditFailure("no such file. Use create_file for a new one");
                     plan.Note = "edited";
                     plan.After = plan.Before;   // each entry replaces into the running text, not into raw disk state
@@ -333,14 +341,19 @@ internal static class EditTools
         internal Document? Open;
         internal string Before = "";
         internal string After = "";
+        internal string Root = "";
         internal string Summary = "";
     }
 
     /// <summary>Reads the file's current text. An open document is the source of truth, not the disk: it may hold
-    /// unsaved work, and that work is what the model read and what the edit has to be measured against.</summary>
-    private static Plan Prepare(DTE? dte, string? root, string path)
+    /// unsaved work, and that work is what the model read and what the edit has to be measured against.
+    ///
+    /// The owning root is recorded on the plan rather than the solution, because undo and the confirmation diff
+    /// both re-resolve the path later, and a file in an added project must be checked against the folder it
+    /// actually lives in.</summary>
+    private static Plan Prepare(DTE? dte, Workspace workspace, string path)
     {
-        var full = PathGuard.Resolve(root, path);
+        var full = workspace.Resolve(path);
         var open = FindOpen(dte, full);
         var view = open == null ? null : View(open);
         var existed = File.Exists(full);
@@ -349,8 +362,9 @@ internal static class EditTools
         if (view != null && before.Length > 0) content.NewLine = TextFile.DominantNewLine(before);
         return new Plan
         {
+            Root = workspace.Owner(full) ?? workspace.Primary ?? "",
             Full = full,
-            Label = PathGuard.Relative(root, full),
+            Label = workspace.Relative(full),
             Existed = existed,
             Content = content,
             Open = open,
@@ -369,7 +383,8 @@ internal static class EditTools
             plan.Summary = Diff.Summary(change.Removed.Count, change.Added.Count);
         }
 
-        if (Confirm == null) return true;
+        var confirm = Confirm;
+        if (confirm == null) return false;
         var changed = plans.Where(p => !string.Equals(p.Before, p.After, StringComparison.Ordinal)).ToList();
         if (changed.Count == 0) return true;
 
@@ -380,7 +395,7 @@ internal static class EditTools
                                    changed.Sum(p => TextChange.Between(p.Before, p.After).Added.Count)),
             Diff = string.Join("\n", changed.Select(p => Diff.ForRegion(p.Label, TextChange.Between(p.Before, p.After))))
         };
-        return await Confirm(proposal).ConfigureAwait(true);
+        return await confirm(proposal).ConfigureAwait(true);
     }
 
     private static ToolResult Declined() =>
@@ -414,11 +429,13 @@ internal static class EditTools
             Remember(new AppliedEdit
             {
                 Path = plan.Full,
+                Root = plan.Root,
                 Label = plan.Label,
                 Note = plan.Note,
                 Summary = plan.Summary,
                 Diff = Diff.ForRegion(plan.Label, TextChange.Between(plan.Before, plan.After)),
                 Before = plan.Before,
+                After = plan.After,
                 Existed = plan.Existed,
                 Removed = plan.Removed,
                 Content = plan.Content
@@ -525,6 +542,7 @@ internal static class EditTools
     internal static string Undo(DTE? dte, AppliedEdit edit)
     {
         if (edit.Undone) return "That edit has already been undone.";
+        PathGuard.Resolve(edit.Root, edit.Path);
         for (var i = History.Count - 1; i >= 0; i--)
         {
             if (ReferenceEquals(History[i], edit)) break;
@@ -537,6 +555,11 @@ internal static class EditTools
         }
 
         var document = FindOpen(dte, edit.Path);
+        var viewNow = document == null ? null : View(document);
+        var existsNow = File.Exists(edit.Path) || viewNow != null;
+        var current = viewNow != null ? Buffer(viewNow) : existsNow ? TextFile.Read(edit.Path).Text : "";
+        if (!CheckpointGuard.CanRestore(!edit.Removed, edit.After, existsNow, current))
+            return "Conflict: " + edit.Label + " changed outside this checkpoint. Your work was left untouched.";
         if (edit.Removed)
         {
             TextFile.Write(edit.Path, edit.Content, edit.Content.Conform(edit.Before));

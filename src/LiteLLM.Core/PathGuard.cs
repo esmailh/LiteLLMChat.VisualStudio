@@ -17,7 +17,27 @@ public static class PathGuard
         var combined = Path.IsPathRooted(path) ? path : Path.Combine(root ?? Environment.CurrentDirectory, path);
         var full = Path.GetFullPath(combined);
         if (root != null && !IsUnder(root, full)) throw new ArgumentException("Path is outside the solution: " + path);
+        if (root != null) RejectLinks(root, full);
         return full;
+    }
+
+    // Inspect parents as well: a new file may not exist yet, but a junction in its path already redirects writes.
+    private static void RejectLinks(string root, string full)
+    {
+        var boundary = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var current = full;
+        while (!string.IsNullOrEmpty(current) && IsUnder(boundary, current))
+        {
+            try
+            {
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                    throw new ArgumentException("Linked paths are not allowed inside the solution: " + full);
+            }
+            catch (FileNotFoundException) { }
+            catch (DirectoryNotFoundException) { }
+            if (string.Equals(current.TrimEnd(Path.DirectorySeparatorChar), boundary, StringComparison.OrdinalIgnoreCase)) break;
+            current = Path.GetDirectoryName(current);
+        }
     }
 
     /// <summary>True when <paramref name="full"/> is the root itself or sits below it. Compared case-insensitively,
