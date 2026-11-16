@@ -31,14 +31,12 @@ public sealed class LiteLlmPackage : AsyncPackage
         {
             Add(commands, 0x0100, async () => await ShowAsync(typeof(ChatToolWindow)));
             Add(commands, 0x0101, async () => await ShowAsync(typeof(DashboardToolWindow)));
-            Add(commands, 0x0102, async () => await Services.RefreshAsync(CancellationToken.None));
-            Add(commands, 0x0103, async () => { var server = Services.Settings.Servers.Find(s => s.Enabled); if (server != null) await Services.TestAsync(server, CancellationToken.None); });
-            Add(commands, 0x0104, async () => { await ShowAsync(typeof(ChatToolWindow)); ChatControl.Current?.Clear(); });
             Add(commands, 0x0105, async () => { var text = await Services.GetSelectionAsync(); await ShowAsync(typeof(ChatToolWindow)); ChatControl.Current?.InsertContext(text); });
         }
     }
     private static void Add(OleMenuCommandService service, int id, Func<Task> action) => service.AddCommand(new MenuCommand((s, e) => ThreadHelper.JoinableTaskFactory.RunAsync(action), new CommandID(new Guid("38BB4A85-6C8E-489E-9CA4-E08258489996"), id)));
     private async Task ShowAsync(Type type) { var pane = await ShowToolWindowAsync(type, 0, true, DisposalToken); if (pane?.Frame == null) throw new NotSupportedException("Cannot create LiteLLM tool window."); }
+    internal Task ShowChatAsync() => ShowAsync(typeof(ChatToolWindow));
     /// <summary>Opens the Dashboard on its MCP page. The chat's MCP chip is the shortest path from "MCP is off" to
     /// the control that turns it on, without making the user find the window and the tab.</summary>
     internal async Task ShowDashboardMcpAsync()

@@ -49,6 +49,7 @@ public sealed class ChatTurnState
     /// anything — a provider that omits usage while streaming, or a turn stored before this was counted.
     /// Kept on the turn so a reloaded conversation shows the same total the live one did.</summary>
     public TokenUsage? Usage { get; set; }
+    public AgentPlan? AgentPlan { get; set; }
 }
 
 /// <summary>What one summarization of the older part of a transcript did. Shaped like <see cref="BuildReport"/>
@@ -62,6 +63,9 @@ public sealed class ContextSummaryReport
     public int Messages { get; set; }
     /// <summary>The one-line label the chat row shows.</summary>
     public string Summary { get; set; } = "";
+    /// <summary>What the folded messages were — how many of each kind, and which tools ran in them. Kept with
+    /// the report so a reloaded conversation says the same thing the live one did.</summary>
+    public string Covered { get; set; } = "";
     /// <summary>The summary itself, which is what the model was given in place of those messages.</summary>
     public string Detail { get; set; } = "";
 }
@@ -97,7 +101,14 @@ public sealed class ChatSessionState
     /// folder renamed without rewriting the conversation; a name that no longer resolves is reported, not dropped.
     /// Selection is not a permission grant.</summary>
     public List<string> SelectedSkills { get; set; } = new List<string>();
+    /// <summary>Project folders the user added beside the solution, so the tools of this conversation may read and
+    /// change them too. Stored as full paths with the conversation rather than with the settings: which projects a
+    /// chat is about is part of the chat, and another conversation must not inherit them. Adding one widens what the
+    /// model may touch, so the list is bounded (<see cref="Workspace.MaxExtraRoots"/>) and never includes the
+    /// solution itself.</summary>
+    public List<string> ExtraRoots { get; set; } = new List<string>();
     public List<ChatTurnState> Turns { get; set; } = new List<ChatTurnState>();
+    public List<PlanStep> Plan { get; set; } = new List<PlanStep>();
 
     [JsonIgnore]
     public bool HasMessages => Turns.Any(t => t.Messages.Any(m => m.Role == "user" || m.Role == "assistant"));
@@ -123,7 +134,7 @@ public static class ChatStateLimits
     /// <summary>Characters one request's transcript may carry, the system prompt and the attachments aside.
     /// Long turns are not shortened by dropping messages — see <see cref="ContextBudget"/> for what gives way
     /// instead — so this bounds the request without ever making it invalid.</summary>
-    public const int MaxPromptChars = 200000;
+    public const int MaxPromptChars = 300000;
 
     /// <summary>Rounds at the end of a transcript whose tool results are never shortened, whatever the budget
     /// says: those are the ones the model is working on right now.</summary>

@@ -9,9 +9,10 @@ using LiteLLM.Core;
 
 namespace LiteLLM.VisualStudio;
 
-/// <summary>The file picker behind Add Context ▸ Files & Folders and the composer's '#'. It lists the same files the
-/// read tools will open — the solution root, the scannable extensions, and the same bin/obj/.git/.vs filter — so it can
-/// never offer something the agent would then refuse to read.
+/// <summary>The file picker behind Add Context ▸ Files &amp; Folders and the composer's '#'. It lists the same files the
+/// read tools will open — every root of the workspace, the scannable extensions, and the same bin/obj/.git/.vs
+/// filter — so it can never offer something the agent would then refuse to read, and a file in an added project
+/// is labelled the way the tools spell it.
 ///
 /// The listing is built once and filtered in memory, because the filter is typed into and re-enumerating a solution
 /// on every keystroke is what makes a picker feel slow.</summary>
@@ -21,18 +22,20 @@ public partial class FilePickerDialog : Window
     private const int MaxFiles = 6000;
     private const int MaxShown = 400;
 
-    private readonly string _root;
+    private readonly Workspace _workspace;
     private readonly List<FileEntry> _all = new List<FileEntry>();
     private readonly List<FileEntry> _shown = new List<FileEntry>();
 
     internal IReadOnlyList<string> Selected { get; private set; } = Array.Empty<string>();
 
-    internal FilePickerDialog(string root)
+    internal FilePickerDialog(Workspace workspace)
     {
         InitializeComponent();
         VsTheme.ApplyToDialog(this);
-        _root = root;
-        ScopeText.Text = root;
+        _workspace = workspace;
+        ScopeText.Text = workspace.Roots.Count == 0
+            ? workspace.Primary ?? ""
+            : string.Join("  ·  ", workspace.Roots);
         Read();
         Filter("");
         CountText.Text = _all.Count >= MaxFiles ? "Showing the first " + MaxFiles + " files" : _all.Count + " files";
@@ -51,17 +54,22 @@ public partial class FilePickerDialog : Window
         var found = new List<string>();
         try
         {
-            foreach (var file in Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories))
+            foreach (var root in _workspace.Roots)
             {
-                if (ContextTools.IsNoise(file)) continue;
-                if (Array.IndexOf(ContextTools.ScannableExtensions, Path.GetExtension(file).ToLowerInvariant()) < 0) continue;
-                found.Add(file);
+                if (!Directory.Exists(root)) continue;
+                foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+                {
+                    if (ContextTools.IsNoise(file)) continue;
+                    if (Array.IndexOf(ContextTools.ScannableExtensions, Path.GetExtension(file).ToLowerInvariant()) < 0) continue;
+                    found.Add(file);
+                    if (found.Count >= MaxFiles) break;
+                }
                 if (found.Count >= MaxFiles) break;
             }
         }
         catch (Exception) { }   // one unreadable subdirectory skips its own files rather than losing the whole list
         found.Sort(StringComparer.OrdinalIgnoreCase);
-        foreach (var file in found) _all.Add(new FileEntry { Full = file, Label = ContextTools.Relative(_root, file).Replace('\\', '/') });
+        foreach (var file in found) _all.Add(new FileEntry { Full = file, Label = _workspace.Relative(file).Replace('\\', '/') });
     }
 
     private void Filter(string query)

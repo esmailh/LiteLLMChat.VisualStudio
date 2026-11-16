@@ -63,13 +63,26 @@ public static class CommandExecutor
         }, timeout, cancellationToken, maxOutputChars);
     }
 
+    public static Task<CommandExecutionResult> FilterAsync(string executable, string filter, string input, string workingDirectory,
+        CancellationToken token)
+    {
+        return ExecuteProcessAsync(new ProcessStartInfo
+        {
+            FileName = executable, Arguments = GitSupport.BuildCommandLine(new[] { "pipe", "--filter", filter }),
+            WorkingDirectory = workingDirectory, UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8
+        }, TimeSpan.FromSeconds(5), token, DefaultMaxOutputChars, input);
+    }
+
     private static async Task<CommandExecutionResult> ExecuteProcessAsync(
-        ProcessStartInfo startInfo, TimeSpan timeout, CancellationToken cancellationToken, int maxOutputChars)
+        ProcessStartInfo startInfo, TimeSpan timeout, CancellationToken cancellationToken, int maxOutputChars, string? input = null)
     {
         if (!Directory.Exists(startInfo.WorkingDirectory)) throw new DirectoryNotFoundException("Working directory not found: " + startInfo.WorkingDirectory);
         if (timeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
         if (maxOutputChars < 1000) throw new ArgumentOutOfRangeException(nameof(maxOutputChars));
 
+        cancellationToken.ThrowIfCancellationRequested();
         var output = new BoundedText(maxOutputChars);
         var error = new BoundedText(maxOutputChars);
         var exited = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -85,6 +98,7 @@ public static class CommandExecutor
             if (!process.Start()) throw new InvalidOperationException("The command process could not be started.");
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
+            var writing = input == null ? Task.CompletedTask : WriteInputAsync(process, input);
             if (process.HasExited) exited.TrySetResult(true);
 
             var timeoutTask = Task.Delay(timeout);
@@ -99,6 +113,7 @@ public static class CommandExecutor
             }
 
             try { if (process.HasExited) process.WaitForExit(); } catch (InvalidOperationException) { }
+            await writing.ConfigureAwait(false);
             stopwatch.Stop();
             return new CommandExecutionResult
             {
@@ -111,6 +126,17 @@ public static class CommandExecutor
                 Duration = stopwatch.Elapsed
             };
         }
+    }
+
+    private static async Task WriteInputAsync(Process process, string input)
+    {
+        try
+        {
+            using (var writer = new StreamWriter(process.StandardInput.BaseStream, new UTF8Encoding(false)))
+                await writer.WriteAsync(input).ConfigureAwait(false);
+        }
+        catch (IOException) { }
+        catch (InvalidOperationException) { }
     }
 
     private static ProcessStartInfo StartInfo(CommandShell shell, string command, string workingDirectory)

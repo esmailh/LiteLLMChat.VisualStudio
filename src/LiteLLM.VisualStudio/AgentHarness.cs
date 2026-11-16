@@ -43,6 +43,10 @@ internal sealed class AgentHarness
     /// <summary>What this turn's skill scan found, and the instructions built from it. Read by the tool dispatch
     /// and by the round that builds the request; both come from the same snapshot.</summary>
     private SkillPlan _skillPlan = SkillPlan.None;
+    /// <summary>The folders this turn may read and change, read once at the start. A field rather than a local
+    /// because the tool dispatch runs in its own method, and a tool call must be answered against the workspace
+    /// of the turn that announced it — not against whatever conversation happens to be selected when it runs.</summary>
+    private Workspace _workspace = new Workspace(null);
 
     internal AgentHarness(IAgentView view, ExtensionServices services, ModelInfo model)
     {
@@ -58,6 +62,11 @@ internal sealed class AgentHarness
         // on every request would be three file reads for text that cannot have changed underneath us. A null root
         // yields "", so a solution that is not open costs the request nothing.
         var solutionRoot = await _view.SolutionRootAsync();
+        // The folders this turn may touch: the solution plus any project the user added to this conversation.
+        // Read once, for the same reason the root is: which chat this turn belongs to cannot change underneath it
+        // without the turn having already been started somewhere else.
+        _workspace = _services.WorkspaceFor(solutionRoot);
+        var workspaceNotes = _workspace.Describe();
         var repoInstructions = RepoInstructions.Load(solutionRoot);
         // MCP is prepared before the first round: the servers' tools have to be in the request the model reads,
         // and a server that cannot be reached has to say so before the turn starts rather than after it stalls.
@@ -153,14 +162,29 @@ internal sealed class AgentHarness
             var prompt = ignoreHistory && _view.ActiveTurn != null
                 ? _view.ActiveTurn.Messages.ToList()
                 : transcript.Take(transcript.Count - 1).ToList();
-            if (ContextBudget.TotalChars(prompt) > ChatStateLimits.MaxPromptChars)
+            var context = _services.Settings.EnableToolCalling
+                ? _view.ActiveTurn?.Context
+                : AgentPrompt.InlineFiles(_view.ActiveTurn?.Context, _view.ReadAttachedText);
+            var errors = BuildDiagnostics.ToStandingNote(await SolutionBuild.ReadErrorListAsync().ConfigureAwait(true));
+            var mcpTools = _selection.Narrows ? _selection.Definitions : null;
+            var tools = _services.ToolsFor(mcpTools, _skillPlan.OffersTools);
+            var requestLimit = ModelRequestBudget.Limit(_model, _services.Settings);
+            var fixedRequest = AgentPrompt.Build(new List<ChatMessage>(), context, _view.Mode, _services.Settings.EnableToolCalling, _services.Settings.EnableFileEditing, _services.Settings.EnableTerminalTools, repoInstructions, errors, mcp.Instructions, _mcpHint, _skillPlan.Instructions, workspaceNotes);
+            var historyLimit = ModelRequestBudget.HistoryAllowance(requestLimit, fixedRequest, tools);
+            if (historyLimit <= 0)
+                throw new InvalidOperationException("Instructions, attachments and tool schemas exhaust this model's estimated input budget. Reduce attachments or select fewer MCP tools. No request was sent.");
+            if (round == 1)
+                _view.AddToolNote("", "Context · model budget " + requestLimit + " characters; history allowance " + historyLimit,
+                    true, null, "Estimated from model capacity (or configured fallback), with output/headroom reserved. Instructions, attachments and selected tool schemas are counted before compaction. This is not an exact token count.", null);
+            if (RequestBudget.Size(prompt, null) > historyLimit)
                 prompt = await SummarizeAsync(prompt, _model, token).ConfigureAwait(true);
             // The budget is spent before sanitizing, because what it measures is the transcript that will
             // actually be sent. Nothing is dropped to fit: an old tool result loses its body and keeps the
             // call it answers, since a result that answers no call is refused by the server. Note the
             // shortening once a turn, not once a round - the same old results qualify from the round the
             // budget is first over, and a row every round would bury the transcript.
-            var trimmed = ContextBudget.Trim(prompt, ChatStateLimits.MaxPromptChars, ChatStateLimits.KeepRecentToolRounds, out var shortened);
+            var serializationOverhead = Math.Max(0L, RequestBudget.Size(prompt, null) - ContextBudget.TotalChars(prompt));
+            var trimmed = ContextBudget.Trim(prompt, (int)Math.Max(1L, historyLimit - serializationOverhead), ChatStateLimits.KeepRecentToolRounds, out var shortened);
             // Sanitizing is what keeps the request valid: every tool result must answer a call the assistant
             // announced and every announced call must be answered, or an OpenAI-compatible server rejects
             // the whole transcript. A cancelled tool batch or a history loaded from an older build can
@@ -176,23 +200,18 @@ internal sealed class AgentHarness
             // With the tools switched off an attached file is only a path, and the model has no way to open it, so
             // a bounded excerpt goes with the request instead. The turn keeps the path either way, so the chat and
             // the stored session are unaffected by which way the setting is set.
-            var context = _services.Settings.EnableToolCalling
-                ? _view.ActiveTurn?.Context
-                : AgentPrompt.InlineFiles(_view.ActiveTurn?.Context, _view.ReadAttachedText);
             // The error list is read every round rather than once a turn, because its whole value is being
             // current and a round that just edited a file is exactly when it has changed. Read, not built —
             // it is a walk over items already in the window — and the block says so, so an entry that predates
             // this turn is not read as the result of it. It joins the system prompt and never _history: that is
             // rebuilt per request, so this needs no sanitizing, costs the stored conversation nothing, and
             // goes away by itself once the list is clean.
-            var errors = BuildDiagnostics.ToStandingNote(await SolutionBuild.ReadErrorListAsync().ConfigureAwait(true));
-            var request = AgentPrompt.Build(history, context, _view.Mode, _services.Settings.EnableToolCalling, _services.Settings.EnableFileEditing, _services.Settings.EnableTerminalTools, repoInstructions, errors, mcp.Instructions, _mcpHint, _skillPlan.Instructions);
+            var request = AgentPrompt.Build(history, context, _view.Mode, _services.Settings.EnableToolCalling, _services.Settings.EnableFileEditing, _services.Settings.EnableTerminalTools, repoInstructions, errors, mcp.Instructions, _mcpHint, _skillPlan.Instructions, workspaceNotes);
 
             var bubble = _view.AddAssistantBubble(round == 1 ? "Thinking" : "Reading the tool results");
             _view.Streamed = 0; _view.Phase = round == 1 ? "Thinking" : "Reading the tool results";
             // A narrowed turn sends exactly the tools the message selected; otherwise the live snapshot, so a list
             // change between rounds still reaches the model on the next one.
-            var mcpTools = _selection.Narrows ? _selection.Definitions : null;
 
             if (_services.Settings.EnableStreaming)
                 try
@@ -206,9 +225,12 @@ internal sealed class AgentHarness
                         assistant.Content += update.ContentDelta; assistant.Reasoning += update.ReasoningDelta;
                         if (update.ToolCalls.Count > 0) assistant.ToolCalls = update.ToolCalls;
                         if (update.FinishReason.Length > 0) finish = update.FinishReason;
-                        _view.Streamed = assistant.Content.Length;
-                        _view.Phase = assistant.Content.Length > 0 ? "Writing" : "Thinking";
-                        await _view.InvokeAsync(() => _view.SetContent(bubble, assistant));
+                        await _view.InvokeAsync(() =>
+                        {
+                            _view.Streamed = assistant.Content.Length;
+                            _view.Phase = assistant.Content.Length > 0 ? "Writing" : "Thinking";
+                            _view.SetContent(bubble, assistant);
+                        });
                     }, token, mcpTools, _skillPlan.OffersTools).ConfigureAwait(true);
                 }
                 catch
@@ -293,17 +315,18 @@ internal sealed class AgentHarness
                 && EditTools.Revisions > revisionsAtRoundStart)
             {
                 _view.Phase = "Building the solution";
-                var listed = await SolutionBuild.VerifyAsync(token).ConfigureAwait(true);
-                if (listed != null)   // null is "could not verify", which is not the same as "no errors"
-                {
-                    var report = BuildDiagnostics.Summarize(listed);
+                  var verification = await SolutionBuild.VerifyAsync(token).ConfigureAwait(true);
+                  var verifiedReport = verification.Report();
+                  if (verifiedReport != null)
+                  {
+                      var report = verifiedReport;
                     if (_view.ActiveTurn != null) _view.ActiveTurn.Build = report;
                     _view.AddToolNote("build", report.Summary, report.Errors == 0, null, report.Detail, null);
                     // Handed back as a user message rather than a tool result: a tool result answers a call the
                     // assistant announced, and this one answers nothing, so ChatStateLimits.Sanitize would drop
                     // it before the model ever saw it. Persist it on the active turn as well: _history is rebuilt
                     // from turn messages after a reload/continuation, and losing this note loses the repair task.
-                    buildVerified = report.Errors == 0;
+                      buildVerified = verification.CanRunTests;
                     unresolvedVerification = !buildVerified;
                     if (unresolvedVerification)
                     {
@@ -312,7 +335,9 @@ internal sealed class AgentHarness
                         _view.ActiveTurn?.Messages.Add(ChatStateLimits.CopyMessage(buildNote));
                         repairReminder = BuildDiagnostics.RepairReminder;
                         repairReminders = 0;
-                    }
+                  }
+                  else
+                      _view.AddToolNote("build", "Build · not verified: " + verification.Problem, false, null, null, null);
                 }
             }
 
@@ -395,6 +420,13 @@ internal sealed class AgentHarness
     private async Task RunToolAsync(ToolCall call, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
+        var settings = _services.Settings;
+        var refusal = ToolExecutionPolicy.Refusal(call.Name, settings.EnableToolCalling, settings.EnableFileEditing, settings.EnableTerminalTools);
+        if (refusal != null)
+        {
+            Append(call, new ToolResult { Ok = false, Summary = call.Name + " · disabled", Content = refusal }, EditTools.Revisions);
+            return;
+        }
         _view.Phase = "Running " + call.Name;
         // The revision count says whether this call produced an edit, which is what puts the diff and the
         // undo on this row rather than on the previous one.
@@ -406,7 +438,21 @@ internal sealed class AgentHarness
         // Skill tools are resolved first. They were offered only when this turn prepared a skill plan, and a call
         // for them when it did not is refused here rather than falling through to ContextTools' "unknown tool".
         ToolResult result;
-        if (SkillTools.Handles(call.Name))
+        if (call.Name == AgentPlanTool.Name)
+        {
+            if (_view.ActiveTurn == null)
+                result = new ToolResult { Ok = false, Summary = "Plan · no active turn", Content = "No active turn owns this plan." };
+            else if (!AgentPlan.TryRead(call.Arguments, out var plan, out var error))
+                result = new ToolResult { Ok = false, Summary = "Plan · invalid arguments", Content = error };
+            else
+            {
+                _view.ActiveTurn.AgentPlan = plan;
+                _view.SaveSession();
+                _view.RefreshAgentPlan();
+                result = new ToolResult { Ok = true, Summary = "Plan · updated", Content = "Plan displayed and saved. Status is model-reported only; tool approvals and verification remain separate." };
+            }
+        }
+        else if (SkillTools.Handles(call.Name))
         {
             var skillResult = _skillPlan.OffersTools
                 ? SkillTools.Execute(_skillPlan.Snapshot, call.Name, call.Arguments, token)
@@ -425,7 +471,7 @@ internal sealed class AgentHarness
                 ? _selection.Allows(call.Name)
                     ? await RunMcpToolAsync(call, mcpTool, token).ConfigureAwait(true)
                     : RefuseUnselected(mcpTool)
-                : await ContextTools.ExecuteAsync(LiteLlmPackage.Instance, call.Name, call.Arguments, token).ConfigureAwait(true);
+                : await ContextTools.ExecuteAsync(LiteLlmPackage.Instance, call.Name, call.Arguments, token, _workspace).ConfigureAwait(true);
         }
         Append(call, result, revisions);
     }
@@ -544,7 +590,7 @@ internal sealed class AgentHarness
         for (var index = start; index < end; index++)
         {
             _view.Phase = "Running " + calls[index].Name;
-            running.Add(ContextTools.ExecuteAsync(LiteLlmPackage.Instance, calls[index].Name, calls[index].Arguments, token));
+            running.Add(ContextTools.ExecuteAsync(LiteLlmPackage.Instance, calls[index].Name, calls[index].Arguments, token, _workspace));
         }
         var results = await Task.WhenAll(running).ConfigureAwait(true);
         for (var index = 0; index < results.Length; index++) Append(calls[start + index], results[index], revisions);
@@ -559,7 +605,7 @@ internal sealed class AgentHarness
         _view.ActiveTurn?.Messages.Add(ChatStateLimits.CopyMessage(toolMessage));
         if (EditTools.Revisions <= revisions)
         {
-            _view.AddToolNote(call.Name, result.Summary, result.Ok, null, null, null);
+            _view.AddToolNote(call.Name, result.Summary, result.Ok, null, result.Detail, null);
             return;
         }
 
@@ -598,7 +644,11 @@ internal sealed class AgentHarness
         {
             _view.Phase = "Summarizing the conversation";
             var utility = UtilityModel(model);
-            var answer = await _services.CompleteInternalAsync(utility, request, ContextSummary.UtilitySettings(_services.Settings), token).ConfigureAwait(true);
+            var utilitySettings = ContextSummary.UtilitySettings(_services.Settings);
+            utilitySettings.FallbackContextTokens = _services.Settings.FallbackContextTokens;
+            utilitySettings.ModelContextOverrides = _services.Settings.ModelContextOverrides;
+            RequestBudget.EnsureFits(request, null, ModelRequestBudget.Limit(utility, utilitySettings));
+            var answer = await _services.CompleteInternalAsync(utility, request, utilitySettings, token).ConfigureAwait(true);
             _usage.Add(_services.LastUsage);   // the summary is a call the turn made, so it is part of what it cost
             var text = ChatStateLimits.Clip(answer.Content.Trim(), ContextSummary.MaxSummaryChars);
             // A reasoning model can spend the whole small budget thinking and answer with nothing. Replacing the
@@ -610,9 +660,9 @@ internal sealed class AgentHarness
                 return covered > 0 ? ContextSummary.Merge(messages, covered, previous!) : messages;
             }
 
-            var report = ContextSummary.Report(through, text);
+            var report = ContextSummary.Report(through, text, ContextSummary.Describe(messages, through));
             _view.ActiveTurn?.Summaries.Add(report);
-            _view.AddToolNote("", report.Summary, true, null, report.Detail, null);
+            _view.AddContextSummaryNote(report);
             _services.Log("Context summarized with " + utility.Id + ": " + through + " messages, " + text.Length + " characters");
             _view.SaveSession();
             return ContextSummary.Merge(messages, through, text);

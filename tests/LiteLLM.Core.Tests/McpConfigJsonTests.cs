@@ -6,6 +6,55 @@ using Xunit;
 namespace LiteLLM.Core.Tests;
 public sealed class McpConfigJsonTests
 {
+    [Theory]
+    [InlineData("map")]
+    [InlineData("claude")]
+    [InlineData("opencode")]
+    [InlineData("nested")]
+    public void Import_LocalExeArgvAcrossSupportedContainers(string container)
+    {
+        const string entry = @"{""codebase-memory-mcp"":{""command"":[""C:/Users/Hatami.Esmaeil/AppData/Local/Programs/codebase-memory-mcp/codebase-memory-mcp.exe"",""--label"",""a b""],""type"":""local""}}";
+        var json = container == "claude" ? "{\"mcpServers\":" + entry + "}" :
+            container == "opencode" ? "{\"mcp\":" + entry + "}" :
+            container == "nested" ? "{\"mcp\":{\"servers\":" + entry + "}}" : entry;
+        var result = McpConfigJson.Import(json);
+        Assert.Empty(result.Warnings);
+        var server = Assert.Single(result.Servers);
+        Assert.Equal("codebase-memory-mcp", server.Name);
+        Assert.Equal(McpTransportKind.Stdio, server.Kind);
+        Assert.EndsWith("codebase-memory-mcp.exe", server.Command);
+        Assert.Equal(new[] { "--label", "a b" }, server.Args);
+        Assert.Empty(server.Url);
+        Assert.Null(server.ValidationError());
+        var roundTrip = Assert.Single(McpConfigJson.Import(McpConfigJson.Export(result.Servers)).Servers);
+        Assert.Equal(server.Command, roundTrip.Command);
+        Assert.Equal(server.Args, roundTrip.Args);
+    }
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("[42]")]
+    [InlineData("[\"server.exe\",42]")]
+    [InlineData("[\"\",\"arg\"]")]
+    [InlineData("{}")]
+    public void Import_InvalidCommandArrayFailsClosed(string command)
+    {
+        var result = McpConfigJson.Import("{\"mcpServers\":{\"bad\":{\"type\":\"local\",\"command\":" + command + "}}}");
+        Assert.Empty(result.Servers);
+        Assert.NotEmpty(result.Warnings);
+    }
+
+    [Fact]
+    public void Import_CombinesArgvAndArgsWithoutShellParsing()
+    {
+        var result = McpConfigJson.Import(@"{""name"":""local"",""type"":""local"",""command"":[""C:/Program Files/server.exe"",""a & b""],""args"":[""last""],""environment"":{""ROOT"":""C:/work""}} ");
+        Assert.Empty(result.Warnings);
+        var server = Assert.Single(result.Servers);
+        Assert.Equal("C:/Program Files/server.exe", server.Command);
+        Assert.Equal(new[] { "a & b", "last" }, server.Args);
+        Assert.Equal("C:/work", server.Environment["ROOT"]);
+    }
+
     [Fact]
     public void Import_ReadsStdioAndHttpServers()
     {

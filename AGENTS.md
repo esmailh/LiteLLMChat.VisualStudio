@@ -111,6 +111,33 @@ test seam, and the tests drive them with fakes.
   tools on the LiteLLM backend, with a **Files & Folders…** row that keeps the file picker, and
   keeps the old file-picker meaning with no tools and on the Claude backend.
 
+## Projects beyond the solution
+
+`Workspace` (`src/LiteLLM.Core/Workspace.cs`) is the one place that decides which folders a
+conversation's tools may read and change, and how a path names one of them.
+
+- **The solution is root zero**, and every rule that existed before this does still: an unprefixed
+  relative path is the solution's, and a solution on its own produces exactly the labels and
+  prompt text it did when there was only one root.
+- **An added project is addressed by its folder name**: `OtherApp/src/Foo.cs` going out and coming
+  back. The solution wins a path it already has, so a folder of its own that shares the name stays
+  reachable and a path written before the project was added keeps pointing at the file it meant.
+  Two checkouts with the same folder name are numbered (`App (2)`) rather than shadowed.
+- **The list belongs to the conversation** (`ChatSessionState.ExtraRoots`), not to the settings: a
+  new chat must not inherit access to a folder added for another one. It is bounded
+  (`Workspace.MaxExtraRoots`), persisted normalized, and refused when it would add nothing —
+  `Workspace.WhyNotAdd` says why, in the user's own terms.
+- **Everything that resolves a path goes through it**: `ContextTools`, `EditTools` (which records
+  the owning root on each edit so undo re-checks the right folder), the file picker, the `@` list
+  and `open_file`. `PathGuard` still does the confinement and the reparse-point check, per root.
+  The turn's own `Workspace` is what a tool call is answered against — not whatever conversation
+  happens to be selected when the call runs.
+- **Commands and the build stay on the solution**, and both the prompt and the row say so: a
+  working directory is one folder, and `SolutionBuild`/`SolutionTests` cover the open solution. To
+  verify an added project the model runs its own build command.
+- **The Claude backend is handed `--add-dir`** for each added project (`ClaudeCodeArguments.Build`)
+  and a sentence naming them in the prompt; the CLI's own tools do the reading there.
+
 ## Style
 
 - One concept per file.

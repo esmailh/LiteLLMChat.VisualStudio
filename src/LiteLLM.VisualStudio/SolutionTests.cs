@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using EnvDTE;
@@ -43,9 +44,12 @@ internal static class SolutionTests
         catch (OperationCanceledException) { throw; }
         catch (Exception) { return (null, "the solution's projects could not be read"); }
 
+        var scope = "Full discovered test suite";
         var (assemblies, testProjects) = await Task.Run(() => Assemblies(projects), token).ConfigureAwait(true);
         if (testProjects == 0) return (null, "");   // no test project in this solution
         if (assemblies.Count == 0) return (null, "no built test assembly was found — build the solution first");
+        if (assemblies.Count < testProjects)
+            scope += " · PARTIAL: " + assemblies.Count + " of " + testProjects + " discovered test projects have runnable assemblies within the " + TestProject.MaxAssemblies + "-assembly cap";
 
         // One invocation for every assembly, so the runner writes one summary rather than one per project: the
         // report the turn keeps is a single check, and merging several would be this class inventing a total.
@@ -63,6 +67,8 @@ internal static class SolutionTests
 
         var report = TestDiagnostics.Summarize(result.StandardOutput);
         if (report == null) return (null, Reason(result));
+        report.Summary = scope + " · " + report.Summary;
+        report.Detail = scope + "\n" + string.Join("\n", assemblies) + "\n\n" + report.Detail;
         // Counts without their failure text would leave the model knowing a test failed and not which or why,
         // so the two travel together; an empty detail means the runner reported failures it never described.
         return (report, "");

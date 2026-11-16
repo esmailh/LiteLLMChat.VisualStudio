@@ -130,7 +130,7 @@ public partial class McpDashboardControl : UserControl
         {
             DetailTitle.Text = "Select a server";
             DetailStatus.Text = (Services.Settings.McpServers?.Count ?? 0) == 0
-                ? "No server is configured yet. Add one, or import a Claude or Cursor mcpServers file."
+                ? "No server is configured yet. Add a local EXE (stdio) or HTTP server, or import a Claude, Cursor or OpenCode MCP configuration."
                 : "Nothing is selected.";
             DetailNote.Text = "";
             DetailActions.Visibility = Visibility.Collapsed;

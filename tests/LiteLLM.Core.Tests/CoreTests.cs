@@ -252,6 +252,15 @@ public sealed class CoreTests
         Assert.DoesNotContain("--resume", ClaudeCodeArguments.Build("", "", ""));
     }
 
+    [Fact] public void ClaudeArguments_AddEachProjectAsItsOwnAddDir()
+    {
+        var args = ClaudeCodeArguments.Build("", "", "", null, null, false, new[] { @"C:\work\App", @"C:\work\Other App" });
+        Assert.Contains("--add-dir C:\\work\\App", args);
+        Assert.Contains("--add-dir \"C:\\work\\Other App\"", args);
+        // A conversation that added nothing sends exactly what it sent before the flag existed.
+        Assert.DoesNotContain("--add-dir", ClaudeCodeArguments.Build("", "", ""));
+    }
+
     [Theory]
     [InlineData("", "\"\"")]
     [InlineData("plain", "plain")]
