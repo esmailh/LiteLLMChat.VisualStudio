@@ -151,6 +151,25 @@ conversation's tools may read and change, and how a path names one of them.
 - **The Claude backend is handed `--add-dir`** for each added project (`ClaudeCodeArguments.Build`)
   and a sentence naming them in the prompt; the CLI's own tools do the reading there.
 
+## File references in a reply
+
+A reply names a file, not a path: `StoreGroupService.cs`, not `src/StoreGrouper/Services/StoreGroupService.cs`.
+
+- **`FileReferenceResolver` (Core) is the only answer to "what file is this name?"** Joining the name to
+  the solution root alone answers "not found" for every file that sits inside a folder, and a link that
+  is drawn and then refuses to open is worse than no link. The order is exact path, then a path written
+  from part way down (on a folder boundary), then a bare name; the shortest workspace path wins two files
+  of the same name and an alphabetical tie-break keeps two runs of the same reply agreeing.
+- **The list is read once per workspace** (`ChatControl.ReferenceFiles`), keyed on every root plus
+  `EditTools.Revisions`, and it does **not** filter by `ContextTools.ScannableExtensions` — the parser
+  knows extensions the `@` list does not offer. The render-time predicate and the click both read that
+  list; a reply is redrawn for every streamed chunk, so the predicate must never touch the disk.
+- **An absolute path is never substituted.** The model named one place, and a same-named file elsewhere is
+  a different file; only a non-rooted name falls back to the name search.
+- **The key is why a click still works mid-turn.** A file a turn creates bumps the edit count, so the list
+  is rebuilt rather than the click giving up on a name it has not seen; when a solution is closed the
+  index is dropped by the same root comparison the symbol index uses.
+
 ## Style
 
 - One concept per file.

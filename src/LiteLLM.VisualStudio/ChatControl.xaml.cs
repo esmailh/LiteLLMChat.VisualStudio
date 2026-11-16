@@ -80,6 +80,12 @@ public partial class ChatControl : UserControl, IAgentView
     private SymbolIndex? _symbolIndex;
     private string? _symbolIndexRoot;
     private bool _symbolIndexBuilding;
+    /// <summary>The files this conversation can reach, by the name a reply writes for them. Built once per set of
+    /// folders and per edit, off the UI thread, because a reply is redrawn for every streamed chunk and a click
+    /// that joined a bare name to the solution root alone reported "not found" for every file inside a folder.</summary>
+    private FileReferenceResolver? _references;
+    private string? _referencesKey;
+    private bool _referencesBuilding;
 
     private sealed class FileMentionEntry
     {
@@ -110,6 +116,9 @@ public partial class ChatControl : UserControl, IAgentView
     internal ChatControl() { InitializeComponent(); VsTheme.Apply(this); Current = this; Loaded += OnLoaded; Unloaded += OnUnloaded; SizeChanged += OnSizeChanged; }
     /// <summary>Below this the whole header row of controls cannot sit beside the brand any more.</summary>
     private const double NarrowWidth = 820;
+    /// <summary>How many files the reference list holds. Past it a link still opens when the reply wrote a path
+    /// that exists; only a bare name is left to the folders that were read.</summary>
+    private const int MaxReferenceFiles = 20000;
     private double _toolsWidth;
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e) => ApplyLayout(e.NewSize.Width);
@@ -193,6 +202,9 @@ public partial class ChatControl : UserControl, IAgentView
         // The replies already on screen gain their class and method links when this finishes; until then they are
         // plain text, so nothing about the window's readiness depends on it.
         _ = EnsureSymbolIndexAsync();
+        // The same for the file names a reply carries: until the folders are read, a bare name is drawn as the
+        // parser found it, and the redraw once the list is ready is what turns it into a link that opens.
+        _ = EnsureReferencesAsync();
         ReloadPermissionMode();
         RefreshAutoContextButton();
         await WatchEditorAsync(loadVersion);
@@ -660,6 +672,7 @@ public partial class ChatControl : UserControl, IAgentView
         // Started before the first reply so the links exist by the time it is drawn; the turn itself never waits for
         // the index, and a solution opened after the window loaded is picked up here.
         _ = EnsureSymbolIndexAsync();
+        _ = EnsureReferencesAsync();
         input = await ApplySkillCommandAsync(input);
         if (input == null || _disposed) return;
         var editsBefore = EditTools.Revisions;
@@ -667,7 +680,7 @@ public partial class ChatControl : UserControl, IAgentView
         {
             await SendClaudeAsync(input);
             // The CLI edits its own files; a declaration it added or removed makes the index stale for the next reply.
-            if (EditTools.Revisions > editsBefore) _symbolIndex = null;
+            if (EditTools.Revisions > editsBefore) { _symbolIndex = null; _ = EnsureReferencesAsync(); }
             return;
         }
         if (!(ModelBox.SelectedItem is ModelInfo model)) return;
@@ -705,6 +718,9 @@ public partial class ChatControl : UserControl, IAgentView
             Services.Log(detail);
         }
         finally { if (_activeTurn != null) CaptureTurnChanges(_activeTurn.Id, editsBefore); _ticker?.Stop(); _ticker = null; if (_live != null) FinishStatus(_live); _live = null; _generation.Dispose(); _generation = null; SetBusy(false); _activeTurn = null; if (IsVisible && !_disposed) Composer.Focus(); if (EditTools.Revisions > editsBefore) _symbolIndex = null; }
+        // A turn that changed files changed what a name means, so the list is read again: the reply that names what
+        // it has just written is then a link, and the files it deleted stop being one.
+        if (EditTools.Revisions > editsBefore) _ = EnsureReferencesAsync();
     }
 
     /// <summary>What <see cref="AgentHarness"/> may ask of this window. Explicit rather than making the methods
@@ -1291,24 +1307,15 @@ public partial class ChatControl : UserControl, IAgentView
         return rendered;
     }
 
-    /// <summary>The folders this conversation may reach, as a question the renderer may ask about a name. A file
-    /// name may contain a space, so a bare name written inside a sentence is matched together with the word before
-    /// it; only the disk can say which of the two is the name. Null before the solution is known, which leaves the
-    /// links exactly as the parser alone reads them.</summary>
+    /// <summary>The folders this conversation may reach, as a question the renderer may ask about a name. The
+    /// answer comes from the list read once for this workspace, not from the disk: this is called while a reply is
+    /// being drawn, which happens again for every streamed chunk. Null until that list is ready, which leaves the
+    /// links exactly as the parser alone reads them until the redraw that follows it.</summary>
     private Func<string, bool>? ExistingFiles()
     {
-        var root = _dte == null ? null : ContextTools.SolutionRoot(_dte);
-        if (string.IsNullOrEmpty(root)) return null;
-        return OnDisk(Services.WorkspaceFor(root));
+        var resolver = _references;
+        return resolver == null ? null : resolver.Exists;
     }
-
-    private static Func<string, bool> OnDisk(Workspace workspace) => candidate =>
-    {
-        // A model wrote the name and the user clicked it: a path it never meant is not a file, and never an
-        // exception thrown out of the click.
-        try { return File.Exists(workspace.Resolve(candidate)); }
-        catch (Exception) { return false; }
-    };
 
     /// <summary>Opens through Visual Studio's editor without making the drawing of a reply wait for it. Both open
     /// operations report their own failures into the status line, so there is nothing left for the caller to do.</summary>
@@ -1611,6 +1618,7 @@ public partial class ChatControl : UserControl, IAgentView
         _ = RefreshSessionScopeAndRenderAsync();
         // This is also how a solution opened after the window was loaded gets its index built.
         _ = EnsureSymbolIndexAsync();
+        _ = EnsureReferencesAsync();
     }
 
     private async Task RefreshSessionScopeAndRenderAsync()
@@ -1789,11 +1797,16 @@ public partial class ChatControl : UserControl, IAgentView
         {
             var workspace = Services.WorkspaceFor(await SolutionRootAsync());
             if (workspace.Roots.Count == 0) { StateText.Text = "Open a solution first"; return; }
-            // The link may have been drawn before the solution was known, or before this conversation added the
-            // folder the file is in; the name is shortened the same way the renderer shortens it, so a click that
-            // reaches here follows the same rule as the link that was shown.
-            var path = workspace.Resolve(FileReferenceParser.ExistingPath(reference.Path, OnDisk(workspace)));
-            if (!File.Exists(path)) { StateText.Text = "Referenced file was not found"; return; }
+            // An absolute path names the one place the model meant, and it is never swapped for a file of the same
+            // name elsewhere; one outside every folder this conversation holds is said rather than reported as
+            // missing, because it is not the same answer.
+            if (Path.IsPathRooted(reference.Path) && workspace.Owner(reference.Path) == null)
+            { StateText.Text = "Referenced file is outside the open projects"; return; }
+            // A reply names a file, not a path — "StoreGroupService.cs" for one three folders down — so the click
+            // asks the same list the link was drawn from. Joining the name to the solution root alone is what
+            // answered "not found" for a file that is right there.
+            var path = (await ReferencesAsync(workspace))?.Find(reference.Path);
+            if (path == null) { StateText.Text = "Referenced file was not found"; return; }
 
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
             var dte = (DTE?)await LiteLlmPackage.Instance.GetServiceAsync(typeof(DTE));
@@ -1881,6 +1894,79 @@ public partial class ChatControl : UserControl, IAgentView
             }
         }
         catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { }
+        return files;
+    }
+
+    /// <summary>The file list behind every reference link, built on first use and reused while the folders and the
+    /// edit count stay the same. A file a turn creates bumps <see cref="EditTools.Revisions"/>, so a reply that names
+    /// what it has just written is a cache miss rather than a second attempt at the click.</summary>
+    private async Task EnsureReferencesAsync()
+    {
+        string? root;
+        try { root = await SolutionRootAsync(); }
+        catch (Exception ex) { Services.Log("File reference index could not start: " + ex); return; }
+        var workspace = Services.WorkspaceFor(root);
+        if (workspace.Roots.Count == 0) return;
+
+        var before = _references;
+        var built = await ReferencesAsync(workspace);
+        // A list that was already current costs nothing to have asked for, and redrawing a whole conversation for it
+        // would take the live bubble away from a turn that is still writing into it.
+        if (built == null || ReferenceEquals(built, before)) return;
+        if (IsLoaded && _generation == null) RenderSession();
+    }
+
+    /// <summary>The list for this workspace, read when it is missing or when the folders or the edit count moved on.
+    /// A name it does not know is not retried against the disk on every click: the key already covers a file this
+    /// conversation created, so a miss is a wrong name.</summary>
+    private async Task<FileReferenceResolver?> ReferencesAsync(Workspace workspace)
+    {
+        var key = ReferencesKey(workspace);
+        var known = _references;
+        if (known != null && string.Equals(key, _referencesKey, StringComparison.OrdinalIgnoreCase)) return known;
+        return await BuildReferencesAsync(workspace, key);
+    }
+
+    private static string ReferencesKey(Workspace workspace) =>
+        string.Join("|", workspace.Roots) + "#" + EditTools.Revisions;
+
+    private async Task<FileReferenceResolver?> BuildReferencesAsync(Workspace workspace, string key)
+    {
+        if (_referencesBuilding) return _references;
+        _referencesBuilding = true;
+        FileReferenceResolver? built = null;
+        try { built = await Task.Run(() => new FileReferenceResolver(workspace, ReferenceFiles(workspace))); }
+        catch (Exception ex) { Services.Log("File reference index could not be built: " + ex); }
+        finally { _referencesBuilding = false; }
+
+        if (built == null) return _references;
+        _references = built;
+        _referencesKey = key;
+        return built;
+    }
+
+    /// <summary>Every file the conversation can reach, named the way a reply names it. The parser knows more
+    /// extensions than the <c>@</c> list offers and a link may name any of them, so this does not filter by
+    /// extension; only bin, obj, .git and .vs are dropped, because a link into a generated copy opens a file the
+    /// user does not edit.</summary>
+    private static IReadOnlyList<string> ReferenceFiles(Workspace workspace)
+    {
+        var files = new List<string>();
+        foreach (var root in workspace.Roots)
+        {
+            if (!Directory.Exists(root)) continue;
+            try
+            {
+                foreach (var path in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+                {
+                    if (ContextTools.IsNoise(path)) continue;
+                    files.Add(workspace.Relative(path));
+                    if (files.Count >= MaxReferenceFiles) return files;
+                }
+            }
+            // An unreadable folder costs the names below it and not the links that were already found.
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { }
+        }
         return files;
     }
 
