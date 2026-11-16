@@ -72,6 +72,48 @@ public static class McpToolMentions
         return mentions;
     }
 
+    /// <summary>Whether the message is about MCP at all: it contains a name the grammar recognises, or the word
+    /// itself in prose. This decides only whether a turn offers the servers' tools — it never selects one, and a
+    /// message that says "MCP" gets the same offer a turn with no explicit name always had. The word is searched
+    /// outside fenced code, so a sample of an MCP configuration pasted into a message is not a request for one.
+    /// </summary>
+    public static bool SaysMcp(string? prompt)
+    {
+        if (string.IsNullOrEmpty(prompt)) return false;
+        // The tokens the grammar knows: #server.tool, mcp__server__tool and a backticked name.
+        if (Parse(prompt).Count > 0) return true;
+
+        var inFence = false;
+        foreach (var raw in prompt!.Split('\n'))
+        {
+            var line = raw.TrimEnd('\r');
+            var trimmed = line.TrimStart();
+            if (trimmed.StartsWith("```", StringComparison.Ordinal) ||
+                trimmed.StartsWith("~~~", StringComparison.Ordinal))
+            {
+                inFence = !inFence;
+                continue;
+            }
+            if (inFence) continue;
+
+            var at = 0;
+            while (at < line.Length)
+            {
+                if (!IsWordChar(line[at])) { at++; continue; }
+                var start = at;
+                while (at < line.Length && IsWordChar(line[at])) at++;
+                // Hyphens and dots end a word: "mcp-atlassian" names a server, and the three letters in it are
+                // the same request as the word on its own.
+                if (string.Compare(line, start, "mcp", 0, 3, StringComparison.OrdinalIgnoreCase) == 0 &&
+                    at - start == 3)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+
     /// <summary>The <c>#</c> token the caret sits at the end of, for the inline picker. Mirrors
     /// <see cref="FileMentions.TryGetFilter"/>: the token starts at a word boundary, has no whitespace, and the
     /// caret is inside it. A <c>#</c> followed by a space is a heading or a comment, not a picker.</summary>

@@ -57,7 +57,7 @@ public sealed class McpAvailability
         Servers = servers;
         EnabledCount = servers.Count(server => server.IsActive);
         Headline = BuildHeadline(state, servers, settings);
-        Detail = BuildDetail(state, servers, Headline);
+        Detail = BuildDetail(state, servers, Headline, settings);
         Fingerprint = BuildFingerprint(settings, solutionRoot, servers);
     }
 
@@ -143,7 +143,7 @@ public sealed class McpAvailability
     }
 
     private static string BuildDetail(McpAvailabilityState state, IReadOnlyList<McpServerAvailability> servers,
-        string headline)
+        string headline, UserSettings? settings)
     {
         var lines = new List<string> { headline };
 
@@ -152,6 +152,12 @@ public sealed class McpAvailability
         if (state != McpAvailabilityState.Off)
             foreach (var server in servers)
                 lines.Add("· " + ChatStateLimits.OneLine(server.Server.Name, 80) + " — " + server.Describe());
+
+        // Where the tools are offered is a setting the user may not know is on, and a turn that ran without them is
+        // exactly when they would look here: the transcript stays quiet about it on purpose.
+        if (state == McpAvailabilityState.Enabled && settings != null && settings.McpToolsOnlyWhenMentioned)
+            lines.Add("Their tools are offered to a message that names one with # or mentions MCP. To offer them on " +
+                      "every turn, turn off \"Offer tools only when the message asks\" in Tools ▸ Options ▸ LiteLLM ▸ MCP.");
 
         lines.Add("Click to open Dashboard ▸ MCP.");
         return string.Join("\n", lines);
@@ -163,6 +169,7 @@ public sealed class McpAvailability
         var text = new StringBuilder();
         text.Append(settings == null ? '0' : settings.EnableMcp ? '1' : '0');
         text.Append(settings == null ? '0' : settings.EnableToolCalling ? '1' : '0');
+        text.Append(settings != null && settings.McpToolsOnlyWhenMentioned ? '1' : '0');
         text.Append('\u0002').Append(solutionRoot ?? "");
         foreach (var server in servers)
             text.Append('\n')

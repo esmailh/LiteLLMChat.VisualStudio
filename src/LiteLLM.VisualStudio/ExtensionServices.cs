@@ -110,6 +110,7 @@ internal sealed class ExtensionServices : IDisposable
         Settings.McpAllowSampling = o.McpAllowSampling; Settings.McpAllowElicitation = o.McpAllowElicitation;
         Settings.McpAllowRoots = o.McpAllowRoots; Settings.McpConnectTimeoutSeconds = o.McpConnectTimeoutSeconds;
         Settings.McpToolTimeoutSeconds = o.McpToolTimeoutSeconds; Settings.McpMaxToolsPerTurn = o.McpMaxToolsPerTurn;
+        Settings.McpToolsOnlyWhenMentioned = o.McpToolsOnlyWhenMentioned;
         Settings.McpLogLevel = o.McpLogLevel; Settings.McpStrictClaudeConfig = o.McpStrictClaudeConfig;
     }
     internal void Save() { ApplyOptions(); _store.Save(Settings); SettingsChanged?.Invoke(this, EventArgs.Empty); }

@@ -94,6 +94,11 @@ public sealed class UserSettings
     /// turn takes before the model starts answering. A lower cap keeps that prompt small; a tool named with
     /// # beyond the cap is not offered, so the turn must say how many were left out.</summary>
     public int McpMaxToolsPerTurn { get; set; } = 16;
+    /// <summary>Offer a turn only the MCP tools its own message asked for. On, a message that says nothing about
+    /// MCP is sent with no MCP tool at all — no schema, no description, and no round trip to re-read a list that
+    /// has not changed — and the turn says so. Off is the older behaviour: every connected tool rides on every
+    /// request, and the model may call one the user never mentioned.</summary>
+    public bool McpToolsOnlyWhenMentioned { get; set; } = true;
     public string McpLogLevel { get; set; } = "info";
     /// <summary>Only the generated --mcp-config is given to the Claude CLI. Off also loads the user's own Claude
     /// MCP configuration, which can add tools the Dashboard does not show.</summary>

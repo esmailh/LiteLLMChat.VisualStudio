@@ -105,6 +105,19 @@ test seam, and the tests drive them with fakes.
   before the transport and still answers it with a `tool` message. A name that resolves to nothing
   stays a row and a sentence in the prompt but does not narrow — a typo must not strip the turn of
   every MCP tool. The selection is read once, from the active turn's first user message.
+  With `McpToolsOnlyWhenMentioned` on (the default), a message that says nothing about MCP is offered
+  no MCP tool at all — an empty definition list, not the snapshot; naming a tool, or the word MCP in
+  prose, takes the path above. That is what keeps an ordinary turn from carrying every server's
+  schemas and paying for them before the model is asked. The prompt is told, and `McpAvailability` says
+  it in the chip's tooltip rather than in a row: a row per turn for a state is the sentence
+  `McpAvailability` was introduced to stop repeating.
+- **A list is read once per session.** `PrepareConnectionsAsync` reads `tools/list`,
+  `resources/list`, `resources/templates/list` and `prompts/list` only for a list this connection has
+  not read; the flags live on `Connection`, so a new config, a reconnect or a `list_changed`
+  notification is what brings a list back. Re-reading them on every turn was the second half of the
+  same slowness: each is a round trip, four per server, and a remote server answers them over the
+  network before the request is even built. A read that failed is not marked, so the next turn tries
+  again; the transcript says nothing about a list that was simply reused.
 - **UI additions** are `McpDashboardControl` (the Dashboard's MCP tab), `McpServerDialog`,
   `McpBrowserDialog` and `McpPromptDialog`. Composer `@` lists connected resources; `/` lists MCP
   prompts on the LiteLLM backend and the CLI's own commands on the Claude one; `#` lists connected

@@ -239,7 +239,13 @@ public sealed class McpClient : IDisposable
     }
 
     /// <summary>What both a turn and a window load do: drop sessions that are no longer active, then connect the
-    /// active ones together and read their lists. Kept in one place so the two callers cannot drift.</summary>
+    /// active ones together and read their lists. Kept in one place so the two callers cannot drift.
+    ///
+    /// A session that already read its lists is not asked again. Each list is at least one round trip — four for a
+    /// server that has resources and prompts — and a turn that changes none of them must not pay for them: this is
+    /// what used to make every turn wait on the slowest server before the model was even asked. A changed list
+    /// arrives as <c>notifications/*/list_changed</c> and is re-read there, a reconnect starts a new session and
+    /// therefore a new read, and the Dashboard's refresh drops the session.</summary>
     private async Task<List<Connection>> PrepareConnectionsAsync(UserSettings settings, string? solutionRoot,
         List<McpTurnRow> rows, CancellationToken cancellationToken)
     {
@@ -254,8 +260,13 @@ public sealed class McpClient : IDisposable
 
         foreach (var connection in connections)
         {
-            var row = await LoadToolsAsync(connection, cancellationToken).ConfigureAwait(false);
-            if (row != null) rows.Add(row);
+            if (!connection.ToolsRead)
+            {
+                var row = await LoadToolsAsync(connection, cancellationToken).ConfigureAwait(false);
+                if (row != null) rows.Add(row);
+            }
+            // Skipped per list, not per server: a server whose prompt list failed is asked for that list again
+            // without paying for the tool list it already answered.
             await LoadListsAsync(connection, cancellationToken).ConfigureAwait(false);
         }
         return connections;
@@ -708,13 +719,23 @@ public sealed class McpClient : IDisposable
 
     private async Task<McpTurnRow?> LoadToolsAsync(Connection connection, CancellationToken cancellationToken)
     {
-        if (!Supports(connection.Session, "tools")) return null;
+        // A server that says it has no tool capability is not asked, and the answer is remembered: within one
+        // session it cannot change without a list_changed notification, which is the only thing that re-reads it.
+        if (!Supports(connection.Session, "tools"))
+        {
+            lock (_gate) connection.ToolsRead = true;
+            return null;
+        }
         try
         {
             var page = await connection.Session
                 .ListAllAsync("tools/list", null, "tools", cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
-            lock (_gate) connection.Tools = page.Items.OfType<JObject>().ToList();
+            lock (_gate)
+            {
+                connection.Tools = page.Items.OfType<JObject>().ToList();
+                connection.ToolsRead = true;
+            }
             return page.Truncated
                 ? new McpTurnRow
                 {
@@ -725,6 +746,7 @@ public sealed class McpClient : IDisposable
         }
         catch (McpException ex) when (ex.Code == McpErrorCodes.MethodNotFound)
         {
+            lock (_gate) connection.ToolsRead = true;
             return null;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -741,42 +763,70 @@ public sealed class McpClient : IDisposable
         }
     }
 
+    /// <summary>Reads whichever of the two list groups this session has not read yet. Each group is skipped once it
+    /// has been read, so a turn pays for these round trips once per session rather than once per turn.</summary>
     private async Task LoadListsAsync(Connection connection, CancellationToken cancellationToken)
     {
-        if (Supports(connection.Session, "resources"))
+        if (!connection.ResourcesRead)
         {
-            try
+            if (!Supports(connection.Session, "resources"))
             {
-                var resources = await McpResources.ListAsync(connection.Session, cancellationToken)
-                    .ConfigureAwait(false);
-                var templates = await McpResources.ListTemplatesAsync(connection.Session, cancellationToken)
-                    .ConfigureAwait(false);
-                lock (_gate)
-                {
-                    connection.ResourceItems = resources.Items.OfType<JObject>().ToList();
-                    connection.TemplateItems = templates.Items.OfType<JObject>().ToList();
-                }
+                lock (_gate) connection.ResourcesRead = true;
             }
-            catch (McpException ex) when (ex.Code == McpErrorCodes.MethodNotFound) { }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-            catch (Exception ex)
+            else
             {
-                connection.Log.Debug("The resource list could not be read: " + ex.Message);
+                try
+                {
+                    var resources = await McpResources.ListAsync(connection.Session, cancellationToken)
+                        .ConfigureAwait(false);
+                    var templates = await McpResources.ListTemplatesAsync(connection.Session, cancellationToken)
+                        .ConfigureAwait(false);
+                    lock (_gate)
+                    {
+                        connection.ResourceItems = resources.Items.OfType<JObject>().ToList();
+                        connection.TemplateItems = templates.Items.OfType<JObject>().ToList();
+                        connection.ResourcesRead = true;
+                    }
+                }
+                catch (McpException ex) when (ex.Code == McpErrorCodes.MethodNotFound)
+                {
+                    lock (_gate) connection.ResourcesRead = true;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+                catch (Exception ex)
+                {
+                    // Not marked read: a list that failed transiently is worth asking for on the next turn.
+                    connection.Log.Debug("The resource list could not be read: " + ex.Message);
+                }
             }
         }
 
-        if (Supports(connection.Session, "prompts"))
+        if (!connection.PromptsRead)
         {
-            try
+            if (!Supports(connection.Session, "prompts"))
             {
-                var prompts = await McpPrompts.ListAsync(connection.Session, cancellationToken).ConfigureAwait(false);
-                lock (_gate) connection.PromptItems = prompts.Items.OfType<JObject>().ToList();
+                lock (_gate) connection.PromptsRead = true;
             }
-            catch (McpException ex) when (ex.Code == McpErrorCodes.MethodNotFound) { }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-            catch (Exception ex)
+            else
             {
-                connection.Log.Debug("The prompt list could not be read: " + ex.Message);
+                try
+                {
+                    var prompts = await McpPrompts.ListAsync(connection.Session, cancellationToken).ConfigureAwait(false);
+                    lock (_gate)
+                    {
+                        connection.PromptItems = prompts.Items.OfType<JObject>().ToList();
+                        connection.PromptsRead = true;
+                    }
+                }
+                catch (McpException ex) when (ex.Code == McpErrorCodes.MethodNotFound)
+                {
+                    lock (_gate) connection.PromptsRead = true;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+                catch (Exception ex)
+                {
+                    connection.Log.Debug("The prompt list could not be read: " + ex.Message);
+                }
             }
         }
     }
@@ -924,6 +974,7 @@ public sealed class McpClient : IDisposable
                 lock (_gate)
                 {
                     connection.Tools = page.Items.OfType<JObject>().ToList();
+                    connection.ToolsRead = true;
                     count = connection.Tools.Count;
                 }
                 connection.Log.Info("The server reported a changed tool list; " + count + " tools are now offered.");
@@ -946,6 +997,13 @@ public sealed class McpClient : IDisposable
             try
             {
                 if (connection.Session.IsClosed) return;
+                // The reads are skipped once they have been done, so a changed list is asked for by clearing them
+                // first. A notification names one list; the read is cheap and the other one may have changed too.
+                lock (_gate)
+                {
+                    connection.ResourcesRead = false;
+                    connection.PromptsRead = false;
+                }
                 await LoadListsAsync(connection, CancellationToken.None).ConfigureAwait(false);
                 RebuildLists(Connections());
             }
@@ -1155,5 +1213,12 @@ public sealed class McpClient : IDisposable
         public List<JObject> ResourceItems { get; set; } = new List<JObject>();
         public List<JObject> TemplateItems { get; set; } = new List<JObject>();
         public List<JObject> PromptItems { get; set; } = new List<JObject>();
+        /// <summary>Whether this session has already been asked for its lists. They are read once per session —
+        /// a turn that changes none of them must not spend a round trip on each before the model is asked
+        /// anything — and a <c>list_changed</c> notification, a reconnect or a new session is what brings them
+        /// back. A read that failed is not marked here, so the next turn tries again.</summary>
+        public bool ToolsRead { get; set; }
+        public bool ResourcesRead { get; set; }
+        public bool PromptsRead { get; set; }
     }
 }

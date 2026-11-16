@@ -256,6 +256,86 @@ public sealed class McpToolSelectionTests
         Assert.Empty(selection.Rows);
     }
 
+    /// <summary>The cost this avoids is the point: a turn whose message says nothing about MCP is sent no MCP tool
+    /// at all. It still says so, to the user in a row and to the model in the prompt — a model that could have used
+    /// a tool and was never shown it must not look like a model that had none.</summary>
+    [Fact]
+    public void Resolve_OffersNothingWhenTheMessageSaysNothingAboutMcp()
+    {
+        var snapshot = Snapshot();
+
+        var selection = McpToolSelection.Resolve(snapshot, "Summarize the readme.", offerWhenUnmentioned: false);
+
+        Assert.True(selection.Suppressed);
+        Assert.False(selection.Narrows);
+        Assert.Empty(selection.Definitions);
+        Assert.Empty(selection.PinnedDefinitions!);
+        Assert.All(snapshot.Tools, tool => Assert.False(selection.Allows(tool.ExposedName)));
+
+        // The state belongs to the composer's MCP chip, not to a row that would repeat on every message.
+        Assert.Empty(selection.Rows);
+        Assert.Contains("did not ask for an MCP tool", selection.Hint!, System.StringComparison.Ordinal);
+    }
+
+    /// <summary>With no connected tool there is nothing to suppress, and a sentence about it would be a second
+    /// answer to the chip that already says no server is enabled.</summary>
+    [Fact]
+    public void Resolve_OffersNothingWhenThereIsNothingToOffer()
+    {
+        var selection = McpToolSelection.Resolve(McpToolSnapshot.Empty, "Summarize the readme.",
+            offerWhenUnmentioned: false);
+
+        Assert.False(selection.Suppressed);
+        Assert.Null(selection.Hint);
+        Assert.Empty(selection.Rows);
+    }
+
+    [Fact]
+    public void Resolve_OffersTheNamedToolWhenTheMessageNamesOne()
+    {
+        var selection = McpToolSelection.Resolve(Snapshot(), "Use #Files.search.", offerWhenUnmentioned: false);
+
+        Assert.True(selection.Narrows);
+        Assert.False(selection.Suppressed);
+        Assert.Single(selection.PinnedDefinitions!);
+    }
+
+    /// <summary>A message that says "MCP" in prose is asking for MCP; the setting must not turn that into a turn
+    /// with no tool at all.</summary>
+    [Theory]
+    [InlineData("از mcp استفاده کن و تیکت‌ها را ببین")]
+    [InlineData("Check the MCP server for this order.")]
+    [InlineData("Use mcp-atlassian to find the ticket.")]
+    public void Resolve_OffersEverythingWhenTheMessageMentionsMcpInProse(string message)
+    {
+        var selection = McpToolSelection.Resolve(Snapshot(), message, offerWhenUnmentioned: false);
+
+        Assert.False(selection.Suppressed);
+        Assert.False(selection.Narrows);
+        Assert.Null(selection.PinnedDefinitions);
+    }
+
+    /// <summary>A typo must not strip the turn: a name that resolves to nothing keeps the old offer, which is the
+    /// whole list, and the row that says the name matched nothing.</summary>
+    [Fact]
+    public void Resolve_ATypoStillOffersEveryTool()
+    {
+        var selection = McpToolSelection.Resolve(Snapshot(), "#Files.serch", offerWhenUnmentioned: false);
+
+        Assert.False(selection.Suppressed);
+        Assert.False(selection.Narrows);
+        Assert.Null(selection.PinnedDefinitions);
+    }
+
+    [Fact]
+    public void Resolve_OffersEveryToolWhenTheSettingAsksForThat()
+    {
+        var selection = McpToolSelection.Resolve(Snapshot(), "Summarize the readme.");
+
+        Assert.False(selection.Suppressed);
+        Assert.Null(selection.PinnedDefinitions);
+    }
+
     private static McpToolSnapshot Snapshot() =>
         Snapshot(("Orders", new[] { "search_customers", "search" }), ("Files", new[] { "search", "read_file" }));
 

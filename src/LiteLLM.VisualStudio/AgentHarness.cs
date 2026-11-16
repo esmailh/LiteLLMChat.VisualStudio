@@ -96,9 +96,12 @@ internal sealed class AgentHarness
 
             // What the message itself asked for is resolved against the tools preparation just offered. Doing it
             // here rather than per round means a tools/list_changed mid-turn cannot widen a narrowed turn: the
-            // user chose these tools for this message.
+            // user chose these tools for this message. With the "only when the message asks" setting on, a
+            // message that says nothing about MCP is offered none of them — that is what keeps an ordinary turn
+            // from carrying every server's schemas and waiting on their lists.
             _selection = McpToolSelection.Resolve(_services.Mcp.Snapshot, CurrentUserMessage(),
-                _services.Settings.McpMaxToolsPerTurn, explained);
+                _services.Settings.McpMaxToolsPerTurn, explained,
+                offerWhenUnmentioned: !_services.Settings.McpToolsOnlyWhenMentioned);
             foreach (var row in _selection.Rows)
                 _view.AddToolNote("mcp", row.Summary, row.Ok, null, row.Detail, null);
         }
@@ -166,7 +169,9 @@ internal sealed class AgentHarness
                 ? _view.ActiveTurn?.Context
                 : AgentPrompt.InlineFiles(_view.ActiveTurn?.Context, _view.ReadAttachedText);
             var errors = BuildDiagnostics.ToStandingNote(await SolutionBuild.ReadErrorListAsync().ConfigureAwait(true));
-            var mcpTools = _selection.Narrows ? _selection.Definitions : null;
+            // Null offers the live snapshot; a message that narrowed the turn, or said nothing about MCP at all,
+            // pins exactly what it may call instead.
+            var mcpTools = _selection.PinnedDefinitions;
             var tools = _services.ToolsFor(mcpTools, _skillPlan.OffersTools);
             var requestLimit = ModelRequestBudget.Limit(_model, _services.Settings);
             var fixedRequest = AgentPrompt.Build(new List<ChatMessage>(), context, _view.Mode, _services.Settings.EnableToolCalling, _services.Settings.EnableFileEditing, _services.Settings.EnableTerminalTools, repoInstructions, errors, mcp.Instructions, _mcpHint, _skillPlan.Instructions, workspaceNotes);
@@ -210,8 +215,9 @@ internal sealed class AgentHarness
 
             var bubble = _view.AddAssistantBubble(round == 1 ? "Thinking" : "Reading the tool results");
             _view.Streamed = 0; _view.Phase = round == 1 ? "Thinking" : "Reading the tool results";
-            // A narrowed turn sends exactly the tools the message selected; otherwise the live snapshot, so a list
-            // change between rounds still reaches the model on the next one.
+            // A narrowed turn sends exactly the tools the message selected, a turn whose message never mentioned
+            // MCP sends none of them, and otherwise the live snapshot is used, so a list change between rounds
+            // still reaches the model on the next one.
 
             if (_services.Settings.EnableStreaming)
                 try
@@ -481,6 +487,15 @@ internal sealed class AgentHarness
     private ToolResult RefuseUnselected(McpToolInfo tool)
     {
         var label = tool.Server.Name + " · " + tool.Name;
+        if (_selection.Suppressed)
+            return new ToolResult
+            {
+                Content = "The MCP tool '" + label + "' was not offered for this turn, so it was not run: the " +
+                          "message did not mention MCP, and none of the servers' tools are offered to a turn that " +
+                          "does not. Ask the user to name the tool with # if they want it. Do not claim it ran.",
+                Summary = label + " · not offered this turn",
+                Ok = false
+            };
         var selected = _selection.Selected.Take(8)
             .Select(chosen => chosen.Server.Name + " · " + chosen.Name)
             .ToList();

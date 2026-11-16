@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -1283,12 +1283,32 @@ public partial class ChatControl : UserControl, IAgentView
     {
         var openFile = new Action<FileReference>(reference => OpenLater(() => OpenReferenceAsync(reference)));
         var index = _symbolIndex;
+        var exists = ExistingFiles();
         var rendered = index == null
-            ? MarkdownRenderer.Render(text, openFile)
-            : MarkdownRenderer.Render(text, openFile, index.Find, location => OpenLater(() => OpenSymbolAsync(location)));
+            ? MarkdownRenderer.Render(text, openFile, null, null, exists)
+            : MarkdownRenderer.Render(text, openFile, index.Find, location => OpenLater(() => OpenSymbolAsync(location)), exists);
         rendered.FlowDirection = TextDirection.For(text);
         return rendered;
     }
+
+    /// <summary>The folders this conversation may reach, as a question the renderer may ask about a name. A file
+    /// name may contain a space, so a bare name written inside a sentence is matched together with the word before
+    /// it; only the disk can say which of the two is the name. Null before the solution is known, which leaves the
+    /// links exactly as the parser alone reads them.</summary>
+    private Func<string, bool>? ExistingFiles()
+    {
+        var root = _dte == null ? null : ContextTools.SolutionRoot(_dte);
+        if (string.IsNullOrEmpty(root)) return null;
+        return OnDisk(Services.WorkspaceFor(root));
+    }
+
+    private static Func<string, bool> OnDisk(Workspace workspace) => candidate =>
+    {
+        // A model wrote the name and the user clicked it: a path it never meant is not a file, and never an
+        // exception thrown out of the click.
+        try { return File.Exists(workspace.Resolve(candidate)); }
+        catch (Exception) { return false; }
+    };
 
     /// <summary>Opens through Visual Studio's editor without making the drawing of a reply wait for it. Both open
     /// operations report their own failures into the status line, so there is nothing left for the caller to do.</summary>
@@ -1769,7 +1789,10 @@ public partial class ChatControl : UserControl, IAgentView
         {
             var workspace = Services.WorkspaceFor(await SolutionRootAsync());
             if (workspace.Roots.Count == 0) { StateText.Text = "Open a solution first"; return; }
-            var path = workspace.Resolve(reference.Path);
+            // The link may have been drawn before the solution was known, or before this conversation added the
+            // folder the file is in; the name is shortened the same way the renderer shortens it, so a click that
+            // reaches here follows the same rule as the link that was shown.
+            var path = workspace.Resolve(FileReferenceParser.ExistingPath(reference.Path, OnDisk(workspace)));
             if (!File.Exists(path)) { StateText.Text = "Referenced file was not found"; return; }
 
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();

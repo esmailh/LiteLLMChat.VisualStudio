@@ -32,9 +32,11 @@ Bring an OpenAI-compatible AI assistant — or your Claude Code CLI — into Vis
 - **Readable compaction**: a summary row opens to show what the briefing replaced, the text the model was given instead, and that the chat keeps every message.
 - **Agent Skills** with Dashboard management, manual selection and optional model-directed loading on LiteLLM.
 
-This guide describes **1.8.6**. The installer is **LiteLLM.VisualStudio.vsix**, with versioning inside the project/manifest. Features are not a claim of live validation against every provider, OAuth host or IDE project system.
+This guide describes **1.8.7**. The installer is **LiteLLM.VisualStudio.vsix**, with versioning inside the project/manifest. Features are not a claim of live validation against every provider, OAuth host or IDE project system.
 
-## Current release — 1.8.6 (2026-11-15)
+## Current release — 1.8.7 (2026-11-16)
+
+Version **1.8.7** makes a turn start answering sooner. Every turn used to re-read `tools/list`, `resources/list`, `resources/templates/list` and `prompts/list` from every connected MCP server — four round trips per server before the model was even asked — and each list is now read once per session and re-read only when the server reports a change or the connection restarts (the row ↻ in the Dashboard, or a changed connection). A message that says nothing about MCP is also offered none of the servers' tools, so an ordinary turn no longer carries up to sixteen schemas it will not use; a `#` token, a name, or the word MCP offers them for that turn, the composer's MCP chip says so in its tooltip, and **Offer tools only when the message asks** under **Tools > Options > LiteLLM > MCP** can be turned off to restore the older behaviour. The release also fixes file references whose name contains spaces or that point into a drive-rooted folder with spaces: `StoreGroupService.cs` written mid-sentence, or a path under `F:\New folder (3) - Copy`, was reported as not found. Install `LiteLLM.VisualStudio.vsix` and verify **1.8.7** in Manage Extensions. Live visual IDE verification remains outstanding.
 
 Version **1.8.6** makes a context summary readable: the **Context summarized** row opens to show what the briefing replaced (counts of your messages, replies and tool results, with the tool names), the briefing text itself, and a sentence confirming that the chat and the saved conversation keep every message. It also lets a conversation reach past the solution: the **Project** button in the chat header (a folder-with-plus glyph, beside Delete) adds another folder the agent may read and change, its files are addressed as `Folder/src/Foo.cs`, and `@`, `#`, the file picker and every file tool see them. The list belongs to the conversation, is capped at eight folders, and is refused with a reason when a folder is already reachable or contains an existing project. Commands, Git, and the automatic build and test check stay on the solution, as the prompt and the transcript rows say; on the Claude backend each added project is passed as `--add-dir`. Install `LiteLLM.VisualStudio.vsix` and verify **1.8.6** in Manage Extensions. Live visual IDE verification remains outstanding.
 
@@ -62,9 +64,9 @@ Queue, search/export/bookmarks, the context-share dialog and related-test select
 
 **Auto-hide:** hiding an unpinned chat keeps its turn, busy state and pending approval cards alive. These UI/DTE flows still need manual Visual Studio verification; unit tests validate the extracted Core logic, not IDE interaction.
 
-Version **1.8.6** retains model-aware budgeting, pre-compaction tool accounting, RTK, EXE/stdio MCP, confirmed Git/GitLab, Claude diagnostics and the reliability improvements described here.
+Version **1.8.7** retains model-aware budgeting, pre-compaction tool accounting, RTK, EXE/stdio MCP, confirmed Git/GitLab, Claude diagnostics and the reliability improvements described here.
 
-For installation use **`LiteLLM.VisualStudio.vsix`**. Close Visual Studio, run the installer, reopen and confirm **1.8.6** under **Extensions > Manage Extensions > Installed**. Older filename-suffixed installers are not current output; replacing a VSIX does not update a running IDE.
+For installation use **`LiteLLM.VisualStudio.vsix`**. Close Visual Studio, run the installer, reopen and confirm **1.8.7** under **Extensions > Manage Extensions > Installed**. Older filename-suffixed installers are not current output; replacing a VSIX does not update a running IDE.
 
 ## Requirements
 
