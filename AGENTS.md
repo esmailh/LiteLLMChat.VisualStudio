@@ -228,6 +228,15 @@ take them lightly:
   cutting inside a round would take a call away and leave its result behind. The replacement is a
   `user` message at the head, because `Sanitize` cuts everything before the first one. It is put
   into the *request copy* only: `_history`, the chat and the stored session keep every message;
+- **the request outlives every briefing.** A briefing is model output, and one that answered pages
+  of context with a line (1.8.11's report: *the original request is absent from the retained
+  context*) used to take the user's own message with it, because each later briefing was written
+  from that line alone. `ContextSummary.RequestMessage` pins the message the turn is answering
+  verbatim, and every path out of `SummarizeAsync` puts it back in front of the kept rounds — a
+  summary may cost the thread, never the question. `ContextSummary.IsUsable` also rejects a briefing
+  that keeps less than `MinPreviousShare` (a quarter) of the one it replaces and leaves the earlier
+  one standing, with a row and a log line saying so. Pinning is why the attachment block, attached to
+  the last `user` message, lands on the request rather than on the briefing;
 - automatic verification is two checks, and the second depends on the first: the build
   (`SolutionBuild`) and then, only once that has come back clean in **this** round, the tests
   (`SolutionTests`). Tests are never run against assemblies from an earlier round — that reports on

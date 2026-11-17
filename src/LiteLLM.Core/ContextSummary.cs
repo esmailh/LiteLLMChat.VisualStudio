@@ -43,6 +43,13 @@ public static class ContextSummary
     /// one thing in this loop that arrives without a size.</summary>
     public const int MaxSummaryChars = 4000;
 
+    /// <summary>A new briefing may keep no less than this share of the one it replaces. The new one covers the
+    /// old one plus what came after it, so it should be longer, not shorter; a model that answers a large
+    /// briefing with a line has dropped the record rather than compressed it, and the older one is kept
+    /// instead. The share is generous because a real summary may well drop detail it considers settled.</summary>
+    public const int MinPreviousShare = 25;
+
+
     /// <summary>Most summaries one turn's transcript keeps. A turn that summarizes more often than this has
     /// found a bug rather than a use case, and the rows have to stay bounded like everything else.</summary>
     public const int MaxPerTurn = 8;
@@ -137,14 +144,56 @@ public static class ContextSummary
 
     /// <summary>The transcript with its first <paramref name="through"/> messages replaced by
     /// <paramref name="summary"/>. The messages after it are returned as they came, which is safe because
-    /// <see cref="AgentPrompt.Build"/> copies the history into the request rather than handing these out.</summary>
-    public static List<ChatMessage> Merge(IReadOnlyList<ChatMessage> messages, int through, string summary)
+    /// <see cref="AgentPrompt.Build"/> copies the history into the request rather than handing these out.
+    ///
+    /// <paramref name="pinned"/> is the request the turn is answering. It is put back verbatim in front of the
+    /// messages after the fold, because a briefing is a model's account of what happened and can leave out what
+    /// the user actually asked for: one bad summary then reads to the next round as a conversation with an
+    /// attached file and no request at all. The pinned message is never duplicated: a request that sits after
+    /// <paramref name="through"/> is already where it belongs.</summary>
+    public static List<ChatMessage> Merge(IReadOnlyList<ChatMessage> messages, int through, string summary,
+        ChatMessage? pinned = null)
     {
         var result = new List<ChatMessage> { Replacement(summary) };
-        if (messages == null) return result;
-        for (var i = Math.Max(0, through); i < messages.Count; i++)
-            if (messages[i] != null) result.Add(messages[i]);
+        if (messages != null)
+            for (var i = Math.Max(0, through); i < messages.Count; i++)
+                if (messages[i] != null) result.Add(messages[i]);
+
+        if (pinned != null)
+        {
+            var present = false;
+            for (var i = 1; i < result.Count && !present; i++)
+                present = ReferenceEquals(result[i], pinned);
+            // After the briefing, so the transcript still opens on a user message and Sanitize keeps it.
+            if (!present) result.Insert(1, pinned);
+        }
         return result;
+    }
+
+    /// <summary>The message a turn is answering: the last thing the user typed. It is the one message a
+    /// briefing may not stand in for, because the round after the fold is asked to continue the work rather
+    /// than to remember what the work was. A transcript with no message from the user has nothing to pin.</summary>
+    public static ChatMessage? RequestMessage(IReadOnlyList<ChatMessage>? messages)
+    {
+        if (messages == null) return null;
+        for (var i = messages.Count - 1; i >= 0; i--)
+            if (messages[i] != null && messages[i].Role == "user") return messages[i];
+        return null;
+    }
+
+    /// <summary>Whether a newly written briefing may stand in for the one it replaces. An empty one is the
+    /// failure it always was — a reasoning model can spend the whole small budget thinking and answer with
+    /// nothing — and one that has lost most of what the previous briefing carried is treated the same way: a
+    /// briefing's job is to stand for everything that came before it, so a line that replaced pages is a lost
+    /// record, and the next briefing would be written from that line alone. Keeping the earlier one costs
+    /// nothing, because a summary is an improvement to the request and never something the turn depends
+    /// on.</summary>
+    public static bool IsUsable(string? previous, string next)
+    {
+        var text = (next ?? "").Trim();
+        if (text.Length == 0) return false;
+        if (string.IsNullOrWhiteSpace(previous)) return true;
+        return text.Length * 100 >= previous!.Trim().Length * MinPreviousShare;
     }
 
     /// <summary>What stands in for the messages that were folded in. A <c>user</c> message, and framed as a

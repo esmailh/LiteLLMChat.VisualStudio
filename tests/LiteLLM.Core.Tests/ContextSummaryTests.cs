@@ -139,6 +139,73 @@ public sealed class ContextSummaryTests
     }
 
     [Fact]
+    public void ContextSummary_KeepsTheRequestEvenWhenTheBriefingLeavesItOut()
+    {
+        // The failure this guards: a briefing that never mentions what the user asked for, and a request that
+        // was folded into it, leave the next round with an attached file and no question. The request has to
+        // be handed back verbatim, in front of the rounds the summary kept.
+        var messages = Transcript(12);
+        var merged = ContextSummary.Merge(messages, 21, "the assistant was investigating the configuration", messages[0]);
+
+        Assert.Equal("user", merged[0].Role);
+        Assert.Contains("briefing", merged[0].Content, StringComparison.OrdinalIgnoreCase);
+        Assert.Same(messages[0], merged[1]);
+        Assert.Contains("the first request", merged[1].Content, StringComparison.Ordinal);
+        Assert.Same(messages[21], merged[2]);
+
+        // Two user messages in a row are valid, and the opening message is still the briefing.
+        var sanitized = ChatStateLimits.Sanitize(merged);
+        Assert.Equal(merged.Count, sanitized.Count);
+    }
+
+    [Fact]
+    public void ContextSummary_DoesNotRepeatARequestItDidNotFold()
+    {
+        var messages = Transcript(12);
+        var merged = ContextSummary.Merge(messages, 21, "the briefing", messages[21]);
+
+        Assert.Equal(messages.Count - 21 + 1, merged.Count);
+        Assert.Same(messages[21], merged[1]);
+        Assert.Equal(1, merged.Count(m => ReferenceEquals(m, messages[21])));
+    }
+
+    [Fact]
+    public void ContextSummary_PinsTheLastThingTheUserTyped()
+    {
+        var messages = Transcript(2);
+        Assert.Same(messages[0], ContextSummary.RequestMessage(messages));
+
+        var second = new ChatMessage { Role = "user", Content = "the second request" };
+        messages.Add(second);
+        Assert.Same(second, ContextSummary.RequestMessage(messages));
+
+        Assert.Null(ContextSummary.RequestMessage(new List<ChatMessage> { new ChatMessage { Role = "assistant" } }));
+        Assert.Null(ContextSummary.RequestMessage(null));
+        Assert.Null(ContextSummary.RequestMessage(new List<ChatMessage>()));
+    }
+
+    [Theory]
+    [InlineData(null, "a briefing", true)]
+    [InlineData("", "a briefing", true)]
+    [InlineData("a briefing", "", false)]
+    [InlineData("a briefing", "   ", false)]
+    [InlineData("the earlier briefing, with every detail the next round needs", "short", false)]
+    [InlineData("the earlier briefing", "the new briefing, still covering the request", true)]
+    public void ContextSummary_RejectsABriefingThatLosesMostOfTheEarlierOne(string? previous, string next, bool usable) =>
+        Assert.Equal(usable, ContextSummary.IsUsable(previous, next));
+
+    [Fact]
+    public void ContextSummary_KeepsEveryCallAndResultPairedWhenTheRequestIsPinned()
+    {
+        var messages = Transcript(12);
+        var merged = ContextSummary.Merge(messages, 21, "the briefing", messages[0]);
+
+        var announced = new HashSet<string>(merged.SelectMany(m => m.ToolCalls).Select(c => c.Id), StringComparer.Ordinal);
+        var answered = new HashSet<string>(merged.Where(m => m.Role == "tool").Select(m => m.ToolCallId), StringComparer.Ordinal);
+        Assert.Equal(announced, answered);
+    }
+
+    [Fact]
     public void ContextSummary_ReadsAsABriefingRatherThanAsARequest()
     {
         // A briefing that reads like an instruction gets answered instead of continued from.

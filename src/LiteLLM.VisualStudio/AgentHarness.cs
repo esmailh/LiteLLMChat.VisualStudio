@@ -708,9 +708,12 @@ internal sealed class AgentHarness
         // summarizing for the rest of the conversation.
         if (covered < 0 || covered > messages.Count) covered = 0;
         var previous = covered > 0 ? summaries![summaries.Count - 1].Detail : null;
+        // The one message a briefing may not stand in for. Every path out of this method puts it back in front of
+        // the messages the summary kept, so a wrong or empty summary can cost the thread but never the request.
+        var pinned = ContextSummary.RequestMessage(messages);
 
         if (!ContextSummary.TryBuildRequest(messages, covered, previous, ChatStateLimits.KeepRecentToolRounds, out var request, out var through))
-            return covered > 0 ? ContextSummary.Merge(messages, covered, previous!) : messages;
+            return covered > 0 ? ContextSummary.Merge(messages, covered, previous!, pinned) : messages;
 
         try
         {
@@ -729,7 +732,18 @@ internal sealed class AgentHarness
             if (text.Length == 0)
             {
                 _view.AddToolNote("", "Context · the utility model (" + utility.Id + ") returned no summary, so the older messages were left in place", false, null, null, null);
-                return covered > 0 ? ContextSummary.Merge(messages, covered, previous!) : messages;
+                return covered > 0 ? ContextSummary.Merge(messages, covered, previous!, pinned) : messages;
+            }
+            // The new briefing covers the previous one plus what came after it, so a handful of words replacing
+            // pages is not a summary of them. That is what happened when a turn answered "the request is not in
+            // the retained context": each later briefing was written from a one-line predecessor, and the
+            // request it dropped was never given back. The earlier briefing stands instead.
+            if (!ContextSummary.IsUsable(previous, text))
+            {
+                _view.AddToolNote("", "Context · the utility model (" + utility.Id + ") returned a briefing that lost most of the one before it, so the earlier briefing was kept", false, null,
+                    "A summary that drops what the previous one carried is taken as a failed summary. It is an improvement to the request, never something the turn depends on, so keeping the earlier one loses nothing.", null);
+                _services.Log("Context summary rejected: " + text.Length + " characters after a briefing of " + (previous ?? "").Length);
+                return covered > 0 ? ContextSummary.Merge(messages, covered, previous!, pinned) : messages;
             }
 
             var report = ContextSummary.Report(through, text, ContextSummary.Describe(messages, through));
@@ -737,14 +751,14 @@ internal sealed class AgentHarness
             _view.AddContextSummaryNote(report);
             _services.Log("Context summarized with " + utility.Id + ": " + through + " messages, " + text.Length + " characters");
             _view.SaveSession();
-            return ContextSummary.Merge(messages, through, text);
+            return ContextSummary.Merge(messages, through, text, pinned);
         }
         catch (OperationCanceledException) { throw; }   // the user stopped; that is not a summarization failure
         catch (Exception ex)
         {
             _view.AddToolNote("", "Context · could not summarize the older messages (" + ex.Message + "), so the request was sent without a briefing", false, null, null, null);
             _services.Log("Context summary failed: " + ex);
-            return covered > 0 ? ContextSummary.Merge(messages, covered, previous!) : messages;
+            return covered > 0 ? ContextSummary.Merge(messages, covered, previous!, pinned) : messages;
         }
     }
 
