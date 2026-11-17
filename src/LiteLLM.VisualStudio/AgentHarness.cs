@@ -143,6 +143,7 @@ internal sealed class AgentHarness
         var repairReminder = "";
         var repairReminders = 0;
         var contextNoted = false;
+        var mcpDropped = false;
         var transcript = _view.History;
         // Captured for the whole turn: the switch belongs to the chat the turn was started in, and flipping it
         // mid-turn must not change the transcript a loop that has already been running is built from.
@@ -176,30 +177,18 @@ internal sealed class AgentHarness
             var requestLimit = ModelRequestBudget.Limit(_model, _services.Settings);
             var fixedRequest = AgentPrompt.Build(new List<ChatMessage>(), context, _view.Mode, _services.Settings.EnableToolCalling, _services.Settings.EnableFileEditing, _services.Settings.EnableTerminalTools, repoInstructions, errors, mcp.Instructions, _mcpHint, _skillPlan.Instructions, workspaceNotes);
             var historyLimit = ModelRequestBudget.HistoryAllowance(requestLimit, fixedRequest, tools);
-            if (historyLimit <= 0)
-                throw new InvalidOperationException("Instructions, attachments and tool schemas exhaust this model's estimated input budget. Reduce attachments or select fewer MCP tools. No request was sent.");
             if (round == 1)
-                _view.AddToolNote("", "Context · model budget " + requestLimit + " characters; history allowance " + historyLimit,
+                _view.AddToolNote("", "Context · model budget " + requestLimit + " characters; history allowance " + Math.Max(0, historyLimit) + " characters",
                     true, null, "Estimated from model capacity (or configured fallback), with output/headroom reserved. Instructions, attachments and selected tool schemas are counted before compaction. This is not an exact token count.", null);
-            if (RequestBudget.Size(prompt, null) > historyLimit)
+            // The allowance is an estimate, so it decides only whether folding the old part is worth a call. Whether
+            // the request may be sent is decided below, against the request that was actually built.
+            if (historyLimit <= 0 || RequestBudget.Size(prompt, null) > historyLimit)
                 prompt = await SummarizeAsync(prompt, _model, token).ConfigureAwait(true);
-            // The budget is spent before sanitizing, because what it measures is the transcript that will
-            // actually be sent. Nothing is dropped to fit: an old tool result loses its body and keeps the
-            // call it answers, since a result that answers no call is refused by the server. Note the
-            // shortening once a turn, not once a round - the same old results qualify from the round the
-            // budget is first over, and a row every round would bury the transcript.
-            var serializationOverhead = Math.Max(0L, RequestBudget.Size(prompt, null) - ContextBudget.TotalChars(prompt));
-            var trimmed = ContextBudget.Trim(prompt, (int)Math.Max(1L, historyLimit - serializationOverhead), ChatStateLimits.KeepRecentToolRounds, out var shortened);
             // Sanitizing is what keeps the request valid: every tool result must answer a call the assistant
             // announced and every announced call must be answered, or an OpenAI-compatible server rejects
             // the whole transcript. A cancelled tool batch or a history loaded from an older build can
             // otherwise leave the two out of step.
-            var history = ChatStateLimits.Sanitize(trimmed);
-            if (shortened > 0 && !contextNoted)
-            {
-                contextNoted = true;
-                _view.AddToolNote("", "Context · " + shortened + " older tool result" + (shortened == 1 ? "" : "s") + " shortened to fit the request", true, null, null, null);
-            }
+            var history = ChatStateLimits.Sanitize(prompt);
             // Built here, not stored: the system prompt and the attachment block are added at request time and the
             // transcript keeps only what the user typed and what the model answered.
             // With the tools switched off an attached file is only a path, and the model has no way to open it, so
@@ -213,6 +202,48 @@ internal sealed class AgentHarness
             // goes away by itself once the list is clean.
             var request = AgentPrompt.Build(history, context, _view.Mode, _services.Settings.EnableToolCalling, _services.Settings.EnableFileEditing, _services.Settings.EnableTerminalTools, repoInstructions, errors, mcp.Instructions, _mcpHint, _skillPlan.Instructions, workspaceNotes);
 
+            // Measured, not estimated. What the transport refuses on is this serialized request, and the allowance
+            // above is a few thousand characters short of it by construction: the instruction block is costed before
+            // it is written, the JSON around the text costs more than the text, and a server can add a tool between
+            // two rounds. Nothing is dropped to fit — an old result loses only its body and keeps the call it
+            // answers — because a result that answers no call is refused by the whole server.
+            var sentMcpTools = mcpTools;
+            var fit = RequestFitting.Fit(request, tools, requestLimit);
+            if (!fit.Fits)
+            {
+                // Still over by measurement, so the round continues without the MCP schemas instead of the turn
+                // ending on them. They are the one part of a request that can be left out and still leave a turn
+                // that works: the built-in tools stay, and the rounds already spent behind it stay with them. The
+                // prompt is rebuilt without the MCP block, because a server offered no MCP tool must not be told
+                // about one. A turn that gets here has lost nothing it had: it never had a sendable request.
+                var plainTools = _services.ToolsFor(Array.Empty<ToolDefinition>(), _skillPlan.OffersTools);
+                var plainRequest = AgentPrompt.Build(history, context, _view.Mode, _services.Settings.EnableToolCalling, _services.Settings.EnableFileEditing, _services.Settings.EnableTerminalTools, repoInstructions, errors, null, null, _skillPlan.Instructions, workspaceNotes);
+                var plain = RequestFitting.Fit(plainRequest, plainTools, requestLimit);
+                // Only worth taking if the schemas are lighter than they were: with no MCP tool in the request this
+                // is the same request again, and saying it was sent without them would be false.
+                if (plain.ToolChars >= fit.ToolChars) throw new InvalidOperationException(fit.Describe());
+                // Shortening reached its floor and the schemas were already left out: say what the request is made
+                // of rather than only that it is too big, so the reader knows which part to give up.
+                if (!plain.Fits) throw new InvalidOperationException(plain.Describe());
+                fit = plain;
+                tools = plainTools;
+                sentMcpTools = Array.Empty<ToolDefinition>();
+                // Once a turn: the transcript only grows, so from here every round takes the same path, and the row
+                // would otherwise be repeated for the rest of the turn.
+                if (!mcpDropped)
+                {
+                    mcpDropped = true;
+                    _view.AddToolNote("mcp", "MCP · this turn continues without MCP tool schemas: the request was over the model's budget with them, so only the built-in tools can be called", true, null, "The transcript is shortened as far as it can be first — old tool results lose their bodies and keep the calls they answer — so this is the schemas being the part that does not fit, not the conversation.", null);
+                }
+            }
+            // Note the shortening once a turn, not once a round: the same old results qualify from the round the
+            // budget is first over, and a row every round would bury the transcript.
+            if (fit.Shortened > 0 && !contextNoted)
+            {
+                contextNoted = true;
+                _view.AddToolNote("", "Context · " + fit.Shortened + " older tool result" + (fit.Shortened == 1 ? "" : "s") + " shortened to fit the request", true, null, null, null);
+            }
+
             var bubble = _view.AddAssistantBubble(round == 1 ? "Thinking" : "Reading the tool results");
             _view.Streamed = 0; _view.Phase = round == 1 ? "Thinking" : "Reading the tool results";
             // A narrowed turn sends exactly the tools the message selected, a turn whose message never mentioned
@@ -222,7 +253,7 @@ internal sealed class AgentHarness
             if (_services.Settings.EnableStreaming)
                 try
                 {
-                    await _services.StreamAsync(_model, request, async update =>
+                    await _services.StreamAsync(_model, fit.Messages, async update =>
                     {
                         // A continuation is a seam in the answer, so it gets a row of its own: the user has to be
                         // able to tell a proxy timeout from the model changing its mind about what it was writing.
@@ -237,7 +268,7 @@ internal sealed class AgentHarness
                             _view.Phase = assistant.Content.Length > 0 ? "Writing" : "Thinking";
                             _view.SetContent(bubble, assistant);
                         });
-                    }, token, mcpTools, _skillPlan.OffersTools).ConfigureAwait(true);
+                    }, token, sentMcpTools, _skillPlan.OffersTools).ConfigureAwait(true);
                 }
                 catch
                 {
@@ -254,7 +285,7 @@ internal sealed class AgentHarness
                 }
             else
             {
-                var complete = await _services.CompleteAsync(_model, request, token, mcpTools, _skillPlan.OffersTools).ConfigureAwait(true);
+                var complete = await _services.CompleteAsync(_model, fit.Messages, token, sentMcpTools, _skillPlan.OffersTools).ConfigureAwait(true);
                 assistant.Content = complete.Content; assistant.Reasoning = complete.Reasoning; assistant.ToolCalls = complete.ToolCalls;
                 _view.SetContent(bubble, assistant);
             }

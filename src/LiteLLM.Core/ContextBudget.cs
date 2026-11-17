@@ -33,20 +33,24 @@ public static class ContextBudget
         var protectedFrom = RecentFrom(messages, keepRecentRounds);
         var arguments = ArgumentsById(messages);
 
-        // Walked backwards from the newest message, because that is the end of the conversation the request is
-        // about: the budget is spent there first, and what it cannot pay for is the beginning.
+        // Costed as a whole first, then the results the model has finished with give way — oldest first, because
+        // those are the ones it has already read and acted on, and because the newest of them has to stay in hand
+        // if only one of them has to go. The budget is a bound on the sum: shortening only the message that
+        // happens to cross it is not enough, because the largest message in a request is its system prompt, which
+        // sits at the head — the sum can go over on a message that may not be touched, and then the transcript
+        // stays over its bound with every result still in full.
         var total = 0;
+        foreach (var message in messages)
+            if (message != null) total += Cost(message);
+
         var shortenedAt = new Dictionary<int, string>();
-        for (var i = messages.Count - 1; i >= 0; i--)
+        for (var i = 0; i < messages.Count && total > budget; i++)
         {
             var message = messages[i];
-            if (message == null) continue;
-            total += Cost(message);
-            if (total <= budget || i >= protectedFrom || message.Role != "tool" || message.Content.Length == 0) continue;
+            if (message == null || i >= protectedFrom || message.Role != "tool" || message.Content.Length == 0) continue;
             var note = Note(message, arguments);
             shortenedAt[i] = note;
-            total -= message.Content.Length;
-            total += note.Length;
+            total -= message.Content.Length - note.Length;
         }
 
         for (var i = 0; i < messages.Count; i++)

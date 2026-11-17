@@ -191,7 +191,19 @@ take them lightly:
   which reports a malformed or wrong-typed call instead of emptying it and producing a sentence
   about a path the model never sent;
 - a long turn is bounded by `ContextBudget.Trim`, which shortens the *body* of an old tool result
-  rather than dropping the message — dropping it would break the pairing above;
+  rather than dropping the message — dropping it would break the pairing above. The oldest result gives way
+  first, and the sum is what is bounded: the largest message in a request is its system prompt and it sits at
+  the head, so a transcript can go over on a message that may not be shortened, and shortening only the one
+  that crosses the line leaves it over with every result in full;
+- the budget a request is finally held to is measured on the request that was built (`RequestFitting.Fit`),
+  not on the estimate taken before it existed. A few thousand characters of serialization and a re-serialized
+  instruction block separate the two, and that is enough to refuse a finished turn — the worst answer
+  available, since the work behind it is done. What is over comes out of old tool-result bodies in up to two
+  passes, the second spending the measurement the first one's estimate missed. A request that still does not
+  fit is rebuilt without the MCP schemas and retried, so the round continues on the built-in tools instead of
+  the turn ending on schemas it may not need; the row says so once, because the transcript only grows and
+  every later round takes the same path. Only then is the turn refused, and the message names the size reached
+  and how much of it is messages versus tool schemas;
 - the current Error List goes into the **system prompt** of each round and never into `_history`.
   It is read rather than built, and the block says so, so an entry predating the turn is not read
   as its result. In the history it would need `Sanitize` handling, would be written to the session,
