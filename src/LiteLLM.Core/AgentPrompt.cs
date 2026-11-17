@@ -27,9 +27,9 @@ public static class AgentPrompt
     /// that can read them. Shared across the attachments of one message, so ten files cannot add up to a novel.</summary>
     private const int MaxInlineFileChars = 8000;
 
-    public static List<ChatMessage> Build(IEnumerable<ChatMessage> history, IReadOnlyList<ChatContextItem>? attachments, string mode, bool toolCalling, bool fileEditing, bool terminalTools = false, string? repoInstructions = null, string? solutionErrors = null, string? mcpInstructions = null, string? mcpToolSelection = null, string? skillsInstructions = null, string? workspaceRoots = null)
+    public static List<ChatMessage> Build(IEnumerable<ChatMessage> history, IReadOnlyList<ChatContextItem>? attachments, string mode, bool toolCalling, bool fileEditing, bool terminalTools = false, string? repoInstructions = null, string? solutionErrors = null, string? mcpInstructions = null, string? mcpToolSelection = null, string? skillsInstructions = null, string? workspaceRoots = null, string? shellNotices = null)
     {
-        var messages = new List<ChatMessage> { new ChatMessage { Role = "system", Content = Instructions(mode, toolCalling, fileEditing, terminalTools, repoInstructions, solutionErrors, mcpInstructions, mcpToolSelection, skillsInstructions, workspaceRoots) } };
+        var messages = new List<ChatMessage> { new ChatMessage { Role = "system", Content = Instructions(mode, toolCalling, fileEditing, terminalTools, repoInstructions, solutionErrors, mcpInstructions, mcpToolSelection, skillsInstructions, workspaceRoots, shellNotices) } };
         if (toolCalling && terminalTools)
             messages[0].Content += "\nGitLab: use run_glab with an exact arguments array for all GitLab CLI capabilities, including merge requests (mr create/view/list/merge), issues, pipelines, releases and API. Commands require user confirmation. Do not claim an MR exists until the command succeeds and returns its URL. Never include credentials in arguments.";
         messages.AddRange(history.Where(m => m != null).Select(ChatStateLimits.CopyMessage));
@@ -108,8 +108,8 @@ public static class AgentPrompt
 
     public static string Instructions(bool toolCalling, bool fileEditing) => Instructions("agent", toolCalling, fileEditing, false);
 
-    public static string Instructions(string mode, bool toolCalling, bool fileEditing, bool terminalTools = false, string? repoInstructions = null, string? solutionErrors = null, string? mcpInstructions = null, string? mcpToolSelection = null, string? skillsInstructions = null, string? workspaceRoots = null) =>
-        WithErrors(WithMcp(WithRepo(WithSkills(WithToolSelection(WithWorkspace(BaseInstructions(mode, toolCalling, fileEditing, terminalTools), toolCalling ? workspaceRoots : null), mcpToolSelection), skillsInstructions), repoInstructions), mcpInstructions), solutionErrors);
+    public static string Instructions(string mode, bool toolCalling, bool fileEditing, bool terminalTools = false, string? repoInstructions = null, string? solutionErrors = null, string? mcpInstructions = null, string? mcpToolSelection = null, string? skillsInstructions = null, string? workspaceRoots = null, string? shellNotices = null) =>
+        WithShells(WithErrors(WithMcp(WithRepo(WithSkills(WithToolSelection(WithWorkspace(BaseInstructions(mode, toolCalling, fileEditing, terminalTools), toolCalling ? workspaceRoots : null), mcpToolSelection), skillsInstructions), repoInstructions), mcpInstructions), solutionErrors), shellNotices);
 
     /// <summary>What the extension itself tells the model, before the project has its say. A project's own
     /// instructions are added after this rather than woven into it, so that the promises below stay one readable
@@ -146,8 +146,17 @@ not what you are about to do.");
     Command execution
     - Use run_git for every Git operation, including commit, merge, pull, and push. It supports all Git arguments and can open GitHub/GitLab browser login when authentication is required, then retry once.
     - Use run_powershell or run_cmd when another real command is needed to build, test, package, or inspect the workspace.
-    - Commands run from the solution directory. Inspect their exit code and output; never claim a command succeeded unless its result says so.
-    - Prefer non-interactive, bounded commands. Browser-based Git authentication is the exception; do not start other servers, watchers, shells, or programs that wait for user input.");
+    - Commands run from the solution directory unless you pass workdir. Inspect their exit code and output; never claim a command succeeded unless its result says so.
+    - Prefer non-interactive, bounded commands. Browser-based Git authentication is the exception; a program that waits for user input is never started this way.
+    - A program that does not exit on its own — a web app, an API, a worker — is run with background: true. Without it the call waits for the end and kills the program at its timeout, so a server started that way never answers a request.
+
+    Running the project and testing it
+    - Find out how the project starts and where it listens from the repository itself: launchSettings.json, appsettings*.json, Program.cs/Startup.cs, the .csproj, Dockerfile or docker-compose, a README. Ask the user only for what the repository cannot tell you (a port, a database, a credential), and say what you need.
+    - Start it with run_powershell and ""background"": true. The call returns at once with a shell id, a pid and the path of its log file; the program keeps running after the call returns.
+    - Read that log with read_file while it starts. A log is read from its end, which is where a program says it is ready; when you need the earlier lines, pass start_line. Do not sleep a guessed number of seconds waiting for a service.
+    - Send real requests with the same command tools: curl.exe through run_cmd is the shortest form, and its output is the status code, the headers and the body. Use the method, path, headers and body the endpoint expects. A validation error, a 404 or a 500 is a result to read and report, not a reason to stop. Test with the data the user supplied; when you have to choose values yourself, say which ones and why.
+    - After a request, read the log again for the line it produced, and correlate the two. Quote the status code and the decisive part of the body — saying a call was made is not evidence of what it returned.
+    - When the test is done, stop the program with ""taskkill /PID <pid> /T /F"" through run_cmd, or say which shell you left running and why. A shell outlives the turn; the extension tells you when one ends, and never let a server you started be a surprise to the user.");
 
         if (!fileEditing)
         {
@@ -225,6 +234,17 @@ Verifying the build
     /// which leaves the system message byte-for-byte what it is on a solution that was never built.</summary>
     private static string WithErrors(string instructions, string? solutionErrors) =>
         string.IsNullOrEmpty(solutionErrors) ? instructions : instructions + "\n\nCurrent errors in the solution\n" + solutionErrors;
+
+    /// <summary>Shells that ended since the last round, last of all and labeled as the extension's own report rather
+    /// than as something the user said. It lives in the request and never in the transcript for the same reason the
+    /// Error List does: it is a fact about the outside world that is true now, and a message would have to be
+    /// sanitized, stored and outlived the shell it describes.</summary>
+    private static string WithShells(string instructions, string? shellNotices) =>
+        string.IsNullOrEmpty(shellNotices)
+            ? instructions
+            : instructions +
+              "\n\nBackground shells that have ended (reported by the extension, not by the user; read a log with read_file if you still need its output)\n" +
+              shellNotices;
 
     private static string Escape(string value) => value.Replace("\"", "'").Replace("\r", " ").Replace("\n", " ");
 }

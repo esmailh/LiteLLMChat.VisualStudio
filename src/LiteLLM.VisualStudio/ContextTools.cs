@@ -42,7 +42,7 @@ internal static class ContextTools
     {
         Define("get_current_file_path", "Path of the file currently open in the editor.", null),
         Define("get_selected_text", "The text the user has selected in the active editor.", null),
-        Define("read_file", "Read part of a file straight from disk. Use this instead of asking the user to paste a file. Returns at most " + MaxLines + " lines per call; call it again with a larger start_line to continue.",
+        Define("read_file", "Read part of a file straight from disk. Use this instead of asking the user to paste a file. Returns at most " + MaxLines + " lines per call; call it again with a larger start_line to continue. A background shell's log is read from its end — the last line_count lines — unless start_line is given, because the end of a log is what says whether a program is ready.",
             new JObject { ["path"] = Str("Path in the workspace: solution-relative, absolute, or ProjectName/ path for an added project"), ["start_line"] = Int("1-based first line, default 1"), ["line_count"] = Int("Lines to return, default " + DefaultLines + ", max " + MaxLines) }, "path"),
         Define("list_files", "List files under a directory.",
             new JObject { ["path"] = Str("Directory, defaults to every project in the workspace"), ["pattern"] = Str("Glob such as *.cs, default *") }),
@@ -60,7 +60,7 @@ internal static class ContextTools
     internal static bool IsDiskOnly(string name) =>
         name == "read_file" || name == "list_files" || name == "search_files";
 
-    internal static async Task<ToolResult> ExecuteAsync(AsyncPackage package, string name, string arguments, CancellationToken token, Workspace? workspace = null)
+    internal static async Task<ToolResult> ExecuteAsync(AsyncPackage package, string name, string arguments, CancellationToken token, Workspace? workspace = null, string? shellOwner = null)
     {
         token.ThrowIfCancellationRequested();
         var settings = LiteLlmPackage.Instance.Services.Settings;
@@ -76,15 +76,21 @@ internal static class ContextTools
         // The turn's own workspace when the loop passes one — a tool call belongs to the turn that announced it,
         // not to whatever conversation happens to be selected when it runs.
         var turnWorkspace = workspace ?? LiteLlmPackage.Instance.Services.WorkspaceFor(SolutionRoot(dte));
-        // Commands are the one thing that stays anchored to the solution: a working directory is one folder,
-        // and a command typed against a second root would run somewhere the user did not see. The model is
-        // told so, and an added project is built with its own command instead.
+        // The default working directory is still the solution's: a command typed with no workdir runs where the user
+        // would expect it. `workdir` is what reaches an added project, resolved by the same workspace that resolves a
+        // file, so the two cannot disagree about which folders a turn may reach.
         var root = turnWorkspace.Primary;
 
         if (TerminalTools.Handles(name))
         {
-            if (root == null) return Fail("No solution or active document is available for the command working directory.", "command · no working directory");
-            return await TerminalTools.ExecuteAsync(root, name, args, LiteLlmPackage.Instance.Services.Settings.CommandTimeoutSeconds, token).ConfigureAwait(true);
+            // The command tools now carry the background case as well, so a server, the log it writes and the
+            // requests sent to it are one loop through one pair of tools.
+            var services = LiteLlmPackage.Instance.Services;
+            // The turn's owner rather than the selected conversation's: a shell started by a turn belongs to the chat
+            // that turn was answering, even if the user picks another one while the tool call is in flight.
+            return await TerminalTools.ExecuteAsync(turnWorkspace, services.Shells,
+                shellOwner ?? services.ActiveSession.Id.ToString(),
+                name, args, services.Settings.CommandTimeoutSeconds, token).ConfigureAwait(true);
         }
         if (name == "run_git")
         {
@@ -154,6 +160,10 @@ internal static class ContextTools
         // Named, because the schema calls it required and the model that omits it would otherwise be told the
         // solution directory does not exist — a sentence about a path it never asked for.
         if (path.Length == 0) return Fail("read_file needs a path. Call it again with {\"path\": \"src/Foo.cs\"}.", "read · no path");
+        // A shell's log is outside the workspace on purpose: the extension wrote it there and told the model to read
+        // it, so refusing it as "outside the solution" would leave the one file it was just pointed at unreachable.
+        var shells = LiteLlmPackage.Instance.Services.Shells;
+        if (shells.TryResolveLogPath(path, out var logPath)) return ReadLog(shells, args, logPath);
         var full = workspace.Resolve(path);
         if (!File.Exists(full)) return Fail("No such file: " + full, "read · not found");
         if (!ToolArguments.TryNumber(args, "start_line", 1, out var start, out error)) return Fail(error, "read · invalid arguments");
@@ -171,6 +181,34 @@ internal static class ContextTools
             ? relative + " lines " + start + "-" + last + " (more follows; call read_file again with start_line=" + (last + 1) + "):"
             : relative + " lines " + start + "-" + last + " (end of file):";
         return Result(header + "\n" + text, "read " + relative + " · lines " + start + "-" + last + (more ? " of more" : " · end"));
+    }
+
+    /// <summary>A log is read the other way round from a source file: its last lines are what say whether a server
+    /// came up and what it said, and its first page is the banner nobody needs. <c>start_line</c> still means from
+    /// there, so the whole log is reachable without a second tool.</summary>
+    private static ToolResult ReadLog(BackgroundShells shells, JObject args, string logPath)
+    {
+        if (!ToolArguments.TryNumber(args, "line_count", DefaultLines, out var count, out var error)) return Fail(error, "read · invalid arguments");
+        count = Math.Min(MaxLines, Math.Max(1, count));
+        var fromStart = args["start_line"] != null && args["start_line"]!.Type != JTokenType.Null;
+        var start = 1;
+        if (fromStart && !ToolArguments.TryNumber(args, "start_line", 1, out start, out error)) return Fail(error, "read · invalid arguments");
+        var name = Path.GetFileName(logPath);
+        var read = shells.ReadLog(logPath, Math.Max(1, start), count, fromStart);
+        if (!read.Found)
+            return Fail("There is no log at " + logPath + " yet, or it cannot be opened. Start the shell first, and check the path it returned.",
+                "log " + name + " · not found");
+        if (read.Count == 0)
+            return Result(name + " is empty: the shell has printed nothing yet.", "log " + name + " · empty");
+        var header = new StringBuilder();
+        header.Append(fromStart
+            ? name + " lines " + read.FirstLine + "-" + read.LastLine
+            : name + " · last " + read.Count + (read.Count == 1 ? " line" : " lines"));
+        if (read.Earlier) header.Append(" (earlier output is not shown; pass start_line to read from a line):");
+        else if (read.More) header.Append(" (more follows; call read_file again with start_line=" + (read.LastLine + 1) + "):");
+        else header.Append(" (end of the log):");
+        return Result(header + "\n" + read.Text,
+            "log " + name + (read.Earlier ? " · tail" : " · lines " + read.FirstLine + "-" + read.LastLine));
     }
 
     private static ToolResult ListFiles(JObject args, Workspace workspace, string active)

@@ -68,9 +68,9 @@ public static class ContextBudget
 
     /// <summary>The index the newest <paramref name="keepRecentRounds"/> tool-calling rounds begin at. From
     /// there on is what the model is working on right now. A transcript with fewer rounds than that is all
-    /// recent, so none of it is shortened. Public because <see cref="ContextSummary"/> has to agree with this
-    /// about which rounds are recent: one that summarized a round this refuses to touch would take away the
-    /// results the model is in the middle of using.</summary>
+    /// recent, so none of it is shortened. Public because the compaction split has to agree with this about
+    /// which rounds are recent: one that folded a round this refuses to touch would take away the results the
+    /// model is in the middle of using.</summary>
     public static int RecentFrom(IReadOnlyList<ChatMessage> messages, int keepRecentRounds)
     {
         if (messages == null) return 0;
@@ -113,8 +113,10 @@ public static class ContextBudget
     }
 
     /// <summary>Roughly what a message costs the request. Reasoning is counted because a tool-calling turn
-    /// echoes it back, and the arguments because they travel with the call.</summary>
-    private static int Cost(ChatMessage message)
+    /// echoes it back, and the arguments because they travel with the call. Public because
+    /// <see cref="ContextCompaction"/> budgets the verbatim tail and the summarizer's span with the same
+    /// measure: two different figures for "how big is this message" would decide two different cuts.</summary>
+    public static int Cost(ChatMessage message)
     {
         var cost = message.Content.Length + message.Reasoning.Length;
         foreach (var call in message.ToolCalls) cost += call.Arguments.Length;

@@ -41,10 +41,16 @@ public sealed class ChatTurnState
     /// still does what it did, and a turn that lost either one would lose the reason it was asked to keep
     /// going.</summary>
     public BuildReport? Tests { get; set; }
-    /// <summary>Every time this turn's older messages were folded into a summary, in the order it happened.
-    /// A list rather than the latest one, because a long turn can summarize more than once and a reloaded
-    /// conversation has to draw back the same rows the live one drew.</summary>
-    public List<ContextSummaryReport> Summaries { get; set; } = new List<ContextSummaryReport>();
+    /// <summary>Every time this turn's older messages were folded into a checkpoint, in the order it happened.
+    /// A list rather than the latest one, because a long turn can compact more than once and a reloaded
+    /// conversation has to draw back the same rows the live one drew. The property keeps its stored name so
+    /// conversations written before checkpoints still replay their briefings.</summary>
+    public List<CompactionReport> Summaries { get; set; } = new List<CompactionReport>();
+    /// <summary>The checkpoint this turn wrote, or null when it wrote none. The newest checkpoint in a session is
+    /// the one the next turn builds its request from; it is stored with the turn that wrote it so a conversation
+    /// that was switched away from mid-turn cannot have its checkpoint written into whichever chat is selected
+    /// when the call returns.</summary>
+    public CompactionCheckpoint? Compaction { get; set; }
     /// <summary>What the model reported spending across this turn's calls, or null when no call reported
     /// anything — a provider that omits usage while streaming, or a turn stored before this was counted.
     /// Kept on the turn so a reloaded conversation shows the same total the live one did.</summary>
@@ -52,22 +58,36 @@ public sealed class ChatTurnState
     public AgentPlan? AgentPlan { get; set; }
 }
 
-/// <summary>What one summarization of the older part of a transcript did. Shaped like <see cref="BuildReport"/>
+/// <summary>What one compaction of the older part of a transcript did. Shaped like <see cref="BuildReport"/>
 /// on purpose: the row and the tooltip are drawn from the same two fields either way, and both are written by
 /// the extension about something it did on its own.</summary>
-public sealed class ContextSummaryReport
+public sealed class CompactionReport
 {
-    /// <summary>How many messages of the transcript's beginning the summary stands for. Persisted, because it
-    /// is what tells a later round how much of the conversation is already inside the summary and how much new
-    /// material would be worth asking for another one.</summary>
+    /// <summary>How many messages of the transcript's beginning the checkpoint stands for. Persisted so a
+    /// reloaded conversation can say what was folded, and so the row and the request agree.</summary>
     public int Messages { get; set; }
     /// <summary>The one-line label the chat row shows.</summary>
     public string Summary { get; set; } = "";
     /// <summary>What the folded messages were — how many of each kind, and which tools ran in them. Kept with
     /// the report so a reloaded conversation says the same thing the live one did.</summary>
     public string Covered { get; set; } = "";
-    /// <summary>The summary itself, which is what the model was given in place of those messages.</summary>
+    /// <summary>The checkpoint itself, which is what the model was given in place of those messages.</summary>
     public string Detail { get; set; } = "";
+    /// <summary>Which of <see cref="CompactionTrigger"/> caused it, by name. Empty on rows written by builds
+    /// before this existed, which read as automatic.</summary>
+    public string Trigger { get; set; } = "";
+}
+
+/// <summary>The checkpoint a session's request opens with: the structured record of everything before
+/// <see cref="Covered"/>, plus where that boundary is. One per session — the latest one — and updated in place
+/// rather than replaced from scratch, because a checkpoint is a consolidated record and not a fresh summary.</summary>
+public sealed class CompactionCheckpoint
+{
+    /// <summary>How many messages of the conversation's beginning the checkpoint stands for.</summary>
+    public int Covered { get; set; }
+    /// <summary>The checkpoint text, in the sectioned form <see cref="ContextCompaction.Template"/> asks for.</summary>
+    public string Text { get; set; } = "";
+    public DateTime UpdatedUtc { get; set; } = DateTime.UtcNow;
 }
 
 public sealed class ChatSessionState
@@ -113,11 +133,35 @@ public sealed class ChatSessionState
     /// turn, like <see cref="IgnoreHistory"/>. A later instruction that asks for the opposite clears it. Only the
     /// LiteLLM backend reads it: the Claude CLI has its own harness and its own tools.</summary>
     public bool McpEveryTurn { get; set; }
+    /// <summary>The prompt count the server reported for the last response of this conversation, and the
+    /// character size of the request that produced it. Together they are the anchor the compaction estimate
+    /// grows from: the measured count plus the difference since, never a guess at the whole prompt. Zero means
+    /// no measurement (a server that omits usage, or a conversation written before this existed), and the
+    /// estimate then falls back to the request's own size.</summary>
+    public int MeasuredPromptTokens { get; set; }
+    public int MeasuredPromptChars { get; set; }
+    /// <summary>The model the measurement belongs to. A count taken while another model was answering says
+    /// nothing about this one's prompt, so it is dropped when the model changes.</summary>
+    public string MeasuredPromptModel { get; set; } = "";
     public List<ChatTurnState> Turns { get; set; } = new List<ChatTurnState>();
     public List<PlanStep> Plan { get; set; } = new List<PlanStep>();
 
     [JsonIgnore]
     public bool HasMessages => Turns.Any(t => t.Messages.Any(m => m.Role == "user" || m.Role == "assistant"));
+
+    /// <summary>The checkpoint this conversation's request opens with, or null when none was written. Read
+    /// from the newest turn that wrote one, because a checkpoint belongs to the turn and a turn belongs to the
+    /// conversation it was started in.</summary>
+    [JsonIgnore]
+    public CompactionCheckpoint? LastCheckpoint
+    {
+        get
+        {
+            for (var i = Turns.Count - 1; i >= 0; i--)
+                if (Turns[i]?.Compaction != null) return Turns[i].Compaction;
+            return null;
+        }
+    }
 }
 
 public sealed class ChatSessionDocument

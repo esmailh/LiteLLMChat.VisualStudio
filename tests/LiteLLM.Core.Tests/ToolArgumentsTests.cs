@@ -112,4 +112,38 @@ public sealed class ToolArgumentsTests
         Assert.Equal(1, value);
         Assert.Contains("a decimal number", error);
     }
+
+    [Fact]
+    public void ToolArguments_ReadsABoolean()
+    {
+        var args = new JObject { ["background"] = true };
+        Assert.True(ToolArguments.TryFlag(args, "background", false, out var value, out var error));
+        Assert.True(value);
+        Assert.Equal("", error);
+    }
+
+    /// <summary><c>background</c> defaults to false, so a call that does not mention it is the foreground command
+    /// it has always been and the program it started is not left running by accident.</summary>
+    [Fact]
+    public void ToolArguments_KeepsTheFallbackWhenTheBooleanIsMissing()
+    {
+        Assert.True(ToolArguments.TryFlag(new JObject(), "background", false, out var value, out var error));
+        Assert.False(value);
+        Assert.Equal("", error);
+
+        Assert.True(ToolArguments.TryFlag(new JObject { ["background"] = JValue.CreateNull() }, "background", true, out value, out _));
+        Assert.True(value);
+    }
+
+    /// <summary>A model that writes <c>"true"</c> has not answered the schema, and reading it as true would leave the
+    /// next call — where it means "wait for the end" — indistinguishable from this one.</summary>
+    [Fact]
+    public void ToolArguments_RejectsABooleanSentAsAString()
+    {
+        var args = new JObject { ["background"] = "true" };
+        Assert.False(ToolArguments.TryFlag(args, "background", false, out var value, out var error));
+        Assert.False(value);
+        Assert.Contains("`background` must be true or false", error);
+        Assert.Contains("a string", error);
+    }
 }

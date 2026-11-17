@@ -111,6 +111,10 @@ public partial class ChatControl : UserControl, IAgentView
         /// <summary>Set when the row is a skill. Under <c>/skill</c> choosing it completes the name word; in the
         /// plain <c>/</c> list choosing it selects (or unselects) the skill for this conversation at once.</summary>
         public SkillInfo? Skill { get; set; }
+        /// <summary>Set when the row is one of this extension's own commands rather than a server's prompt:
+        /// choosing it writes this word into the composer, which is then sent like anything else. Choosing a prompt
+        /// opens its dialog; a command has nothing to fill in.</summary>
+        public string? Command { get; set; }
     }
 
     internal ChatControl() { InitializeComponent(); VsTheme.Apply(this); Current = this; Loaded += OnLoaded; Unloaded += OnUnloaded; SizeChanged += OnSizeChanged; }
@@ -172,6 +176,7 @@ public partial class ChatControl : UserControl, IAgentView
             Services.SettingsChanged += SettingsChanged;
             Services.Mcp.ToolsChanged += McpToolsChanged;
             Services.Mcp.ServerClosed += McpServerClosed;
+            Services.Shells.Completed += ShellCompleted;
             _eventSubscriptionsActive = true;
         }
         // The edit tools ask the chat, rather than a modal dialog, because the question belongs in the conversation
@@ -236,6 +241,7 @@ public partial class ChatControl : UserControl, IAgentView
             Services.SettingsChanged -= SettingsChanged;
             Services.Mcp.ToolsChanged -= McpToolsChanged;
             Services.Mcp.ServerClosed -= McpServerClosed;
+            Services.Shells.Completed -= ShellCompleted;
             _eventSubscriptionsActive = false;
         }
         if (ReferenceEquals(EditTools.Confirm?.Target, this)) EditTools.Confirm = null;
@@ -276,6 +282,27 @@ public partial class ChatControl : UserControl, IAgentView
     }
     private void ModelsChanged(object sender, EventArgs e) => Dispatcher.Invoke(ReloadModels);
     private void SessionsChanged(object sender, EventArgs e) => Dispatcher.Invoke(ReloadSessions);
+
+    /// <summary>One row when a background shell ends. It is drawn only for the conversation that started it: a fact
+    /// about another chat's server belongs in that chat, and the model is told there by the request instead.
+    ///
+    /// Nothing else happens on purpose. The shell is not restarted and no turn is started: the user asked for a
+    /// program, and a program that stops is news for the next message, not a reason to spend a model call the user
+    /// did not make. The row is what keeps it from being silent.</summary>
+    private void ShellCompleted(object? sender, ShellCompletion completion)
+    {
+        if (_disposed) return;
+        if (!string.Equals(Services.ActiveSession.Id.ToString(), completion.Owner, StringComparison.Ordinal)) return;
+        _ = Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (_disposed) return;
+            AddToolNote("shell",
+                "Shell · " + completion.Id + " (pid " + completion.ProcessId + ") ended with exit " +
+                (completion.ExitCode?.ToString() ?? "unknown") + " after " + completion.Duration.TotalSeconds.ToString("0.#") + "s",
+                completion.ExitCode == 0, null,
+                "Its output is in " + completion.LogPath + ". The model is told the shell ended and reads the log from its end with read_file.", null);
+        }));
+    }
     /// <summary>The event fires on whatever thread changed the snapshot, so the refresh is marshalled. If the tool
     /// list under an open popup changed, the next refresh shows the new one; a row that vanished cannot be chosen.</summary>
     private void McpToolsChanged(object? sender, EventArgs e)
@@ -422,10 +449,10 @@ public partial class ChatControl : UserControl, IAgentView
             if (turn.Build != null) AddToolNote("build", turn.Build.Summary, turn.Build.Errors == 0, null, turn.Build.Detail);
             // After the build row, because that is the order they were drawn in a live turn.
             if (turn.Tests != null) AddToolNote("tests", turn.Tests.Summary, turn.Tests.Errors == 0, null, turn.Tests.Detail);
-            // Same reasoning as the build row: the briefing is the model's own text standing in for messages that
+            // Same reasoning as the build row: the checkpoint is the model's own text standing in for messages that
             // are still here, so it is replayed from the turn rather than re-derived, and the rows come back in
             // the order they were drawn in a live turn.
-            foreach (var summary in turn.Summaries) AddContextSummaryNote(summary);
+            foreach (var summary in turn.Summaries) AddCompactionNote(summary);
             // Last, as it was drawn last. A turn stored by a build that did not count usage has none.
             if (turn.Usage != null) AddToolNote("", turn.Usage.Line, true, null, null, null);
         }
@@ -694,6 +721,14 @@ public partial class ChatControl : UserControl, IAgentView
         }
         if (!(ModelBox.SelectedItem is ModelInfo model)) return;
         input = input.Trim();
+        // "/compact" is this backend's own command: it folds the conversation now and sends nothing, so the chat
+        // stays idle until the next message — which then opens with the checkpoint. The Claude backend's own
+        // /compact is the CLI's, which is why this comes after that branch.
+        if (string.Equals(input, "/compact", StringComparison.OrdinalIgnoreCase))
+        {
+            await CompactNowAsync(model).ConfigureAwait(true);
+            return;
+        }
         ComposerHint.Visibility = Visibility.Collapsed;
         Composer.Clear(); EmptyState.Visibility = Visibility.Collapsed;
         _history.Add(new ChatMessage { Role = "user", Content = input }); ScrollToSent(AddMessage("You", input, false));
@@ -714,7 +749,7 @@ public partial class ChatControl : UserControl, IAgentView
             // turn is a piece of work rather than a view update, and this control is only what it reads and
             // draws through. What stays here is what belongs to the window — the composer, the token, the
             // outcome — and the harness draws through the IAgentView this control implements.
-            await new AgentHarness(this, Services, model).RunAsync(token).ConfigureAwait(true);
+            await new AgentHarness(this, Services, model, Services.ActiveSession).RunAsync(token).ConfigureAwait(true);
         }
         catch (OperationCanceledException) { if (_activeTurn != null) { _activeTurn.Status = ChatTurnStatus.Cancelled; _activeTurn.CompletedUtc = DateTime.UtcNow; } SaveSession(); StateText.Text = "Stopped"; }
         catch (Exception ex)
@@ -730,6 +765,46 @@ public partial class ChatControl : UserControl, IAgentView
         // A turn that changed files changed what a name means, so the list is read again: the reply that names what
         // it has just written is then a link, and the files it deleted stop being one.
         if (EditTools.Revisions > editsBefore) _ = EnsureReferencesAsync();
+    }
+
+    /// <summary>"/compact": one checkpoint written now, with no request sent and no answer awaited. It opens a turn
+    /// of its own so the row has somewhere to live — a turn the session keeps even with no messages — and that
+    /// turn is what a reloaded window replays the row from.</summary>
+    private async Task CompactNowAsync(ModelInfo model)
+    {
+        if (_generation != null) return;
+        if (_history.Count == 0)
+        {
+            AddToolNote("", "Nothing to compact: this conversation has no messages yet.", false);
+            Composer.Clear();
+            return;
+        }
+        ComposerHint.Visibility = Visibility.Collapsed;
+        Composer.Clear();
+        var turn = new ChatTurnState { ModelKey = model.Key, Status = ChatTurnStatus.Streaming, StartedUtc = DateTime.UtcNow };
+        _activeTurn = turn;
+        Services.ActiveSession.Turns.Add(turn); SaveSession();
+        SetBusy(true); _generation = new CancellationTokenSource(); var token = _generation.Token;
+        try
+        {
+            await new AgentHarness(this, Services, model, Services.ActiveSession).CompactNowAsync(token).ConfigureAwait(true);
+            turn.Status = ChatTurnStatus.Complete; turn.CompletedUtc = DateTime.UtcNow;
+        }
+        catch (OperationCanceledException) { turn.Status = ChatTurnStatus.Cancelled; turn.CompletedUtc = DateTime.UtcNow; StateText.Text = "Stopped"; }
+        catch (Exception ex)
+        {
+            turn.Status = ChatTurnStatus.Failed; turn.Error = ex.Message; turn.CompletedUtc = DateTime.UtcNow;
+            AddToolNote("error", ex.Message, false, (ex as LiteLlmException)?.Exchange, (ex as LiteLlmException)?.TechnicalDetails ?? ex.ToString());
+            StateText.Text = ex.Message;
+            Services.Log(ex.ToString());
+        }
+        finally
+        {
+            SaveSession();
+            _generation.Dispose(); _generation = null;
+            SetBusy(false); _activeTurn = null;
+            if (IsVisible && !_disposed) Composer.Focus();
+        }
     }
 
     /// <summary>What <see cref="AgentHarness"/> may ask of this window. Explicit rather than making the methods
@@ -748,7 +823,7 @@ public partial class ChatControl : UserControl, IAgentView
     void IAgentView.SetContent(Bubble bubble, ChatMessage message) => SetContent(bubble, message);
     void IAgentView.FinishStatus(Bubble bubble) => FinishStatus(bubble);
     void IAgentView.AddToolNote(string name, string summary, bool ok, HttpExchange? exchange, string? detail, AppliedEdit? edit) => AddToolNote(name, summary, ok, exchange, detail, edit);
-    void IAgentView.AddContextSummaryNote(ContextSummaryReport report) => AddContextSummaryNote(report);
+    void IAgentView.AddCompactionNote(CompactionReport report) => AddCompactionNote(report);
     void IAgentView.AddUndoAllNote(IReadOnlyList<AppliedEdit> edits) => AddToolNote("", edits.Count == 1
         ? "Edited 1 file this turn — right-click to undo it"
         : "Edited " + edits.Count + " files this turn — right-click to undo them all", true, null, null, null, edits);
@@ -850,19 +925,19 @@ public partial class ChatControl : UserControl, IAgentView
         ScrollIfFollowing();
     }
 
-    /// <summary>A context briefing, drawn as a row that can be opened. A tool row keeps its detail in a tooltip,
+    /// <summary>A compaction, drawn as a row that can be opened. A tool row keeps its detail in a tooltip,
     /// which is enough for "which file was read" and not enough for "part of your conversation was folded away":
-    /// what the fold covered and what the model was given instead have to be readable in the transcript itself,
-    /// or the user cannot tell a housekeeping step from lost work. Collapsed by default, so a turn that
-    /// summarized several times still fits on the screen.</summary>
-    private void AddContextSummaryNote(ContextSummaryReport report)
+    /// what the fold covered and the checkpoint the model was given instead have to be readable in the transcript
+    /// itself, or the user cannot tell a housekeeping step from lost work. Collapsed by default, so a turn that
+    /// compacted several times still fits on the screen.</summary>
+    private void AddCompactionNote(CompactionReport report)
     {
         var body = new StackPanel { Margin = new Thickness(0, 8, 0, 2) };
         body.Children.Add(new TextBlock
         {
             Text = report.Covered.Length > 0
                 ? report.Covered
-                : "The opening messages of this conversation now travel to the model as one briefing.",
+                : "The opening messages of this conversation now travel to the model as one checkpoint.",
             Style = (Style)FindResource("Caption"),
             TextWrapping = TextWrapping.Wrap
         });
@@ -879,7 +954,7 @@ public partial class ChatControl : UserControl, IAgentView
         // thrown away: the fold is of the request, not of the chat.
         body.Children.Add(new TextBlock
         {
-            Text = "Nothing was removed from this chat: the transcript and the saved conversation keep every message. Only the request sent to the model carries this briefing in their place.",
+            Text = "Nothing was removed from this chat: the transcript and the saved conversation keep every message. Only the request sent to the model carries this checkpoint in their place.",
             Style = (Style)FindResource("Caption"),
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 8, 0, 0)
@@ -891,7 +966,7 @@ public partial class ChatControl : UserControl, IAgentView
             Content = body,
             IsExpanded = false,
             HorizontalAlignment = HorizontalAlignment.Stretch,
-            // Direction from the briefing, like a reply: the coverage line is the extension's own sentence, but
+            // Direction from the checkpoint, like a reply: the coverage line is the extension's own sentence, but
             // the text the user opened the row to read is the model's, and it decides the direction here.
             FlowDirection = TextDirection.For(report.Detail.Length > 0 ? report.Detail : report.Covered)
         };
@@ -909,7 +984,7 @@ public partial class ChatControl : UserControl, IAgentView
         border.SetResourceReference(Border.BorderBrushProperty, CommonDocumentColors.ListItemBorderBrushKey);
         border.ContextMenu = Menu(
             Item("Copy what it covered", () => Copy(report.Covered, "Coverage"), report.Covered.Length > 0),
-            Item("Copy briefing", () => Copy(report.Detail, "Briefing"), report.Detail.Length > 0),
+            Item("Copy checkpoint", () => Copy(report.Detail, "Checkpoint"), report.Detail.Length > 0),
             null,
             Item("Copy whole conversation", () => Copy(Transcript(), "Conversation"), _history.Count > 0));
         border.ToolTip = report.Summary;
@@ -1118,10 +1193,12 @@ public partial class ChatControl : UserControl, IAgentView
         if (AllowAllPermissions) return true;
         if (!Services.Settings.ConfirmEachCommand) return true;
         var body = new StackPanel();
-        body.Children.Add(new TextBlock { Text = "Run " + proposal.Shell + " command?", FontWeight = FontWeights.SemiBold });
+        body.Children.Add(new TextBlock { Text = (proposal.Background ? "Start and leave running: " : "Run ") + proposal.Shell + " command?", FontWeight = FontWeights.SemiBold });
+        if (proposal.Background)
+            body.Children.Add(new TextBlock { Text = "It keeps running after this call until it ends by itself, is stopped, or Visual Studio closes. Its output goes to a log file the model reads.", Style = (Style)FindResource("Caption"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0) });
         body.Children.Add(new TextBox { Text = proposal.Command, IsReadOnly = true, AcceptsReturn = true, FontFamily = new FontFamily("Consolas, Courier New"), MaxHeight = 260, Margin = new Thickness(0, 8, 0, 0), VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, TextWrapping = TextWrapping.NoWrap });
         var skip = new Button { Content = "Skip" };
-        var allow = new Button { Content = "Run", Style = (Style)FindResource("PrimaryButton") };
+        var allow = new Button { Content = proposal.Background ? "Start" : "Run", Style = (Style)FindResource("PrimaryButton") };
         body.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0), Children = { skip, allow } });
         var card = new Border { Style = (Style)FindResource("Card"), HorizontalAlignment = HorizontalAlignment.Left, MaxWidth = 900, Child = body, Margin = new Thickness(0, 0, 0, 12) };
         card.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.AccentMediumBrushKey);
@@ -1391,7 +1468,12 @@ public partial class ChatControl : UserControl, IAgentView
         SendButton.Visibility = value ? Visibility.Collapsed : Visibility.Visible;
         SendButton.IsEnabled = !value && Composer.Text.Trim().Length > 0;
         RefreshDeleteButton(value);
+        // The placeholder is this method's own, so it is this method that takes it down: an outcome ("Stopped",
+        // an error) is written before the turn's finally runs, and a turn that ends without one — /compact is
+        // the one that sends no request and so has no reply to report — would otherwise leave the window saying
+        // Generating… while nothing is running.
         if (value) StateText.Text = "Generating…";
+        else if (StateText.Text == "Generating…") StateText.Text = string.Empty;
     }
     /// <summary>Starts a new conversation. Everything belonging to the message being written goes with it: a draft and
     /// its attachments carried into a fresh session would look like they belonged to it.</summary>
@@ -2308,8 +2390,16 @@ public partial class ChatControl : UserControl, IAgentView
         rows.AddRange(SkillSuggestions(filter));
         if (!claude)
         {
-            // The LiteLLM backend has no CLI slash commands of its own, so "/" is where its servers' prompts live.
+            // The LiteLLM backend has no CLI slash commands of its own, so "/" is where its servers' prompts live —
+            // and the one command this backend does add, which folds the conversation into a checkpoint.
             _promptMode = true;
+            if (Matches(filter, "/compact", "compact", "context", "checkpoint", "summarize"))
+                rows.Add(new PromptSuggestion
+                {
+                    Name = "/compact",
+                    Description = "Fold the older part of this conversation into a checkpoint now",
+                    Command = "/compact"
+                });
             rows.AddRange(Services.Mcp.Prompts
                 .Where(prompt => Matches(filter, prompt.DisplayName, prompt.Name, prompt.Server.Name))
                 .Take(100)
@@ -2494,6 +2584,21 @@ public partial class ChatControl : UserControl, IAgentView
         if (_promptMode)
         {
             if (!(SlashCommandList.SelectedItem is PromptSuggestion suggestion)) return;
+            // A command row writes its own word: there is nothing to fill in, and the next Enter sends it.
+            if (suggestion.Command != null)
+            {
+                _picking = true;
+                try
+                {
+                    Composer.Text = ClaudeSlashCommands.ReplaceToken(Composer.Text, _slashTokenStart,
+                        MentionSpanLength(), suggestion.Command);
+                    Composer.CaretIndex = Math.Min(Composer.Text.Length, _slashTokenStart + suggestion.Command.Length + 1);
+                    SlashCommandPopup.IsOpen = false;
+                }
+                finally { _picking = false; }
+                Composer.Focus();
+                return;
+            }
             var dialog = new McpPromptDialog(suggestion.Prompt, Services.Mcp) { Owner = System.Windows.Window.GetWindow(this) };
             if (dialog.ShowDialog() == true)
             {

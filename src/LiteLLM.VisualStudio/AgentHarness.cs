@@ -47,15 +47,60 @@ internal sealed class AgentHarness
     /// because the tool dispatch runs in its own method, and a tool call must be answered against the workspace
     /// of the turn that announced it — not against whatever conversation happens to be selected when it runs.</summary>
     private Workspace _workspace = new Workspace(null);
+    /// <summary>The conversation this turn belongs to, as <see cref="BackgroundShells"/> records it. A shell outlives
+    /// the turn, so the notice that one ended has to find its way back to the chat that started it and to no other.
+    /// </summary>
+    private string _shellOwner = "";
+    /// <summary>Shells that ended while this turn was running. Kept for the rest of the turn once delivered, so a
+    /// round that fails on the client does not lose the news — the transcript only grows, and re-sending a handful of
+    /// lines costs nothing next to the output it describes.</summary>
+    private readonly List<ShellCompletion> _shellNotices = new List<ShellCompletion>();
+    /// <summary>The conversation this turn belongs to, captured when it was started. A user who switches chats
+    /// mid-turn must not have this turn's checkpoint, or the anchor its estimate grows from, written into
+    /// whichever conversation happens to be selected when a call returns.</summary>
+    private readonly ChatSessionState _session;
+    /// <summary>The checkpoint this conversation opened with when the turn began, or null when none was written.
+    /// Read once here rather than per round, for the same reason the session is captured: it is the state a turn
+    /// started from, and the turn's own checkpoint supersedes it as soon as one is written.</summary>
+    private readonly CompactionCheckpoint? _checkpoint;
+    /// <summary>Set once a turn has been told that a compaction was due but there was nothing to fold. The
+    /// transcript only grows, so every later round would repeat the same sentence.</summary>
+    private bool _nothingToCompactNoted;
 
-    internal AgentHarness(IAgentView view, ExtensionServices services, ModelInfo model)
+    internal AgentHarness(IAgentView view, ExtensionServices services, ModelInfo model, ChatSessionState session)
     {
         _view = view;
         _services = services;
         _model = model;
+        _session = session;
+        _checkpoint = session.LastCheckpoint;
     }
 
     internal async Task RunAsync(CancellationToken token)
+    {
+        try
+        {
+            await RunTurnAsync(token).ConfigureAwait(true);
+        }
+        finally
+        {
+            // A shell belongs to the conversation, not to the turn: a server brought up to test an endpoint is
+            // still up when the answer is written, and a later message must be able to send it another request.
+            // What the turn owes the user is the fact that it is there — a program they watched start must not
+            // become an unexplained port holder — so the row names each one and the pid that ends it.
+            var running = _services.Shells.Running(_shellOwner.Length == 0 ? null : _shellOwner);
+            if (running.Count > 0)
+                _view.AddToolNote("shell",
+                    "Shells · " + running.Count + " still running: " +
+                    string.Join(", ", running.Select(shell => shell.Id + " (pid " + shell.ProcessId + ")")),
+                    true, null,
+                    "A background shell outlives the turn that started it, so it is still there for the next message. " +
+                    "Stop one with \"taskkill /PID <pid> /T /F\", or leave it running and say so. Its output is in its " +
+                    "log file, which read_file reads from the end.", null);
+        }
+    }
+
+    private async Task RunTurnAsync(CancellationToken token)
     {
         _services.ApplyOptions();
         // Read once per turn, not once per round: the files are the same for the whole turn, and re-reading them
@@ -66,6 +111,7 @@ internal sealed class AgentHarness
         // Read once, for the same reason the root is: which chat this turn belongs to cannot change underneath it
         // without the turn having already been started somewhere else.
         _workspace = _services.WorkspaceFor(solutionRoot);
+        _shellOwner = _services.ActiveSession.Id.ToString();
         var workspaceNotes = _workspace.Describe();
         var repoInstructions = RepoInstructions.Load(solutionRoot);
         // MCP is prepared before the first round: the servers' tools have to be in the request the model reads,
@@ -173,151 +219,241 @@ internal sealed class AgentHarness
         var transcript = _view.History;
         // Captured for the whole turn: the switch belongs to the chat the turn was started in, and flipping it
         // mid-turn must not change the transcript a loop that has already been running is built from.
-        var ignoreHistory = _services.ActiveSession.IgnoreHistory;
+        // The conversation's own numbers, captured once: the anchor the compaction estimate grows from, and the
+        // turn a checkpoint is written back to. A user who switches chats mid-turn must not have either written
+        // into whichever chat happens to be selected when a call returns.
+        var session = _session;
+        var ignoreHistory = session.IgnoreHistory;
         for (var round = 1; ; round++)
         {
             var assistant = new ChatMessage { Role = "assistant" };
             transcript.Add(assistant); last = assistant;
             finish = "";
-            // Summarized before it is shortened, and only once the request has actually outgrown its budget:
-            // under the budget there is nothing to save, and a summary would be a call spent to make the
-            // request no smaller. What this recovers is the thread — the whole reason phase 1's shortening is
-            // a loss at all — and what it cannot reach, Trim still shortens below.
-            // With earlier messages ignored, the request is this turn and nothing older. ActiveTurn.Messages already
-            // holds the user's message and every assistant/tool message of the rounds so far; the assistant being
-            // built is added to it only after its call returns, so it is not in this list yet. The full transcript
-            // is still what the window shows and what the session stores — only the request copy is cut, the same
-            // way the summary is. A null ActiveTurn (the user moved to another chat mid-turn) keeps the full
-            // history: a running loop with no turn to scope it to must still produce a valid request.
-            var prompt = ignoreHistory && _view.ActiveTurn != null
+            // With earlier messages ignored, the request is this turn and nothing older. ActiveTurn.Messages
+            // already holds the user's message and every assistant/tool message of the rounds so far; the
+            // assistant being built is added to it only after its call returns, so it is not in this list yet.
+            // The full transcript is still what the window shows and what the session stores — only the request
+            // copy is cut, the same way the checkpoint is. A null ActiveTurn (the user moved to another chat
+            // mid-turn) keeps the full history: a running loop with no turn to scope it to must still produce a
+            // valid request.
+            var raw = ignoreHistory && _view.ActiveTurn != null
                 ? _view.ActiveTurn.Messages.ToList()
                 : transcript.Take(transcript.Count - 1).ToList();
+            // The request opens with the conversation's checkpoint when it has one: the messages the checkpoint
+            // stands for are not sent again. It is rebuilt from the transcript every round rather than carried
+            // between rounds, because the transcript is what the window and the session follow and a request copy
+            // must never become a second source of truth for it. `raw` stays the whole conversation, which is what
+            // a fold's boundary is counted in — a checkpoint written two rounds ago and one written two turns ago
+            // are then the same kind of number.
+            var checkpoint = _view.ActiveTurn?.Compaction ?? _checkpoint;
+            var prompt = !ignoreHistory && checkpoint != null && checkpoint.Covered > 0
+                         && checkpoint.Covered <= raw.Count && checkpoint.Text.Length > 0
+                ? ContextCompaction.Merge(raw, checkpoint.Covered, checkpoint.Text, ContextCompaction.RequestMessage(raw))
+                : raw;
             var context = _services.Settings.EnableToolCalling
                 ? _view.ActiveTurn?.Context
                 : AgentPrompt.InlineFiles(_view.ActiveTurn?.Context, _view.ReadAttachedText);
             var errors = BuildDiagnostics.ToStandingNote(await SolutionBuild.ReadErrorListAsync().ConfigureAwait(true));
+            // Shells that ended since the previous round, delivered the way the Error List is: in the request, not
+            // in the transcript. A log read gives the output but never the fact that there will be no more of it, so
+            // without this a model watching a server waits on a shell that died one round ago.
+            foreach (var completion in _services.Shells.Drain(_shellOwner)) _shellNotices.Add(completion);
+            var shellNotes = ShellNotice.Block(_shellNotices);
             // Null offers the live snapshot; a message that narrowed the turn, or said nothing about MCP at all,
             // pins exactly what it may call instead.
             var mcpTools = _selection.PinnedDefinitions;
             var tools = _services.ToolsFor(mcpTools, _skillPlan.OffersTools);
             var requestLimit = ModelRequestBudget.Limit(_model, _services.Settings);
-            var fixedRequest = AgentPrompt.Build(new List<ChatMessage>(), context, _view.Mode, _services.Settings.EnableToolCalling, _services.Settings.EnableFileEditing, _services.Settings.EnableTerminalTools, repoInstructions, errors, mcp.Instructions, _mcpHint, _skillPlan.Instructions, workspaceNotes);
+            var fixedRequest = AgentPrompt.Build(new List<ChatMessage>(), context, _view.Mode, _services.Settings.EnableToolCalling, _services.Settings.EnableFileEditing, _services.Settings.EnableTerminalTools, repoInstructions, errors, mcp.Instructions, _mcpHint, _skillPlan.Instructions, workspaceNotes, shellNotes);
             var historyLimit = ModelRequestBudget.HistoryAllowance(requestLimit, fixedRequest, tools);
+            // A conversation is compacted before it is shortened, and only when the request has actually
+            // outgrown something: under the ceiling there is nothing to save, and a checkpoint would be a call
+            // spent to make the request no smaller. Two figures decide it, the way opencode decides:
+            //   - the ceiling, the model's window minus a buffer (the larger of 15% and 16 000 tokens by
+            //     default), and
+            //   - what the request is now: the prompt count the server reported for the last response, plus an
+            //     estimate of everything that has changed since. The provider's count is a measurement and the
+            //     difference is the estimate; there is no tokenizer here, so an unmeasured request is counted at
+            //     two characters per token — the same ratio the character budget already converts a window with.
+            // The character allowance stays as a second trigger rather than the decision: it is this build's own
+            // hard bound, and reaching it without folding would refuse a turn that a fold could save.
+            var measured = string.Equals(session.MeasuredPromptModel, _model.Key, StringComparison.Ordinal)
+                ? session.MeasuredPromptTokens
+                : 0;
+            var requestChars = (long)RequestBudget.Size(prompt, tools) + RequestBudget.Size(fixedRequest, null);
+            var estimatedTokens = ContextCompaction.Estimate(measured, session.MeasuredPromptChars, requestChars);
+            var window = _model.ContextWindowTokens > 0 ? _model.ContextWindowTokens : _services.Settings.FallbackContextTokens;
+            var ceiling = ContextCompaction.Ceiling(window, _services.Settings.CompactionBufferTokens);
+            var overChars = historyLimit <= 0 || RequestBudget.Size(prompt, null) > historyLimit;
             if (round == 1)
-                _view.AddToolNote("", "Context · model budget " + requestLimit + " characters; history allowance " + Math.Max(0, historyLimit) + " characters",
-                    true, null, "Estimated from model capacity (or configured fallback), with output/headroom reserved. Instructions, attachments and selected tool schemas are counted before compaction. This is not an exact token count.", null);
+                _view.AddToolNote("", "Context · ceiling " + (ceiling == int.MaxValue ? "none" : ceiling.ToString("N0"))
+                        + " tokens (window " + window + ", buffer " + (ceiling == int.MaxValue ? 0 : window - ceiling)
+                        + "); now about " + estimatedTokens + " tokens ("
+                        + (measured > 0 ? measured + " measured + estimate since" : "estimated from size")
+                        + "); history allowance " + Math.Max(0, historyLimit) + " characters",
+                    true, null,
+                    "Compaction is decided in tokens: the model's window less a buffer, against the last response's reported prompt count plus an estimate of what changed since. The character allowance is a separate hard safety bound on the built request. Neither is an exact token count.",
+                    null);
             // The allowance is an estimate, so it decides only whether folding the old part is worth a call. Whether
-            // the request may be sent is decided below, against the request that was actually built.
-            if (historyLimit <= 0 || RequestBudget.Size(prompt, null) > historyLimit)
-                prompt = await SummarizeAsync(prompt, _model, token).ConfigureAwait(true);
-            // Sanitizing is what keeps the request valid: every tool result must answer a call the assistant
-            // announced and every announced call must be answered, or an OpenAI-compatible server rejects
-            // the whole transcript. A cancelled tool batch or a history loaded from an older build can
-            // otherwise leave the two out of step.
-            var history = ChatStateLimits.Sanitize(prompt);
-            // Built here, not stored: the system prompt and the attachment block are added at request time and the
-            // transcript keeps only what the user typed and what the model answered.
-            // With the tools switched off an attached file is only a path, and the model has no way to open it, so
-            // a bounded excerpt goes with the request instead. The turn keeps the path either way, so the chat and
-            // the stored session are unaffected by which way the setting is set.
-            // The error list is read every round rather than once a turn, because its whole value is being
-            // current and a round that just edited a file is exactly when it has changed. Read, not built —
-            // it is a walk over items already in the window — and the block says so, so an entry that predates
-            // this turn is not read as the result of it. It joins the system prompt and never _history: that is
-            // rebuilt per request, so this needs no sanitizing, costs the stored conversation nothing, and
-            // goes away by itself once the list is clean.
-            var request = AgentPrompt.Build(history, context, _view.Mode, _services.Settings.EnableToolCalling, _services.Settings.EnableFileEditing, _services.Settings.EnableTerminalTools, repoInstructions, errors, mcp.Instructions, _mcpHint, _skillPlan.Instructions, workspaceNotes);
-
-            // Measured, not estimated. What the transport refuses on is this serialized request, and the allowance
-            // above is a few thousand characters short of it by construction: the instruction block is costed before
-            // it is written, the JSON around the text costs more than the text, and a server can add a tool between
-            // two rounds. Nothing is dropped to fit — an old result loses only its body and keeps the call it
-            // answers — because a result that answers no call is refused by the whole server.
-            var sentMcpTools = mcpTools;
-            var fit = RequestFitting.Fit(request, tools, requestLimit);
-            if (!fit.Fits)
-            {
-                // Still over by measurement, so the round continues without the MCP schemas instead of the turn
-                // ending on them. They are the one part of a request that can be left out and still leave a turn
-                // that works: the built-in tools stay, and the rounds already spent behind it stay with them. The
-                // prompt is rebuilt without the MCP block, because a server offered no MCP tool must not be told
-                // about one. A turn that gets here has lost nothing it had: it never had a sendable request.
-                var plainTools = _services.ToolsFor(Array.Empty<ToolDefinition>(), _skillPlan.OffersTools);
-                var plainRequest = AgentPrompt.Build(history, context, _view.Mode, _services.Settings.EnableToolCalling, _services.Settings.EnableFileEditing, _services.Settings.EnableTerminalTools, repoInstructions, errors, null, null, _skillPlan.Instructions, workspaceNotes);
-                var plain = RequestFitting.Fit(plainRequest, plainTools, requestLimit);
-                // Only worth taking if the schemas are lighter than they were: with no MCP tool in the request this
-                // is the same request again, and saying it was sent without them would be false.
-                if (plain.ToolChars >= fit.ToolChars) throw new InvalidOperationException(fit.Describe());
-                // Shortening reached its floor and the schemas were already left out: say what the request is made
-                // of rather than only that it is too big, so the reader knows which part to give up.
-                if (!plain.Fits) throw new InvalidOperationException(plain.Describe());
-                fit = plain;
-                tools = plainTools;
-                sentMcpTools = Array.Empty<ToolDefinition>();
-                // Once a turn: the transcript only grows, so from here every round takes the same path, and the row
-                // would otherwise be repeated for the rest of the turn.
-                if (!mcpDropped)
-                {
-                    mcpDropped = true;
-                    _view.AddToolNote("mcp", "MCP · this turn continues without MCP tool schemas: the request was over the model's budget with them, so only the built-in tools can be called", true, null, "The transcript is shortened as far as it can be first — old tool results lose their bodies and keep the calls they answer — so this is the schemas being the part that does not fit, not the conversation.", null);
-                }
-            }
-            // Note the shortening once a turn, not once a round: the same old results qualify from the round the
-            // budget is first over, and a row every round would bury the transcript.
-            if (fit.Shortened > 0 && !contextNoted)
-            {
-                contextNoted = true;
-                _view.AddToolNote("", "Context · " + fit.Shortened + " older tool result" + (fit.Shortened == 1 ? "" : "s") + " shortened to fit the request", true, null, null, null);
-            }
+            // the request may be sent is decided below, against the request that was actually built. A provider's
+            // "too long" rejection has one more answer, below: fold and send the same round again. A chat that
+            // ignores its earlier turns already sends only this turn, so there is nothing a checkpoint could stand
+            // in for — its transcript is what the character bound and the provider's own ceiling still apply to.
+            if (!ignoreHistory && _services.Settings.AutoCompaction &&
+                (ContextCompaction.Due(estimatedTokens, ceiling) || overChars))
+                prompt = await CompactAsync(raw, _model, token, CompactionTrigger.Auto, 0).ConfigureAwait(true);
 
             var bubble = _view.AddAssistantBubble(round == 1 ? "Thinking" : "Reading the tool results");
-            _view.Streamed = 0; _view.Phase = round == 1 ? "Thinking" : "Reading the tool results";
-            // A narrowed turn sends exactly the tools the message selected, a turn whose message never mentioned
-            // MCP sends none of them, and otherwise the live snapshot is used, so a list change between rounds
-            // still reaches the model on the next one.
+            // The size of the request that was finally sent, against which the provider's own prompt count is the
+            // measurement. Recorded across the loop rather than read afterwards: the fit that produced it is local
+            // to the attempt that succeeded.
+            var sentChars = 0;
+            // The provider's own ceiling is the one limit this request cannot argue with, and the estimate above has
+            // just been proved low by it. So the round is built, sent, and on that one rejection the fold the
+            // estimate declined is done after all — aimed below the size that was refused — and the same round is
+            // sent again. The turn does not end one request short of the answer the user asked for.
+            for (var attempt = 1; ; attempt++)
+            {
+                // Sanitizing is what keeps the request valid: every tool result must answer a call the assistant
+                // announced and every announced call must be answered, or an OpenAI-compatible server rejects
+                // the whole transcript. A cancelled tool batch or a history loaded from an older build can
+                // otherwise leave the two out of step.
+                var history = ChatStateLimits.Sanitize(prompt);
+                // Built here, not stored: the system prompt and the attachment block are added at request time and
+                // the transcript keeps only what the user typed and what the model answered.
+                // With the tools switched off an attached file is only a path, and the model has no way to open it,
+                // so a bounded excerpt goes with the request instead. The turn keeps the path either way, so the
+                // chat and the stored session are unaffected by which way the setting is set.
+                // The error list is read every round rather than once a turn, because its whole value is being
+                // current and a round that just edited a file is exactly when it has changed. Read, not built —
+                // it is a walk over items already in the window — and the block says so, so an entry that predates
+                // this turn is not read as the result of it. It joins the system prompt and never _history: that is
+                // rebuilt per request, so this needs no sanitizing, costs the stored conversation nothing, and
+                // goes away by itself once the list is clean.
+                var request = AgentPrompt.Build(history, context, _view.Mode, _services.Settings.EnableToolCalling, _services.Settings.EnableFileEditing, _services.Settings.EnableTerminalTools, repoInstructions, errors, mcp.Instructions, _mcpHint, _skillPlan.Instructions, workspaceNotes, shellNotes);
 
-            if (_services.Settings.EnableStreaming)
+                // Measured, not estimated. What the transport refuses on is this serialized request, and the
+                // allowance above is a few thousand characters short of it by construction: the instruction block is
+                // costed before it is written, the JSON around the text costs more than the text, and a server can
+                // add a tool between two rounds. Nothing is dropped to fit — an old result loses only its body and
+                // keeps the call it answers — because a result that answers no call is refused by the whole server.
+                var attemptTools = tools;
+                var sentMcpTools = mcpTools;
+                var fit = RequestFitting.Fit(request, attemptTools, requestLimit);
+                if (!fit.Fits)
+                {
+                    // Still over by measurement, so the round continues without the MCP schemas instead of the turn
+                    // ending on them. They are the one part of a request that can be left out and still leave a turn
+                    // that works: the built-in tools stay, and the rounds already spent behind it stay with them. The
+                    // prompt is rebuilt without the MCP block, because a server offered no MCP tool must not be told
+                    // about one. A turn that gets here has lost nothing it had: it never had a sendable request.
+                    var plainTools = _services.ToolsFor(Array.Empty<ToolDefinition>(), _skillPlan.OffersTools);
+                    var plainRequest = AgentPrompt.Build(history, context, _view.Mode, _services.Settings.EnableToolCalling, _services.Settings.EnableFileEditing, _services.Settings.EnableTerminalTools, repoInstructions, errors, null, null, _skillPlan.Instructions, workspaceNotes, shellNotes);
+                    var plain = RequestFitting.Fit(plainRequest, plainTools, requestLimit);
+                    // Only worth taking if the schemas are lighter than they were: with no MCP tool in the request
+                    // this is the same request again, and saying it was sent without them would be false.
+                    if (plain.ToolChars >= fit.ToolChars) throw new InvalidOperationException(fit.Describe());
+                    // Shortening reached its floor and the schemas were already left out: say what the request is
+                    // made of rather than only that it is too big, so the reader knows which part to give up.
+                    if (!plain.Fits) throw new InvalidOperationException(plain.Describe());
+                    fit = plain;
+                    attemptTools = plainTools;
+                    sentMcpTools = Array.Empty<ToolDefinition>();
+                    // Once a turn: the transcript only grows, so from here every round takes the same path, and the
+                    // row would otherwise be repeated for the rest of the turn.
+                    if (!mcpDropped)
+                    {
+                        mcpDropped = true;
+                        _view.AddToolNote("mcp", "MCP · this turn continues without MCP tool schemas: the request was over the model's budget with them, so only the built-in tools can be called", true, null, "The transcript is shortened as far as it can be first — old tool results lose their bodies and keep the calls they answer — so this is the schemas being the part that does not fit, not the conversation.", null);
+                    }
+                }
+                // Note the shortening once a turn, not once a round: the same old results qualify from the round the
+                // budget is first over, and a row every round would bury the transcript.
+                if (fit.Shortened > 0 && !contextNoted)
+                {
+                    contextNoted = true;
+                    _view.AddToolNote("", "Context · " + fit.Shortened + " older tool result" + (fit.Shortened == 1 ? "" : "s") + " shortened to fit the request", true, null, null, null);
+                }
+
+                _view.Streamed = 0; _view.Phase = round == 1 ? "Thinking" : "Reading the tool results";
+                // What the anchor below is the measured half of: the request's conversation and schemas, without the
+                // instruction block, which the provider's count already covers and which is built the same way every
+                // round. The same measure the next round's estimate uses, so what is subtracted is what grew.
+                sentChars = (int)Math.Min(int.MaxValue, Math.Max(0L,
+                    RequestBudget.Size(fit.Messages, sentMcpTools) - RequestBudget.Size(fixedRequest, null)));
+                // A narrowed turn sends exactly the tools the message selected, a turn whose message never mentioned
+                // MCP sends none of them, and otherwise the live snapshot is used, so a list change between rounds
+                // still reaches the model on the next one.
                 try
                 {
-                    await _services.StreamAsync(_model, fit.Messages, async update =>
-                    {
-                        // A continuation is a seam in the answer, so it gets a row of its own: the user has to be
-                        // able to tell a proxy timeout from the model changing its mind about what it was writing.
-                        if (update.Resumed)
-                            await _view.InvokeAsync(() => _view.AddToolNote("stream", "Stream · the connection dropped mid-answer; the rest of the answer was asked for and appended", true, null, null, null));
-                        assistant.Content += update.ContentDelta; assistant.Reasoning += update.ReasoningDelta;
-                        if (update.ToolCalls.Count > 0) assistant.ToolCalls = update.ToolCalls;
-                        if (update.FinishReason.Length > 0) finish = update.FinishReason;
-                        await _view.InvokeAsync(() =>
+                    if (_services.Settings.EnableStreaming)
+                        try
                         {
-                            _view.Streamed = assistant.Content.Length;
-                            _view.Phase = assistant.Content.Length > 0 ? "Writing" : "Thinking";
-                            _view.SetContent(bubble, assistant);
-                        });
-                    }, token, sentMcpTools, _skillPlan.OffersTools).ConfigureAwait(true);
-                }
-                catch
-                {
-                    // A stream the client could not finish still has the text it did deliver, and the bubble is
-                    // already showing it. Recording it is what keeps the partial answer after the session is
-                    // reloaded; an announced tool call is left out, because a call with no result would put the
-                    // stored transcript out of step and Sanitize would have to cut it on the next request.
-                    if (assistant.Content.Length > 0 && assistant.ToolCalls.Count == 0)
+                            await _services.StreamAsync(_model, fit.Messages, async update =>
+                            {
+                                // A continuation is a seam in the answer, so it gets a row of its own: the user has to be
+                                // able to tell a proxy timeout from the model changing its mind about what it was writing.
+                                if (update.Resumed)
+                                    await _view.InvokeAsync(() => _view.AddToolNote("stream", "Stream · the connection dropped mid-answer; the rest of the answer was asked for and appended", true, null, null, null));
+                                assistant.Content += update.ContentDelta; assistant.Reasoning += update.ReasoningDelta;
+                                if (update.ToolCalls.Count > 0) assistant.ToolCalls = update.ToolCalls;
+                                if (update.FinishReason.Length > 0) finish = update.FinishReason;
+                                await _view.InvokeAsync(() =>
+                                {
+                                    _view.Streamed = assistant.Content.Length;
+                                    _view.Phase = assistant.Content.Length > 0 ? "Writing" : "Thinking";
+                                    _view.SetContent(bubble, assistant);
+                                });
+                            }, token, sentMcpTools, _skillPlan.OffersTools).ConfigureAwait(true);
+                        }
+                        catch
+                        {
+                            // A stream the client could not finish still has the text it did deliver, and the bubble is
+                            // already showing it. Recording it is what keeps the partial answer after the session is
+                            // reloaded; an announced tool call is left out, because a call with no result would put the
+                            // stored transcript out of step and Sanitize would have to cut it on the next request.
+                            if (assistant.Content.Length > 0 && assistant.ToolCalls.Count == 0)
+                            {
+                                _view.ActiveTurn?.Messages.Add(ChatStateLimits.CopyMessage(assistant));
+                                _view.SaveSession();
+                            }
+                            throw;
+                        }
+                    else
                     {
-                        _view.ActiveTurn?.Messages.Add(ChatStateLimits.CopyMessage(assistant));
-                        _view.SaveSession();
+                        var complete = await _services.CompleteAsync(_model, fit.Messages, token, sentMcpTools, _skillPlan.OffersTools).ConfigureAwait(true);
+                        assistant.Content = complete.Content; assistant.Reasoning = complete.Reasoning; assistant.ToolCalls = complete.ToolCalls;
+                        _view.SetContent(bubble, assistant);
                     }
-                    throw;
                 }
-            else
-            {
-                var complete = await _services.CompleteAsync(_model, fit.Messages, token, sentMcpTools, _skillPlan.OffersTools).ConfigureAwait(true);
-                assistant.Content = complete.Content; assistant.Reasoning = complete.Reasoning; assistant.ToolCalls = complete.ToolCalls;
-                _view.SetContent(bubble, assistant);
+                catch (LiteLlmException ex) when (attempt <= ContextCompaction.ShrinkSteps.Length
+                                                  && !ignoreHistory && _services.Settings.AutoCompaction
+                                                  && ContextOverflow.IsOverflow(ex))
+                {
+                    // The bubble is reused rather than replaced: a rejected request produced no answer, and a second
+                    // bubble under the first would read as a second attempt at answering. Anything a stream managed to
+                    // deliver before the rejection is cleared with it.
+                    assistant.Content = ""; assistant.Reasoning = ""; assistant.ToolCalls = new List<ToolCall>();
+                    _view.SetContent(bubble, assistant);
+                    var budget = ContextCompaction.OverflowBudget(estimatedTokens, ceiling, attempt - 1);
+                    prompt = await CompactAsync(raw, _model, token, CompactionTrigger.Overflow, attempt, budget).ConfigureAwait(true);
+                    continue;
+                }
+                break;
             }
             // Read after the call, not before: a streamed answer reports its usage on the last chunk, which has
             // not arrived when the first token does.
             _usage.Add(_services.LastUsage);
+            // The anchor the next round's estimate grows from: the provider's own prompt count for this call, and the
+            // size of the request that produced it. A call that reported nothing leaves the previous anchor in place —
+            // a missing usage line is not a measurement of zero, and the conversation is then estimated from size.
+            var promptUsage = _services.LastUsage;
+            if (promptUsage != null && promptUsage.PromptTokens > 0)
+            {
+                session.MeasuredPromptTokens = promptUsage.PromptTokens;
+                session.MeasuredPromptChars = sentChars;
+                session.MeasuredPromptModel = _model.Key;
+            }
             _view.LastExchange = _services.LastExchange; bubble.Exchange = _view.LastExchange;   // attach the raw JSON to the bubble that came from it
             // One assistant message per round, appended in order. Overwriting the turn's first assistant
             // instead would record every round's calls against a single message, leaving the stored turn
@@ -534,7 +670,7 @@ internal sealed class AgentHarness
                 ? _selection.Allows(call.Name)
                     ? await RunMcpToolAsync(call, mcpTool, token).ConfigureAwait(true)
                     : RefuseUnselected(mcpTool)
-                : await ContextTools.ExecuteAsync(LiteLlmPackage.Instance, call.Name, call.Arguments, token, _workspace).ConfigureAwait(true);
+                : await ContextTools.ExecuteAsync(LiteLlmPackage.Instance, call.Name, call.Arguments, token, _workspace, _shellOwner).ConfigureAwait(true);
         }
         Append(call, result, revisions);
     }
@@ -662,7 +798,7 @@ internal sealed class AgentHarness
         for (var index = start; index < end; index++)
         {
             _view.Phase = "Running " + calls[index].Name;
-            running.Add(ContextTools.ExecuteAsync(LiteLlmPackage.Instance, calls[index].Name, calls[index].Arguments, token, _workspace));
+            running.Add(ContextTools.ExecuteAsync(LiteLlmPackage.Instance, calls[index].Name, calls[index].Arguments, token, _workspace, _shellOwner));
         }
         var results = await Task.WhenAll(running).ConfigureAwait(true);
         for (var index = 0; index < results.Length; index++) Append(calls[start + index], results[index], revisions);
@@ -688,78 +824,135 @@ internal sealed class AgentHarness
         _view.AddToolNote(call.Name, result.Summary, result.Ok, null, null, EditTools.Latest);
     }
 
-    /// <summary>Replaces the oldest, already-covered part of an over-budget transcript with a briefing written by
-    /// the utility model, so a long turn keeps the thread instead of only losing what it cannot afford to send.
-    ///
-    /// Returns the transcript unchanged whenever there is nothing worth doing: too little history, nothing new
-    /// since the last summary, or a call that failed. That is the rule this whole method is built around — a
-    /// summary is an improvement to the request and never something the turn depends on, so every failure here
-    /// has to leave the request exactly what the budget alone would have made it.
-    ///
-    /// The summary is written once per span and reused: what the previous one stands for is left standing, and
-    /// only the material that has piled up since is folded in, which is what keeps this from costing a call on
-    /// every round.</summary>
-    private async Task<List<ChatMessage>> SummarizeAsync(List<ChatMessage> messages, ModelInfo model, CancellationToken token)
+    /// <summary>A compaction the user asked for with <c>/compact</c>. It is the automatic path with a different
+    /// trigger and no caller waiting on the request it returns: the checkpoint it writes is what the next turn
+    /// opens with, and nothing is sent, so an idle chat stays idle. The turn the command opened stores the row, so
+    /// a reloaded window draws it back.</summary>
+    internal async Task CompactNowAsync(CancellationToken token)
     {
-        var summaries = _view.ActiveTurn?.Summaries;
-        var covered = summaries != null && summaries.Count > 0 ? summaries[summaries.Count - 1].Messages : 0;
-        // A stored transcript is head-sliced on the way to disk, so a count from an earlier turn can name
-        // messages that are no longer there. Starting over costs one call; trusting it would silently stop
-        // summarizing for the rest of the conversation.
-        if (covered < 0 || covered > messages.Count) covered = 0;
-        var previous = covered > 0 ? summaries![summaries.Count - 1].Detail : null;
-        // The one message a briefing may not stand in for. Every path out of this method puts it back in front of
-        // the messages the summary kept, so a wrong or empty summary can cost the thread but never the request.
-        var pinned = ContextSummary.RequestMessage(messages);
+        var messages = _view.History.ToList();
+        if (messages.Count == 0)
+        {
+            _view.AddToolNote("", "Nothing to compact: this conversation has no messages yet.", false, null, null, null);
+            return;
+        }
+        await CompactAsync(messages, _model, token, CompactionTrigger.Manual, 1).ConfigureAwait(true);
+        _view.Phase = "";
+    }
 
-        if (!ContextSummary.TryBuildRequest(messages, covered, previous, ChatStateLimits.KeepRecentToolRounds, out var request, out var through))
-            return covered > 0 ? ContextSummary.Merge(messages, covered, previous!, pinned) : messages;
+    /// <summary>Folds the material between the checkpoint already in hand and the verbatim tail into one structured
+    /// checkpoint, written by the utility model.
+    ///
+    /// <paramref name="messages"/> is the whole conversation, so the boundary this writes — the checkpoint's
+    /// <see cref="CompactionCheckpoint.Covered"/> — is an index into the transcript and not into the folded request:
+    /// the same number names the same messages on the next round and on the next turn. The tail kept word for word
+    /// is read from its end, so what it keeps is what the model is still working on.
+    ///
+    /// Every failure returns the transcript folded no further than it was: a checkpoint is an improvement to the
+    /// request and never something a turn depends on. <paramref name="attempt"/> is the overflow attempt that asked
+    /// for this and <paramref name="budgetTokens"/> its target size; when the provider rejected the request outright
+    /// the tail is cut to fit inside that target rather than at the configured keep.</summary>
+    private async Task<List<ChatMessage>> CompactAsync(List<ChatMessage> messages, ModelInfo model, CancellationToken token,
+        CompactionTrigger trigger, int attempt, int budgetTokens = 0)
+    {
+        var checkpoint = _view.ActiveTurn?.Compaction ?? _checkpoint;
+        var covered = checkpoint != null && checkpoint.Text.Length > 0 ? checkpoint.Covered : 0;
+        // A stored transcript is head-sliced on the way to disk, so a boundary from an earlier turn can name
+        // messages that are no longer there. Starting over costs one call; trusting it would skip the messages the
+        // checkpoint never stood for.
+        if (covered < 0 || covered > messages.Count) covered = 0;
+        var previous = covered > 0 ? checkpoint!.Text : null;
+        var pinned = ContextCompaction.RequestMessage(messages);
+        var keep = budgetTokens > 0
+            ? ContextCompaction.OverflowKeep(budgetTokens, _services.Settings.CompactionKeepTokens)
+            : ContextCompaction.EffectiveKeep(_services.Settings.CompactionKeepTokens);
+        var keepFrom = ContextCompaction.KeepFrom(messages, keep);
+
+        var utility = UtilityModel(model);
+        var utilitySettings = ContextCompaction.UtilitySettings(_services.Settings);
+        utilitySettings.FallbackContextTokens = _services.Settings.FallbackContextTokens;
+        utilitySettings.ModelContextOverrides = _services.Settings.ModelContextOverrides;
+        // The span handed over is bounded by what the utility model can read, minus what the instruction and the
+        // checkpoint in hand already cost, so the request that writes the checkpoint is one this build will send.
+        // A fold whose span is too big folds less this time and the rest on the next round.
+        var update = previous != null;
+        var instruction = ContextCompaction.BuildPrompt(update, update && !ContextCompaction.Filled(previous));
+        var room = (long)ModelRequestBudget.Limit(utility, utilitySettings) - instruction.Length - (previous?.Length ?? 0) - 2000;
+        var span = (int)Math.Max(ContextCompaction.MinSpanChars, Math.Min(ContextCompaction.MaxSpanChars, room));
+
+        if (!ContextCompaction.TryBuildRequest(messages, covered, keepFrom, previous, out var request, out var through, span))
+            return NothingToFold(messages, covered, previous, pinned, trigger);
 
         try
         {
-            _view.Phase = "Summarizing the conversation";
-            var utility = UtilityModel(model);
-            var utilitySettings = ContextSummary.UtilitySettings(_services.Settings);
-            utilitySettings.FallbackContextTokens = _services.Settings.FallbackContextTokens;
-            utilitySettings.ModelContextOverrides = _services.Settings.ModelContextOverrides;
-            RequestBudget.EnsureFits(request, null, ModelRequestBudget.Limit(utility, utilitySettings));
+            _view.Phase = trigger == CompactionTrigger.Manual ? "Compacting the conversation" : "Compacting the older messages";
+            _view.Streamed = 0;
             var answer = await _services.CompleteInternalAsync(utility, request, utilitySettings, token).ConfigureAwait(true);
-            _usage.Add(_services.LastUsage);   // the summary is a call the turn made, so it is part of what it cost
-            var text = ChatStateLimits.Clip(answer.Content.Trim(), ContextSummary.MaxSummaryChars);
-            // A reasoning model can spend the whole small budget thinking and answer with nothing. Replacing the
-            // messages with an empty briefing would quietly delete the conversation, so it is taken as the failure
-            // it is and said out loud.
-            if (text.Length == 0)
+            _usage.Add(_services.LastUsage);   // the checkpoint is a call the turn made, so it is part of what it cost
+            var text = answer.Content.Trim();
+            // A model that answers with prose, or with nothing at all, has not written a checkpoint. It gets one
+            // reminder — the same single retry opencode makes — because the instruction is long and a model can miss
+            // it once. A second miss is a model that cannot follow the template, and the older checkpoint stands.
+            if (!ContextCompaction.Filled(text))
             {
-                _view.AddToolNote("", "Context · the utility model (" + utility.Id + ") returned no summary, so the older messages were left in place", false, null, null, null);
-                return covered > 0 ? ContextSummary.Merge(messages, covered, previous!, pinned) : messages;
+                request.Add(new ChatMessage { Role = "user", Content = ContextCompaction.Nudge });
+                answer = await _services.CompleteInternalAsync(utility, request, utilitySettings, token).ConfigureAwait(true);
+                _usage.Add(_services.LastUsage);
+                text = answer.Content.Trim();
             }
-            // The new briefing covers the previous one plus what came after it, so a handful of words replacing
-            // pages is not a summary of them. That is what happened when a turn answered "the request is not in
-            // the retained context": each later briefing was written from a one-line predecessor, and the
-            // request it dropped was never given back. The earlier briefing stands instead.
-            if (!ContextSummary.IsUsable(previous, text))
+            if (!ContextCompaction.Filled(text))
             {
-                _view.AddToolNote("", "Context · the utility model (" + utility.Id + ") returned a briefing that lost most of the one before it, so the earlier briefing was kept", false, null,
-                    "A summary that drops what the previous one carried is taken as a failed summary. It is an improvement to the request, never something the turn depends on, so keeping the earlier one loses nothing.", null);
-                _services.Log("Context summary rejected: " + text.Length + " characters after a briefing of " + (previous ?? "").Length);
-                return covered > 0 ? ContextSummary.Merge(messages, covered, previous!, pinned) : messages;
+                _view.AddToolNote("", "Context · the utility model (" + utility.Id + ") did not return a checkpoint in the required sections, so the older messages were left in place", false, null,
+                    "A checkpoint has to carry the template's headings. One written as prose would read to the next model as an instruction rather than as established context, so it is taken as a failed compaction — which costs the request the fold, never the turn.", null);
+                _services.Log("Compaction rejected: no template heading in a reply of " + text.Length + " characters");
+                return covered > 0 ? ContextCompaction.Merge(messages, covered, previous!, pinned) : messages;
             }
 
-            var report = ContextSummary.Report(through, text, ContextSummary.Describe(messages, through));
-            _view.ActiveTurn?.Summaries.Add(report);
-            _view.AddContextSummaryNote(report);
-            _services.Log("Context summarized with " + utility.Id + ": " + through + " messages, " + text.Length + " characters");
+            text = ChatStateLimits.Clip(text, ContextCompaction.MaxSummaryChars);
+            var report = ContextCompaction.Report(through, text, ContextCompaction.Describe(messages, through, trigger), trigger);
+            var turn = _view.ActiveTurn;
+            if (turn != null)
+            {
+                turn.Compaction = new CompactionCheckpoint { Covered = through, Text = text, UpdatedUtc = DateTime.UtcNow };
+                // Bounded like everything else a turn keeps: a turn that compacts more often than this is a loop.
+                if (turn.Summaries.Count < ContextCompaction.MaxPerTurn) turn.Summaries.Add(report);
+            }
+            _view.AddCompactionNote(report);
+            // The anchor described the request as it was before this fold, so it measures nothing now. The next
+            // round estimates from the request's own size until a call reports a new count of its own.
+            _session.MeasuredPromptTokens = 0;
+            _session.MeasuredPromptChars = 0;
+            _session.MeasuredPromptModel = "";
+            _services.Log("Conversation compacted with " + utility.Id + ": " + through + " messages, " + text.Length
+                + " characters, " + trigger + (attempt > 1 ? " attempt " + attempt : ""));
             _view.SaveSession();
-            return ContextSummary.Merge(messages, through, text, pinned);
+            return ContextCompaction.Merge(messages, through, text, pinned);
         }
-        catch (OperationCanceledException) { throw; }   // the user stopped; that is not a summarization failure
+        catch (OperationCanceledException) { throw; }   // the user stopped; that is not a compaction failure
         catch (Exception ex)
         {
-            _view.AddToolNote("", "Context · could not summarize the older messages (" + ex.Message + "), so the request was sent without a briefing", false, null, null, null);
-            _services.Log("Context summary failed: " + ex);
-            return covered > 0 ? ContextSummary.Merge(messages, covered, previous!, pinned) : messages;
+            _view.AddToolNote("", "Context · could not write a checkpoint (" + ex.Message + "), so the request was sent without one", false, null, null, null);
+            _services.Log("Compaction failed: " + ex);
+            return covered > 0 ? ContextCompaction.Merge(messages, covered, previous!, pinned) : messages;
         }
+    }
+
+    /// <summary>The row for a compaction that was due but had nothing new to fold: the newest messages are already
+    /// everything between the checkpoint and now. Once a turn for the automatic path, because every later round
+    /// would repeat it; once per command for the manual one, because the user asked for an answer.</summary>
+    private List<ChatMessage> NothingToFold(List<ChatMessage> messages, int covered, string? previous, ChatMessage? pinned,
+        CompactionTrigger trigger)
+    {
+        if (trigger != CompactionTrigger.Auto || !_nothingToCompactNoted)
+        {
+            _nothingToCompactNoted = true;
+            _view.AddToolNote("", trigger == CompactionTrigger.Manual
+                    ? "Nothing to compact: the newest messages already fit inside the keep the setting reserves, so no call was spent"
+                    : "Context · compaction was due but there was nothing before the verbatim tail to fold into a checkpoint",
+                false, null,
+                "The tail kept word for word is \"Keep beside the checkpoint (tokens)\" in Options · Context: lower it to fold more of the conversation, or send more messages so something sits before the tail. A request that is over the ceiling with nothing foldable is shortened by the character bound instead, and the provider's own ceiling still applies.", null);
+        }
+        return covered > 0 ? ContextCompaction.Merge(messages, covered, previous!, pinned) : messages;
     }
 
     /// <summary>The model the extension thinks with: the configured utility model, or the one the chat is already

@@ -139,24 +139,52 @@ public static class CommandExecutor
         catch (InvalidOperationException) { }
     }
 
-    private static ProcessStartInfo StartInfo(CommandShell shell, string command, string workingDirectory)
+    private static ProcessStartInfo StartInfo(CommandShell shell, string command, string workingDirectory) =>
+        StartInfoFor(shell, command, workingDirectory, null);
+
+    /// <summary>The process one command starts, and the quoting that goes with it. Public because a background shell
+    /// is the same shell started with its output sent to a file: a second copy of these rules would drift from this
+    /// one, and the failure would be a command that works in the foreground and not in the background.
+    ///
+    /// With <paramref name="logPath"/> the redirection is done by the shell itself rather than by a pipe this process
+    /// owns. A pipe is inherited by everything the command starts, so a server that outlives the command keeps the
+    /// reader open and nothing ever ends; a file has no reader and stays readable afterwards.</summary>
+    public static ProcessStartInfo StartInfoFor(CommandShell shell, string command, string workingDirectory, string? logPath)
     {
         var powerShell = shell == CommandShell.PowerShell;
+        string arguments;
+        if (powerShell)
+        {
+            // Encoded rather than quoted: the command is arbitrary text, and base64 is the only quoting that never
+            // meets a character it cannot carry.
+            var script = logPath == null
+                ? command
+                : "& {\n" + command + "\n} *> '" + logPath.Replace("'", "''") + "'";
+            arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + Encode(script);
+        }
+        else
+        {
+            // /s strips exactly the first and last quote, which leaves the command's own quotes alone.
+            arguments = logPath == null
+                ? "/d /s /c \"" + command + "\""
+                : "/d /s /c \"" + command + " > \"" + logPath + "\" 2>&1\"";
+        }
         return new ProcessStartInfo
         {
             FileName = powerShell ? "powershell.exe" : "cmd.exe",
-            Arguments = powerShell
-                ? "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + Convert.ToBase64String(Encoding.Unicode.GetBytes(command))
-                : "/d /s /c \"" + command + "\"",
+            Arguments = arguments,
             WorkingDirectory = workingDirectory,
             UseShellExecute = false,
             CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8
+            RedirectStandardOutput = logPath == null,
+            RedirectStandardError = logPath == null,
+            StandardOutputEncoding = logPath == null ? Encoding.UTF8 : null,
+            StandardErrorEncoding = logPath == null ? Encoding.UTF8 : null
         };
     }
+
+    private static string Encode(string script) =>
+        Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
 
     private static Task CancellationTask(CancellationToken token)
     {
@@ -166,7 +194,10 @@ public static class CommandExecutor
         return source.Task;
     }
 
-    private static void KillTree(Process process)
+    /// <summary>Kills a process and everything it spawned. Public because a background shell outlives the call
+    /// that started it: <see cref="BackgroundShells.Stop"/> is asked to end one later, and the tree is the only
+    /// thing that actually frees the port.</summary>
+    public static void KillTree(Process process)
     {
         try
         {

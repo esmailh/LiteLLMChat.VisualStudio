@@ -152,11 +152,24 @@ public sealed class ChatSessionStore
                 .OrderBy(t => t.StartedUtc)
                 .Skip(Math.Max(0, session.Turns.Count - ChatStateLimits.MaxTurnsPerSession))
                 .ToList();
+            // The anchor is a size, not an index: a stored document that claims more than this session could
+            // possibly hold is dropped rather than used, because the estimate it would produce is a guess in the
+            // wrong direction (too small), and too small is the direction that refuses a turn.
+            session.MeasuredPromptTokens = Math.Max(0, session.MeasuredPromptTokens);
+            session.MeasuredPromptChars = Math.Max(0, session.MeasuredPromptChars);
+            session.MeasuredPromptModel ??= "";
+            // A checkpoint's boundary is an index into the flattened transcript. A turn head-sliced on the way to
+            // disk moves every index after it, and a checkpoint that was trusted anyway would skip messages it
+            // never stood for. The text is kept — it is the only record of the sliced-away turns — and the
+            // boundary is dropped so the next turn folds the conversation again from its beginning.
+            var sliced = false;
             foreach (var turn in session.Turns)
             {
                 turn.Messages ??= new List<ChatMessage>();
                 turn.Context ??= new List<ChatContextItem>();
-                turn.Messages = ChatStateLimits.Sanitize(turn.Messages.Skip(Math.Max(0, turn.Messages.Count - ChatStateLimits.MaxMessagesPerTurn)).Select(ChatStateLimits.CopyMessage));
+                var skip = Math.Max(0, turn.Messages.Count - ChatStateLimits.MaxMessagesPerTurn);
+                if (skip > 0) sliced = true;
+                turn.Messages = ChatStateLimits.Sanitize(turn.Messages.Skip(skip).Select(ChatStateLimits.CopyMessage));
                 turn.Context = turn.Context.Take(12).Select(c => new ChatContextItem
                 {
                     Kind = ChatStateLimits.Clip(c.Kind, 80),
@@ -186,23 +199,31 @@ public sealed class ChatSessionStore
                     turn.Usage.CompletionTokens = Math.Max(0, turn.Usage.CompletionTokens);
                     turn.Usage.TotalTokens = Math.Max(0, turn.Usage.TotalTokens);
                 }
-                // A summary is model output, so it arrives without a size like a build log does, and it is
-                // bounded the same way. The list is capped as well: a turn that summarized more often than this
-                // stopped being a conversation and became a loop.
-                turn.Summaries ??= new List<ContextSummaryReport>();
+                // Checkpoints and their rows are model output, so they arrive without a size like a build log
+                // does, and they are bounded the same way. The row list is capped as well: a turn that compacted
+                // more often than this stopped being a conversation and became a loop.
+                turn.Summaries ??= new List<CompactionReport>();
                 turn.Summaries = turn.Summaries
                     .Where(s => s != null)
-                    .Take(ContextSummary.MaxPerTurn)
-                    .Select(s => new ContextSummaryReport
+                    .Take(ContextCompaction.MaxPerTurn)
+                    .Select(s => new CompactionReport
                     {
                         Messages = Math.Max(0, s.Messages),
                         Summary = ChatStateLimits.OneLine(s.Summary, 200),
                         // The coverage line is a sentence built from the transcript, so it is bounded like the
                         // label it sits beside rather than trusted at whatever length it was written.
                         Covered = ChatStateLimits.OneLine(s.Covered ?? "", 400),
-                        Detail = ChatStateLimits.Clip(s.Detail ?? "", ContextSummary.MaxSummaryChars)
+                        Detail = ChatStateLimits.Clip(s.Detail ?? "", ContextCompaction.MaxSummaryChars),
+                        Trigger = ChatStateLimits.OneLine(s.Trigger ?? "", 20)
                     })
                     .ToList();
+                if (turn.Compaction != null)
+                {
+                    turn.Compaction.Text = ChatStateLimits.Clip(turn.Compaction.Text ?? "", ContextCompaction.MaxSummaryChars);
+                    if (turn.Compaction.Covered < 0) turn.Compaction.Covered = 0;
+                    // A checkpoint is model output and must not be an empty message at the head of a request.
+                    if (turn.Compaction.Text.Length == 0) turn.Compaction = null;
+                }
                 if (recoverInterrupted && (turn.Status == ChatTurnStatus.Pending || turn.Status == ChatTurnStatus.Streaming))
                 {
                     turn.Status = ChatTurnStatus.Cancelled;
@@ -210,6 +231,9 @@ public sealed class ChatSessionStore
                     turn.CompletedUtc ??= DateTime.UtcNow;
                 }
             }
+            if (sliced)
+                foreach (var turn in session.Turns)
+                    if (turn.Compaction != null) turn.Compaction.Covered = 0;
         }
         document.Sessions = document.Sessions
             .Where(s => s != null)

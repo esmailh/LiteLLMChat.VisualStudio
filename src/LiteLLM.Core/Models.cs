@@ -66,6 +66,17 @@ public sealed class UserSettings
     public RtkMode RtkOutputMode { get; set; } = RtkMode.Auto;
     public int FallbackContextTokens { get; set; } = 128000;
     public string ModelContextOverrides { get; set; } = "";
+    /// <summary>Compact a conversation as it nears the model's ceiling, without being asked. The ceiling is the
+    /// window minus a buffer, and the decision is made from the provider's measured prompt count plus what has
+    /// changed since. Off leaves compaction to the <c>/compact</c> command, a provider's "too long" rejection
+    /// included — the switch is the one opencode exposes as <c>compaction.auto</c>.</summary>
+    public bool AutoCompaction { get; set; } = true;
+    /// <summary>Tokens of the newest conversation kept verbatim beside the checkpoint. The rest of the folded
+    /// span is what the checkpoint stands for.</summary>
+    public int CompactionKeepTokens { get; set; } = ContextCompaction.DefaultKeepTokens;
+    /// <summary>Tokens kept free below the model's window before automatic compaction. Zero is the opencode
+    /// default: the larger of 15% of the window and 16 000 tokens. A count that would leave no room is ignored.</summary>
+    public int CompactionBufferTokens { get; set; }
     /// <summary>Tool-calling rounds allowed before the chat asks whether to continue.</summary>
     public int MaxToolRounds { get; set; } = ChatStateLimits.DefaultToolRounds;
     /// <summary>Model the extension uses for its own calls — summarizing a long conversation's older messages

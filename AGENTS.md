@@ -185,13 +185,72 @@ A reply names a file, not a path: `StoreGroupService.cs`, not `src/StoreGrouper/
   is rebuilt rather than the click giving up on a name it has not seen; when a solution is closed the
   index is dropped by the same root comparison the symbol index uses.
 
+## Running the project and really testing it
+
+Reading a solution is not the same as running one, and until 1.8.12 there was no way to call a service at all. The
+flow is opencode's, not a set of extra tools: **one command, a `background` flag, a log file, and the same tools to
+read it and to test what it started.** Start the program, read its log until it says it is listening, send real
+requests, correlate them with the log, stop it.
+
+- **`background: true` is the same tool, not a second one.** `run_powershell` and `run_cmd` in
+  `TerminalTools` return an exit code when they wait for the end, and an id, a pid and the path of a log file
+  when they do not. There is no `shell` / `stop_shell` pair: killing is `taskkill /PID <pid> /T /F` through
+  `run_cmd`, which is also what the model is told. `workdir` and `timeout_seconds` are the other two arguments,
+  and a timeout applies only to the foreground case.
+- **`BackgroundShells` (Core) owns them, once, through `ExtensionServices.Shells`.** A server outlives the tool
+  call and the turn that started it — that is what makes "test this endpoint" possible in the next message — so
+  it is not stopped in `RunAsync`'s `finally`. `ChatControl` disposes it with the extension.
+- **A shell belongs to a conversation.** `Start` records the session id, `Running(owner)` and `Drain(owner)`
+  filter by it, and `ChatControl.ShellCompleted` draws a row only for the chat that started the shell. Two
+  conversations share one manager; a notice about one chat's server must not appear in another.
+- **Output is redirected by the shell, not piped.** `CommandExecutor.StartInfoFor(shell, command, workdir, log)`
+  is the single quoting authority: PowerShell gets `& { <command> } *> '<log>'` through `-EncodedCommand`, cmd
+  gets `cmd /d /s /c "<command> > "<log>" 2>&1"`. A pipe is a handle every child inherits, and a server holding
+  one open keeps a reader waiting forever; a file has no reader and is still readable after the shell is gone.
+- **A log is read from its end.** `ShellLog.Read` opens it `FileShare.ReadWrite | Delete`, detects UTF-16 from
+  the file (PowerShell's `*>` writes UTF-16LE with a BOM) and `read_file` on a log returns the tail unless
+  `start_line` is given, because the last line is what says a program is ready. `ShellLogTests` is where those
+  cases live, including a live file and a tail window that starts past the BOM.
+- **`read_file` recognises its own logs first.** `BackgroundShells.TryResolveLogPath` accepts a full path or a
+  bare `shell-1.log`, and only under the session's own folder. A log is outside the workspace by design, so the
+  workspace check would otherwise refuse the one file the extension just told the model to read.
+- **A completion notice goes into the system prompt, never into `_history`.** `ShellNotice` builds the
+  `<shells>` block, `AgentPrompt.WithShells` appends it, and `AgentHarness` drains at each round boundary
+  (`_shellNotices` keeps what was already delivered, so a failed round does not lose the news). Same reasoning as
+  the Error List: it is a fact about the outside world, and a message would need `Sanitize` handling, would be
+  stored in the session, and would outlive the shell it describes. The transcript gets **one row** when the
+  event fires, so the user sees it too.
+- **A deliberate stop is silent.** `Stop` sets `Silent` before the kill, so the exit event it causes is not a
+  completion: the turn asked for it, the answer it has is the call's own, and announcing it would make the model
+  read a log it chose to close. `Dispose` does the same for everything still running.
+- **Starting is a command and uses the command card** (`TerminalTools.Confirm`). A background command's card says
+  so, and its button says *Start*: "run this" and "leave this running" are different answers. A missing handler
+  denies, as everywhere. The Claude backend never sees any of this — it runs its own harness.
+- **`ToolExecutionPolicy` keeps the background case under `EnableTerminalTools`**, because it is the same tool:
+  the switch that gates a command gates what a command could leave running.
+- **Every bound says so.** `MaxShells` is refused with a sentence naming the shells to stop; a missing working
+  directory is refused with its path; a command that died before it was registered still reports its exit code.
+  A shell that ends is never silent, and neither is a start that could not happen.
+- **`workdir` is confined like a path.** It resolves through `Workspace.Resolve` — solution-relative, `Label/...`
+  for an added project, or an absolute path inside a root — and defaults to `Workspace.Primary`.
+- **Unlike opencode, a completion does not start a turn by itself.** The notice is delivered with the next
+  message; a shell ending while the chat is idle must not spend a model call the user did not make. The row in
+  the transcript is what keeps it from being silent.
+- **The turn-end row names what is still running** instead of stopping it: a shell is the conversation's, and a
+  server the user watched start must not disappear unexplained. What the turn owes them is the pid that ends it.
+- **The guidance is in `AgentPrompt.BaseInstructions`**, next to the command rules it corrects: discover how the
+  project starts from `launchSettings.json` / `appsettings` / `Program.cs` rather than guessing, ask only for what
+  the repository cannot say, start it with `background`, read the log for the readiness line instead of sleeping,
+  send requests with `curl.exe`, treat 4xx/5xx as results, correlate a request with the log line it produced, and
+  stop the program or say which shell is left running.
+
 ## Style
 
 - One concept per file.
 - Comments explain *why*, not what. The existing code is written that way; match it.
 - `public` in Core, `internal` in the VisualStudio project.
 - Nullable reference types are enabled in every project.
-- Nothing in the agent loop happens silently: a shortened result, a summary, a test run and a check
+- Nothing in the agent loop happens silently: a shortened result, a checkpoint, a test run and a check
   that could not be made each get their own row in the transcript.
 
 ## Changing the agent loop
@@ -223,20 +282,50 @@ take them lightly:
   It is read rather than built, and the block says so, so an entry predating the turn is not read
   as its result. In the history it would need `Sanitize` handling, would be written to the session,
   and would outlive the errors it describes;
-- `ContextSummary` folds the oldest part of an over-budget transcript into one briefing, and what
-  it covers is always a **prefix ending on a round boundary** (`ContextBudget.RecentFrom`) —
-  cutting inside a round would take a call away and leave its result behind. The replacement is a
-  `user` message at the head, because `Sanitize` cuts everything before the first one. It is put
-  into the *request copy* only: `_history`, the chat and the stored session keep every message;
-- **the request outlives every briefing.** A briefing is model output, and one that answered pages
-  of context with a line (1.8.11's report: *the original request is absent from the retained
-  context*) used to take the user's own message with it, because each later briefing was written
-  from that line alone. `ContextSummary.RequestMessage` pins the message the turn is answering
-  verbatim, and every path out of `SummarizeAsync` puts it back in front of the kept rounds — a
-  summary may cost the thread, never the question. `ContextSummary.IsUsable` also rejects a briefing
-  that keeps less than `MinPreviousShare` (a quarter) of the one it replaces and leaves the earlier
-  one standing, with a row and a log line saying so. Pinning is why the attachment block, attached to
-  the last `user` message, lands on the request rather than on the briefing;
+- `ContextCompaction` folds the older part of a conversation into a structured checkpoint, the way
+  opencode compacts a session. The ceiling it measures against is the model's window minus a buffer
+  (`max(15% of the window, 16 000)` tokens, or `CompactionBufferTokens` when that leaves room), and
+  the decision is made from the provider's own `PromptTokens` for the last call plus a **two
+  characters per token** estimate of what has grown since — this build has no tokenizer, so that
+  ratio is deliberately conservative and `RequestFitting` remains the hard character bound;
+- a compaction has one of three triggers — `Auto` (the ceiling was reached), `Overflow` (the provider
+  rejected the round), `Manual` (`/compact`), stored by name on `CompactionReport` — and each writes
+  the same fixed template. A reply that does not carry the template's headings is a failed compaction:
+  it gets one `ContextCompaction.Nudge` retry and then the earlier checkpoint stands, with a row and a
+  log line. An existing checkpoint is **updated**, not replaced: the previous text takes the place of
+  the messages it stands for in the request that rewrites it, so requirements and open questions are
+  not lost one fold at a time. The newest `CompactionKeepTokens` (default 15 000) stay verbatim beside
+  it, cut on a round boundary so a call is never taken away from its result;
+- **the boundary is an index into the whole transcript**, so the same number names the same messages
+  on the next round and on the next turn. The request is rebuilt each round as checkpoint + tail, and
+  it is the *request copy* only: the chat and the stored session keep every message. A transcript the
+  store head-sliced no longer agrees with a boundary from an earlier turn, so `ChatSessionStore`
+  resets `CompactionCheckpoint.Covered` to 0 and keeps the text — trusting a stale boundary would skip
+  messages the checkpoint never stood for. `TryBuildRequest` folds at most `MaxSpanChars` and never
+  claims a message it did not render, and its span budget floors at `MinSpanChars = 8 000`, so a span
+  cut only binds on conversations whose flattest form exceeds that;
+- the checkpoint is a `user` message wrapping `<conversation-checkpoint>`, because `Sanitize` cuts
+  everything before the first user message and a checkpoint that reads like an instruction gets
+  answered instead of continued from. **The request outlives every checkpoint:**
+  `ContextCompaction.RequestMessage` pins the message the turn is answering verbatim, and every path
+  out of `CompactAsync` puts it back in front of the kept rounds — a fold may cost the thread, never
+  the question. Pinning is also why the attachment block, attached to the last `user` message, lands on
+  the request rather than on the checkpoint;
+- the provider's own ceiling gets the last word. `ContextOverflow` recognises the one rejection
+  compaction can answer (a 400/413 whose body says the context or prompt is too long), and the round is
+  folded and **sent again** instead of ending the turn, up to `ShrinkSteps.Length` times
+  (`.85, .7, .5, .35` of what the estimate believed, never above the ceiling), each attempt aiming
+  further below the size that was refused. The bubble is reused and cleared, because a rejected request
+  produced no answer. A fold also clears the anchor (`MeasuredPromptTokens`/`Chars`/`Model`) — it
+  described the request before the fold and measures nothing after it;
+- auto-compaction and the overflow fold are both skipped when `IgnoreHistory` is on: that request is
+  already this turn only, so there is nothing a checkpoint could stand in for. `/compact` still folds
+  the whole conversation, on the LiteLLM backend only, through `AgentHarness.CompactNowAsync`: it
+  opens a turn of its own for the row, sends nothing, and the chat stays idle until the next message.
+  A fold with nothing to fold is answered with a row and no call — the newest messages already fit
+  inside "Keep beside the checkpoint (tokens)", so the setting is what to lower — and the window's
+  "Generating…" is `SetBusy`'s own placeholder, which `SetBusy(false)` takes down while leaving an
+  outcome it did not write (`Stopped`, an error) in place;
 - automatic verification is two checks, and the second depends on the first: the build
   (`SolutionBuild`) and then, only once that has come back clean in **this** round, the tests
   (`SolutionTests`). Tests are never run against assemblies from an earlier round — that reports on
