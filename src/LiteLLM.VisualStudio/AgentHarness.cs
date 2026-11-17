@@ -79,6 +79,31 @@ internal sealed class AgentHarness
         var explained = inactiveMentions.SelectMany(mention => mention.Tokens).ToList();
         if (_services.Settings.EnableToolCalling && _services.Settings.EnableMcp)
         {
+            // An instruction that outlives the message it arrived in. The user should not have to say "use MCP"
+            // again in every turn of a chat they have already said it about, and the sentence is the only place
+            // that can be said without a control of its own. It is written before anything connects, so it is
+            // remembered even by a turn whose servers then fail: what the chat was told is not a property of a
+            // connection. The row is drawn once, when the answer changes - a chat state is not a per-turn event.
+            var instruction = McpChatInstruction.Read(CurrentUserMessage());
+            if (instruction != McpChatRequest.None)
+            {
+                var everyTurn = instruction == McpChatRequest.EveryTurn;
+                if (_services.ActiveSession.McpEveryTurn != everyTurn)
+                {
+                    _services.ActiveSession.McpEveryTurn = everyTurn;
+                    _view.SaveSession();
+                    _view.AddToolNote("mcp", everyTurn
+                            ? "MCP · this chat is now offered the servers' tools on every turn"
+                            : "MCP · this chat is back to being offered MCP tools only by a message that names one",
+                        true, null, everyTurn
+                            ? "Asked for in a message rather than set here: it belongs to this conversation and is saved " +
+                              "with it. Say something like \"don't use MCP in this chat anymore\" to stop."
+                            : null, null);
+                }
+            }
+            // Read once for the turn, like the token budget: a message in the middle of the chat cannot change the
+            // offer of a turn that has already started.
+            var offerMcpEveryTurn = _services.ActiveSession.McpEveryTurn;
             try
             {
                 _view.Phase = "Connecting MCP servers";
@@ -98,10 +123,11 @@ internal sealed class AgentHarness
             // here rather than per round means a tools/list_changed mid-turn cannot widen a narrowed turn: the
             // user chose these tools for this message. With the "only when the message asks" setting on, a
             // message that says nothing about MCP is offered none of them — that is what keeps an ordinary turn
-            // from carrying every server's schemas and waiting on their lists.
+            // from carrying every server's schemas and waiting on their lists. A chat that was told to use MCP
+            // every turn takes the path the setting would have given it.
             _selection = McpToolSelection.Resolve(_services.Mcp.Snapshot, CurrentUserMessage(),
                 _services.Settings.McpMaxToolsPerTurn, explained,
-                offerWhenUnmentioned: !_services.Settings.McpToolsOnlyWhenMentioned);
+                offerWhenUnmentioned: !_services.Settings.McpToolsOnlyWhenMentioned || offerMcpEveryTurn);
             foreach (var row in _selection.Rows)
                 _view.AddToolNote("mcp", row.Summary, row.Ok, null, row.Detail, null);
         }

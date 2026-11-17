@@ -107,6 +107,12 @@ public sealed class ChatSessionState
     /// model may touch, so the list is bounded (<see cref="Workspace.MaxExtraRoots"/>) and never includes the
     /// solution itself.</summary>
     public List<string> ExtraRoots { get; set; } = new List<string>();
+    /// <summary>True when this conversation was told, in a message, to be offered the MCP servers' tools on every
+    /// turn (<see cref="McpChatInstruction"/>). It belongs to the chat rather than to the settings — it is a
+    /// statement about this conversation, and a new chat must not inherit it — and it is read once at the start of a
+    /// turn, like <see cref="IgnoreHistory"/>. A later instruction that asks for the opposite clears it. Only the
+    /// LiteLLM backend reads it: the Claude CLI has its own harness and its own tools.</summary>
+    public bool McpEveryTurn { get; set; }
     public List<ChatTurnState> Turns { get; set; } = new List<ChatTurnState>();
     public List<PlanStep> Plan { get; set; } = new List<PlanStep>();
 

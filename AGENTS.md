@@ -111,6 +111,21 @@ test seam, and the tests drive them with fakes.
   schemas and paying for them before the model is asked. The prompt is told, and `McpAvailability` says
   it in the chip's tooltip rather than in a row: a row per turn for a state is the sentence
   `McpAvailability` was introduced to stop repeating.
+- **A chat can be told once.** `McpChatInstruction.Read` is the grammar, and
+  `ChatSessionState.McpEveryTurn` is what it writes. One sentence has to name MCP, carry a scope that
+  makes it about the conversation ("this chat", "from now on", "always", «این چت», «همیشه», «از این به
+  بعد») and ask to use, offer, enable or switch it off; a negation in that same sentence is the
+  opposite instruction, so a chat can be talked out of the state as well as into it. With the flag on,
+  `AgentHarness` resolves the turn's selection as if `McpToolsOnlyWhenMentioned` were off, for the
+  chat alone. The flag belongs to the conversation, is read once at the start of a turn like
+  `IgnoreHistory`, and is honored only when tool calling and MCP are both on. That sentence is the
+  only control — there is deliberately no switch, so the transcript row and the chip's tooltip are
+  where the state is disclosed, including the sentence that clears it. Fenced code is stripped before
+  reading, because a pasted configuration is a quotation; a passing mention and a question stay
+  `None`, because a miss costs one repeated sentence and a wrong hit charges every later turn for
+  schemas the user never asked for. Persian words are matched as stems (suffixes and the ZWNJ split a
+  compound) and letter variants are folded; Latin words are matched whole, so "use" does not match
+  "useful".
 - **A list is read once per session.** `PrepareConnectionsAsync` reads `tools/list`,
   `resources/list`, `resources/templates/list` and `prompts/list` only for a list this connection has
   not read; the flags live on `Connection`, so a new config, a reconnect or a `list_changed`

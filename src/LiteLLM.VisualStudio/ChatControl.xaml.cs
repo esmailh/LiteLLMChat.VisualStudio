@@ -363,6 +363,15 @@ public partial class ChatControl : UserControl, IAgentView
         {
             lines.Add(availability.Headline);
             lines.Add(tools.Count == 1 ? "1 tool is offered right now." : tools.Count + " tools are offered right now.");
+            // The per-chat state said in a message, in the place that already describes what this turn is offered:
+            // it lasts, so it is read here at any time rather than repeated as a row every turn, and the tooltip
+            // carries the sentence that clears it so the state cannot become a trap.
+            if (Services.ActiveSession.McpEveryTurn &&
+                !string.Equals(Services.ActiveSession.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase))
+            {
+                lines.Add("· This chat is offered MCP tools on every turn — asked for in a message.");
+                lines.Add("  Say \"don't use MCP in this chat anymore\" to stop.");
+            }
             foreach (var server in availability.EnabledServers)
             {
                 var status = Services.Mcp.StatusOf(server.Id);
@@ -747,7 +756,13 @@ public partial class ChatControl : UserControl, IAgentView
     Task IAgentView.InvokeAsync(Action action) => Dispatcher.InvokeAsync(action).Task;
     Task<string?> IAgentView.SolutionRootAsync() => SolutionRootAsync();
     string? IAgentView.ReadAttachedText(string path) => ReadAttachedText(path);
-    void IAgentView.SaveSession() => SaveSession();
+    void IAgentView.SaveSession()
+    {
+        SaveSession();
+        // A per-chat MCP state is set by the turn itself, from a sentence in the message (<see cref="McpChatInstruction"/>),
+        // so the chip has to be redrawn when the conversation's answer changes rather than only when the settings do.
+        DrawMcpChip();
+    }
 
     /// <summary>Copilot Chat's "Continue to iterate?" checkpoint, rendered in the transcript rather than a modal
     /// dialog so the conversation stays readable while the turn waits. Resolves true to continue with the raised
