@@ -101,10 +101,15 @@ public sealed class UserSettings
     public bool McpAllowRoots { get; set; } = true;
     public int McpConnectTimeoutSeconds { get; set; } = 30;
     public int McpToolTimeoutSeconds { get; set; } = 120;
-    /// <summary>Every tool offered is a schema in every request, so this is the main lever on how long a
-    /// turn takes before the model starts answering. A lower cap keeps that prompt small; a tool named with
-    /// # beyond the cap is not offered, so the turn must say how many were left out.</summary>
-    public int McpMaxToolsPerTurn { get; set; } = 16;
+    /// <summary>Every tool offered is a schema in every request, so this bounds what a message that names no tool
+    /// is offered — it is the main lever on how long a turn takes before the model starts answering. It never hides
+    /// a tool the message named: a <c>#server.tool</c> is offered however long the server's list is, because the
+    /// alphabetical prefix this used to keep held sixteen tools out of sixty-five and the useful ones were not in
+    /// it.</summary>
+    public int McpMaxToolsPerTurn { get; set; } = McpToolSnapshot.DefaultAutomaticTools;
+    /// <summary>Written by the first load after the automatic offer grew from sixteen tools, so a file that still
+    /// says sixteen keeps meaning "the old default" only once. See <see cref="SettingsStore"/>.</summary>
+    public bool McpToolsPerTurnUpgraded { get; set; }
     /// <summary>Offer a turn only the MCP tools its own message asked for. On, a message that says nothing about
     /// MCP is sent with no MCP tool at all — no schema, no description, and no round trip to re-read a list that
     /// has not changed — and the turn says so. Off is the older behaviour: every connected tool rides on every

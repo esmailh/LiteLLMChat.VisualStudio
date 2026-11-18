@@ -119,7 +119,21 @@ internal sealed class ExtensionServices : IDisposable
         Settings.EnableMcp = o.EnableMcp; Settings.McpAutoApproveReadOnly = o.McpAutoApproveReadOnly;
         Settings.McpAllowSampling = o.McpAllowSampling; Settings.McpAllowElicitation = o.McpAllowElicitation;
         Settings.McpAllowRoots = o.McpAllowRoots; Settings.McpConnectTimeoutSeconds = o.McpConnectTimeoutSeconds;
-        Settings.McpToolTimeoutSeconds = o.McpToolTimeoutSeconds; Settings.McpMaxToolsPerTurn = o.McpMaxToolsPerTurn;
+        Settings.McpToolTimeoutSeconds = o.McpToolTimeoutSeconds;
+        // The automatic MCP offer used to stop at sixteen tools, and both copies of that number still say sixteen
+        // for anyone who has ever saved: the options page keeps its own copy and settings.json the one every save
+        // wrote. Sixteen out of a real server's sixty-five is the alphabetical first sixteen, which is the bug —
+        // the tools a question actually needs were never in the request. The page is corrected and written back, so
+        // the next launch does not read the old default again; the marker in settings.json is what makes this a
+        // move rather than an override, and a sixteen chosen after it is kept.
+        var toolsPerTurn = McpToolCap.Upgrade(o.McpMaxToolsPerTurn, Settings.McpToolsPerTurnUpgraded);
+        if (toolsPerTurn != o.McpMaxToolsPerTurn)
+        {
+            o.McpMaxToolsPerTurn = toolsPerTurn;
+            try { o.SaveSettingsToStorage(); } catch { }
+        }
+        Settings.McpMaxToolsPerTurn = McpToolCap.Normalize(toolsPerTurn);
+        Settings.McpToolsPerTurnUpgraded = true;
         Settings.McpToolsOnlyWhenMentioned = o.McpToolsOnlyWhenMentioned;
         Settings.McpLogLevel = o.McpLogLevel; Settings.McpStrictClaudeConfig = o.McpStrictClaudeConfig;
     }

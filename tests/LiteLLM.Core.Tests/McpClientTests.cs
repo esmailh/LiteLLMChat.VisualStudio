@@ -201,6 +201,11 @@ public sealed class McpClientTests
             var report = await client.PrepareTurnAsync(settings, null, CancellationToken.None);
 
             Assert.Equal(2, client.ToolDefinitions.Count);
+            // The cap bounds the automatic offer only: the third tool is still in the snapshot, resolvable, and
+            // offered when a message names it. Losing it from the snapshot is what made "the tool is not
+            // available in this environment" true for every tool past the alphabetical first sixteen.
+            Assert.Equal(3, client.Tools.Count);
+            Assert.True(client.TryResolveTool(client.Tools[2].ExposedName, out _));
             var row = Assert.Single(report.Rows);
             Assert.Contains("1 more", row.Summary);
             Assert.False(row.Ok);

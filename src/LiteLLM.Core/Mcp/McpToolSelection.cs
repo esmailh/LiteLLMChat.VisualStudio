@@ -39,7 +39,8 @@ public sealed class McpToolSelection
         _allowed = new HashSet<string>(selected.Select(tool => tool.ExposedName), StringComparer.Ordinal);
     }
 
-    /// <summary>The message named no tool: every connected tool is offered, exactly as before this feature.</summary>
+    /// <summary>The message named no tool: the connected tools are offered, subject only to the automatic offer's
+    /// own bound (<see cref="McpToolSnapshot.AutomaticDefinitions"/>), exactly as before this feature.</summary>
     public static McpToolSelection Automatic { get; } = new McpToolSelection(false, false,
         Array.Empty<McpToolInfo>(), Array.Empty<ToolDefinition>(), null, Array.Empty<McpTurnRow>());
 
@@ -264,9 +265,12 @@ public sealed class McpToolSelection
         }
         else if (anyExplicit)
         {
+            // A name that resolves is always offered — the snapshot holds every tool the servers listed and the
+            // automatic cap never removes one from it — so the only way to reach this branch is a name no connected
+            // server offers. Saying it might be past a cap would send the model looking for a knob instead of
+            // answering the user.
             text.Append("MCP tools\nThe user's current message named an MCP tool that is not offered. The MCP tools " +
-                        "offered this turn remain available; the named one may be beyond the per-turn cap. Say " +
-                        "plainly that the named tool is unavailable; do not " +
+                        "offered this turn remain available. Say plainly that the named tool is unavailable; do not " +
                         "substitute a different tool, and do not claim one ran.\n");
         }
 

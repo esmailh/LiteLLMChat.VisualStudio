@@ -86,7 +86,7 @@ test seam, and the tests drive them with fakes.
   path that drops a live session and starts it again (`ConnectAsync` reuses an unchanged one).
 - **Secrets are DPAPI-protected** through `McpSecrets`/`ApiKeyProtector` (CurrentUser). Exports omit
   them, logs redact them, and the token store is a separate file, never `settings.json`.
-- **Every bound says so.** A clipped result or a list the per-turn cap shortened reports it; a
+- **Every bound says so.** A clipped result or a list the automatic offer shortened reports it; a
   server that cannot connect draws its own row and never fails the turn. A session that ends by
   itself is a row as soon as `ServerClosed` fires, and a turn that starts with MCP on but no
   enabled server for the solution says so before the first round.
@@ -111,6 +111,20 @@ test seam, and the tests drive them with fakes.
   schemas and paying for them before the model is asked. The prompt is told, and `McpAvailability` says
   it in the chip's tooltip rather than in a row: a row per turn for a state is the sentence
   `McpAvailability` was introduced to stop repeating.
+- **The cap bounds the offer, never the list.** `McpToolSnapshot` holds every tool the servers listed —
+  `Tools`, `Definitions`, `TryResolve` and dispatch reach all of them — and `AutomaticDefinitions` is
+  only what a message that names no tool is *offered*; `McpClient.ToolDefinitions` returns that list.
+  A named tool is in the request however far down the list it sits. Before, the cap was applied while
+  the snapshot was built, so it kept the alphabetical first sixteen of Grafana's sixty-five and the
+  reading tools a dashboard question needs (`query_prometheus`, `query_loki_logs`, `search_dashboards`,
+  `get_dashboard_by_uid`, `list_datasources`) were never sent — and the model answered, truthfully,
+  that the tool was not available in this environment. The default is
+  `McpToolSnapshot.DefaultAutomaticTools` (128, a whole ordinary server) and it has to stay a bound:
+  every offered schema is prompt space in every round. `McpToolCap.Upgrade` lifts a saved 16 once,
+  because sixteen was the old default and every save wrote it down; `UserSettings.McpToolsPerTurnUpgraded`
+  is what makes it once, so a 16 chosen afterwards stays 16, and `ExtensionServices.ApplyOptions` writes
+  the lifted value back to the options page or the next launch reads the old default again. Never put
+  the cap back into `Build`.
 - **A chat can be told once.** `McpChatInstruction.Read` is the grammar, and
   `ChatSessionState.McpEveryTurn` is what it writes. One sentence has to name MCP, carry a scope that
   makes it about the conversation ("this chat", "from now on", "always", «این چت», «همیشه», «از این به
@@ -345,6 +359,14 @@ take them lightly:
   never become a failed turn. Reading a count can never throw either: an oversized or unreadable
   number is clamped or read as "not reported". A turn's total is one row at the end, never one per
   round.
+- **A window is read from the entry the server actually sends.** `ModelRequestBudget.ReadContextTokens`
+  accepts `max_input_tokens` flat on the entry — which is what a LiteLLM gateway answers — as well as
+  `context_window`, `context_length`, `max_model_len` and `model_info.max_input_tokens`. Reading only
+  the nested form made every model on a real gateway look unknown, so a 372 000-token window was
+  budgeted at `FallbackContextTokens` (40 000): 55 616 characters, less than one real server's 73 047
+  characters of Grafana tool schemas. `RequestFitting`'s last resort then dropped the MCP schemas on
+  every round — a row saying so, and a model that truthfully had no such tool. Do not remove the flat
+  spelling, and do not read `max_output_tokens` as a window.
 - what each model has spent is kept in a ledger (`UsageLedger`, under
   `%LOCALAPPDATA%\LiteLLM.VisualStudio\token-usage.json`), not summed from conversations when the
   Dashboard asks. Conversations are scoped per solution and capped, so a total derived from them

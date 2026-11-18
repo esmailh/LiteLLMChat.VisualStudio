@@ -109,11 +109,12 @@ public sealed class McpClient : IDisposable
         _formatter = formatter ?? new McpResultFormatter();
     }
 
-    /// <summary>The definitions sent with the next request. Read per round, so a <c>tools/list_changed</c> that
-    /// arrived between rounds is offered to the model on the next one.</summary>
+    /// <summary>The definitions a turn that named no tool is sent. A turn that names one sends the selection's own
+    /// definitions instead, so this list being bounded never hides the tool the message asked for. Read per round, so
+    /// a <c>tools/list_changed</c> that arrived between rounds is offered to the model on the next one.</summary>
     public IReadOnlyList<ToolDefinition> ToolDefinitions
     {
-        get { lock (_snapshotGate) return _snapshot.Definitions; }
+        get { lock (_snapshotGate) return _snapshot.AutomaticDefinitions; }
     }
 
     public IReadOnlyList<McpToolInfo> Tools

@@ -336,6 +336,35 @@ public sealed class McpToolSelectionTests
         Assert.Null(selection.PinnedDefinitions);
     }
 
+    /// <summary>The failing case: a real server lists more tools than the automatic offer carries, the user names
+    /// one past that bound, and the turn must still offer it. Before, the name resolved to nothing and the model
+    /// answered that the tool did not exist.</summary>
+    [Fact]
+    public void Resolve_OffersANamedToolTheAutomaticOfferLeftOut()
+    {
+        var snapshot = McpToolSnapshot.Build(new[]
+        {
+            new McpToolListing
+            {
+                Server = new McpServerConfiguration { Name = "Grafana", Command = "fake" },
+                Tools = new List<JObject>
+                {
+                    new JObject { ["name"] = "add_activity_to_incident" },
+                    new JObject { ["name"] = "alerting_manage_routing" },
+                    new JObject { ["name"] = "query_prometheus" }
+                }
+            }
+        }, maxTools: 2);
+
+        var selection = McpToolSelection.Resolve(snapshot, "از #Grafana.query_prometheus استفاده کن.");
+
+        Assert.True(selection.Narrows);
+        Assert.Equal("query_prometheus", Assert.Single(selection.Selected).Name);
+        Assert.Equal("mcp__Grafana__query_prometheus",
+            Assert.Single(selection.PinnedDefinitions!).Function["name"]!.Value<string>());
+        Assert.True(selection.Allows("mcp__Grafana__query_prometheus"));
+    }
+
     private static McpToolSnapshot Snapshot() =>
         Snapshot(("Orders", new[] { "search_customers", "search" }), ("Files", new[] { "search", "read_file" }));
 
