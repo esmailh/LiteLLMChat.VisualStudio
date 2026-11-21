@@ -18,6 +18,7 @@ Bring an OpenAI-compatible AI assistant — or your Claude Code CLI — into Vis
 - **`@` file mentions** that search the solution — and any project folder added to the conversation — as you type and attach the file you pick; connected MCP resources appear in the same list.
 - **`#` tool mentions** that pick which MCP tools a turn may use, and `/` for `/compact`, the connected servers' prompts (or Claude's own commands on the Claude backend).
 - **Workspace tools** for reading, searching, listing, opening, and editing solution files.
+- **A browser for the steps only you can take**: `open_browser` opens an http or https address in your own default browser — a Grafana sign-in, a consent screen, a key shown once — after a card names the exact address, then waits for you to say you are done. The agent is told it cannot read the tab or its cookies and must never ask for a password, a token or a one-time code in the chat.
 - **Project folders per conversation**: work in another checkout, or a shared library, beside the solution — its files are addressed as `Folder/src/Foo.cs` and the choice is saved with the chat.
 - **Safe editing workflow** with optional confirmation, visible diffs, Undo, and Visual Studio integration.
 - **Automatic build verification** after edits, with errors handed back to the assistant to fix — for any project type — and an optional test run once the build passes.
@@ -32,9 +33,15 @@ Bring an OpenAI-compatible AI assistant — or your Claude Code CLI — into Vis
 - **Readable compaction**: a **Compacted** row opens to show what the checkpoint replaced, the structured checkpoint the model was given instead, and that the chat keeps every message; `/compact` writes one on demand.
 - **Agent Skills** with Dashboard management, manual selection and optional model-directed loading on LiteLLM.
 
-This guide describes **1.8.13**. The installer is **LiteLLM.VisualStudio.vsix**, with versioning inside the project/manifest. Features are not a claim of live validation against every provider, OAuth host or IDE project system.
+This guide describes **1.8.14**. The installer is **LiteLLM.VisualStudio.vsix**, with versioning inside the project/manifest. Features are not a claim of live validation against every provider, OAuth host or IDE project system.
 
-## Current release — 1.8.13 (2026-11-18)
+## Current release — 1.8.14 (2026-11-21)
+
+Version **1.8.14** gives the agent the one thing opencode could do in this situation and the extension could not: it can open your browser. Asking for «مرورگر رو باز کن تا توی گرافانا لاگین کنم» ended in nothing — there was no tool for it, and the prompt told the model that a program waiting for user input is never started that way. The new **`open_browser`** tool takes one http or https address and hands it to the default browser through three roads in the order a person would try them: the Windows URL association, `cmd /c start`, and then the Chrome, Edge or Firefox installed on the machine. It returns at once, because the answer is that the page was opened, not that you have finished with it. The exact address is shown on a card before anything opens and can be skipped, and the tool is offered and gated with the terminal tools, so **Enable terminal tools**, **Confirm each command** and **Allow all** apply to it exactly as they do to a command.
+
+The half that decides whether this is useful is what the model is told afterwards: the tab is your session, and it cannot read it, click in it, or use the cookies, tokens and account it holds. It is asked to say what the page is for, wait until you say you are done, and continue from what you report, and it is told never to ask for a password, a token or a one-time code in the chat. Only http and https open — `file:`, `javascript:` and `ms-settings:` are refused — and a launch that fails answers with the address for you to open yourself instead of claiming success. The Claude backend keeps the CLI's own harness, so this is LiteLLM-only.
+
+## Previously — 1.8.13 (2026-11-18)
 
 Version **1.8.13** is the MCP fix. Asking for a Grafana tool was answered «خیر، ابزار Grafana MCP هنوز در ابزارهای این محیط موجود نیست» — and the answer was literally true: the tool was never in the request. Two independent causes, both reproduced against a real Grafana server (65 tools) and a real `settings.json`:
 
@@ -90,7 +97,7 @@ Version **1.8.12** is what lets a turn actually run the project and test its ser
 
 Version **1.8.12** also compacts a long conversation the way opencode does. When the prompt size the last response reported, plus an estimate of what has changed since, reaches the model's context window minus a buffer (the larger of 15% of the window and 16 000 tokens, or **Compaction buffer (tokens)** when that leaves room), the older part of the conversation is no longer replaced by a prose summary: it is folded into a structured checkpoint written to opencode's template — objective, requirements, decisions, work state (completed, active, blocked), next move, relevant files, important context — and the newest **Keep beside the checkpoint (tokens)** stay word for word beside it; 15 000 is the opencode default. An existing checkpoint is updated rather than replaced, so a requirement recorded three compactions ago is still in the request, and a reply that ignores the template gets one reminder before the earlier checkpoint is kept. The checkpoint travels as one `user` message wrapping `<conversation-checkpoint>`, in the request copy only — the chat and the saved conversation keep every message — and the message the turn is answering is pinned in front of the kept rounds, so a fold can cost the thread but never the question. A provider that rejects a round as too long no longer ends the turn: the conversation is folded further below the size that was refused and the same round is sent again, up to four times. **`/compact`** on the LiteLLM backend folds the conversation now, sends nothing and leaves the chat idle until the next message; it is also a row in the `/` menu. **Compact automatically** under **Tools > Options > LiteLLM > Context** can be turned off, in which case only `/compact` compacts.
 
-For installation use **`LiteLLM.VisualStudio.vsix`**. Close Visual Studio, run the installer, reopen and confirm **1.8.13** under **Extensions > Manage Extensions > Installed**. Older filename-suffixed installers are not current output; replacing a VSIX does not update a running IDE.
+For installation use **`LiteLLM.VisualStudio.vsix`**. Close Visual Studio, run the installer, reopen and confirm **1.8.14** under **Extensions > Manage Extensions > Installed**. Older filename-suffixed installers are not current output; replacing a VSIX does not update a running IDE.
 
 ## Requirements
 
@@ -263,6 +270,14 @@ The shell-free **`run_glab`** tool exposes the installed CLI's command set, incl
 Install `glab` separately. Commands require confirmation; account/project permissions still apply. For remote operations the extension detects the host from explicit `--hostname`/`--repo`, `GITLAB_HOST` or `origin`, checks credentials and, when necessary, offers a separately approved **visible browser-OAuth login window**. Complete any CLI/browser prompts there; no login command or token needs to be pasted into chat. Credentials are checked again before the original command executes once. A declined/failed login does not run the pending operation, and ambiguous API failures do not trigger mutation retries. A GitHub origin requires an explicit GitLab target rather than guessing.
 
 The executable can be resolved from trusted absolute installation/PATH locations, including `%USERPROFILE%\.local\bin\glab.exe`. Claude uses the same confirmation/sign-in flow through `LiteLLM.GitWrapper.exe --glab <arguments>`. Installing or building the extension does not create an MR, grant GitLab permissions or install the CLI.
+
+### Opening a page in your browser
+
+**`open_browser`** — offered with the terminal tools — opens one http or https address in the browser Windows associates with it and returns at once. It is what lets a turn ask you to sign in somewhere and then carry on; the same request used to be answered by nothing at all, because the prompt told the model that a program waiting for user input is never started. The card names the exact address and offers **Skip**, and **Allow all** and **Confirm each command** apply to it exactly as they do to a command.
+
+The address is handed to the Windows URL association first, then `cmd /c start`, then the Chrome, Edge or Firefox installed on the machine — a broken association is the failure the chat cannot fix from the inside. Only http and https are accepted; `file:`, `javascript:` and other schemes are refused before anything is launched, and a launch that fails answers with the address for you to open yourself instead of claiming it worked.
+
+The agent is told what it cannot do with the page: it cannot read that tab, click in it, or use the cookies and tokens of the session it opened, and it must never ask for a password, a token or a one-time code in the chat. It says what the page is for, waits for you to confirm that you are done, and continues from what you report. The Claude backend runs the CLI's own harness and does not get this tool.
 
 ### Optional RTK compression (LiteLLM only)
 

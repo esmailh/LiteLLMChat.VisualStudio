@@ -102,6 +102,13 @@ internal static class ContextTools
             if (root == null) return Fail("No solution is open.", "glab · no working directory");
             return await GlabTools.ExecuteAsync(root, args, settings.CommandTimeoutSeconds, token).ConfigureAwait(true);
         }
+        if (BrowserTools.Handles(name))
+        {
+            // The card and the window are this project's; the address check, the launch and the sentence the model
+            // reads are Core's. Awaiting the confirmation on this thread is the point: the card belongs to it.
+            var browser = await BrowserTools.ExecuteAsync(args, token).ConfigureAwait(true);
+            return new ToolResult { Content = browser.Content, Summary = browser.Summary, Ok = browser.Ok };
+        }
 
         // The edit tools are named differently but resolved, confined and applied the same way, and the caller is one
         // switch statement that should not have to know which half a tool lives in.

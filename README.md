@@ -5,9 +5,15 @@
 
 See [MARKETPLACE.md](MARKETPLACE.md) for the complete user-facing feature guide, setup instructions, privacy notes, and troubleshooting information.
 
-A native WPF VSIX for chatting with any OpenAI-compatible LiteLLM gateway without leaving Visual Studio. It supports multiple servers, model discovery, streaming, reasoning display, read and edit tools, VS Code–style context attachments, project folders a conversation can reach beyond the solution, MCP servers, Agent Skills, a Claude Code backend, diagnostics, DPAPI-protected API keys, and a local conversation history.
+A native WPF VSIX for chatting with any OpenAI-compatible LiteLLM gateway without leaving Visual Studio. It supports multiple servers, model discovery, streaming, reasoning display, read and edit tools, a browser tool for interactive sign-in, VS Code–style context attachments, project folders a conversation can reach beyond the solution, MCP servers, Agent Skills, a Claude Code backend, diagnostics, DPAPI-protected API keys, and a local conversation history.
 
-## Current release — 1.8.13 (2026-11-18)
+## Current release — 1.8.14 (2026-11-21)
+
+Version **1.8.14** gives the agent the one thing opencode could do in this situation and the extension could not: it can open your browser. Asking for «مرورگر رو باز کن تا توی گرافانا لاگین کنم» ended in nothing — there was no tool for it, and the prompt told the model that a program waiting for user input is never started that way. The new **`open_browser`** tool takes one http or https address and hands it to the default browser through three roads in the order a person would try them: the Windows URL association, `cmd /c start`, and then the Chrome, Edge or Firefox installed on the machine. It returns at once, because the answer is that the page was opened, not that you have finished with it. The exact address is shown on a card before anything opens and can be skipped, and the tool is offered and gated with the terminal tools, so **Enable terminal tools**, **Confirm each command** and **Allow all** apply to it exactly as they do to a command.
+
+The half that decides whether this is useful is what the model is told afterwards: the tab is your session, and it cannot read it, click in it, or use the cookies, tokens and account it holds. It is asked to say what the page is for, wait until you say you are done, and continue from what you report, and it is told never to ask for a password, a token or a one-time code in the chat. Only http and https open — `file:`, `javascript:` and `ms-settings:` are refused — and a launch that fails answers with the address for you to open yourself instead of claiming success. The Claude backend keeps the CLI's own harness, so this is LiteLLM-only.
+
+## Previously — 1.8.13 (2026-11-18)
 
 Version **1.8.13** is the MCP fix. Asking for a Grafana tool was answered «خیر، ابزار Grafana MCP هنوز در ابزارهای این محیط موجود نیست» — and the answer was literally true: the tool was never in the request. Two independent causes, both reproduced against a real Grafana server (65 tools) and a real `settings.json`:
 
@@ -65,7 +71,7 @@ The current installer is **`LiteLLM.VisualStudio.vsix`**. Version numbers are ma
 - Retains the 300000-character maximum; a smaller model can receive a lower estimated allowance after reserving response space and headroom.
 - Includes optional RTK Git-output filtering, local EXE MCP imports, confirmed Git/GitLab workflows, Claude progress/authentication diagnostics and the reliability fixes described below.
 
-**Install or update:** close Visual Studio, run `LiteLLM.VisualStudio.vsix`, complete the VSIX Installer and reopen Visual Studio. Verify **1.8.13** under **Extensions > Manage Extensions > Installed**. Do not choose an older filename-suffixed copy. Updating the installer does not update a running IDE automatically.
+**Install or update:** close Visual Studio, run `LiteLLM.VisualStudio.vsix`, complete the VSIX Installer and reopen Visual Studio. Verify **1.8.14** under **Extensions > Manage Extensions > Installed**. Do not choose an older filename-suffixed copy. Updating the installer does not update a running IDE automatically.
 
 ## Requirements
 
@@ -94,6 +100,7 @@ The header and the composer reflow with the pane. Below about 820px the conversa
 
 ## Recent improvements
 
+- **A browser for the steps only you can take:** `open_browser` opens the address the agent needs you to sign in on — a Grafana login, a consent screen, a key shown once — in your own default browser, after a card names the exact address. The tool returns at once, cannot read the tab, click in it or use its cookies, and the prompt is explicit that a password, token or one-time code is never typed into the chat. Turning on **Enable terminal tools** is what offers it, and **Confirm each command** is what asks.
 - **Readable compaction:** the **Compacted** row opens to show what the checkpoint replaced — how many of your messages, replies and tool results, and which tools — the checkpoint text the model received instead, and the statement that the chat and the saved conversation keep every message. `/compact` writes one now, and the three **Context** options decide when and how much stays verbatim.
 - **Project folders beyond the solution:** the **Project** button in the chat header adds a folder to this conversation only; its files are addressed as `Folder/src/Foo.cs` and are reachable from `@`, `#`, the picker and every file tool, while commands, Git, and the automatic build and test check stay on the solution.
 - **Auto-hide lifecycle fix:** hiding an unpinned chat no longer cancels a running LiteLLM or Claude turn. Reopening preserves live messages, busy state and pending approval cards. Required approvals still wait for your choice; hiding never approves them. Cancellation/cleanup belongs to actual tool-window disposal rather than WPF `Unloaded`.
@@ -106,7 +113,7 @@ The header and the composer reflow with the pane. Below about 820px the conversa
 - **Verification and safety:** explicit build outcomes, same-round test gating, dispatch-time permission checks, fail-closed approvals and linked-path rejection for workspace file tools.
 - **Session reliability:** saving a running turn no longer cancels it; interrupted-turn recovery occurs on load.
 
-These describe the **1.8.13** source/release. The installer keeps the stable name **LiteLLM.VisualStudio.vsix**; its version is recorded in the project and manifest. Builds and unit tests do not replace manual IDE, OAuth or provider checks.
+These describe the **1.8.14** source/release. The installer keeps the stable name **LiteLLM.VisualStudio.vsix**; its version is recorded in the project and manifest. Builds and unit tests do not replace manual IDE, OAuth or provider checks.
 
 ## Model-aware request budgeting (LiteLLM)
 

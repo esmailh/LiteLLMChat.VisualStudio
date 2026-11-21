@@ -213,7 +213,7 @@ internal sealed class ExtensionServices : IDisposable
         IEnumerable<ToolDefinition> tools = ContextTools.Definitions;
         tools = tools.Concat(new[] { AgentPlanTool.Definition });
         if (Settings.EnableFileEditing) tools = tools.Concat(EditTools.Definitions);
-        if (Settings.EnableTerminalTools) tools = tools.Concat(TerminalTools.Definitions).Concat(new[] { GitTools.Definition, GlabTools.Definition });
+        if (Settings.EnableTerminalTools) tools = tools.Concat(TerminalTools.Definitions).Concat(new[] { GitTools.Definition, GlabTools.Definition, BrowserTools.Definition });
         // Read per request from the snapshot the turn prepared: a tools/list_changed that arrives between
         // rounds is offered on the next one, and the reverse map dispatch uses is replaced with it. A narrowed
         // turn pins its own list instead, because the selection was resolved against the snapshot it prepared.

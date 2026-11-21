@@ -8,12 +8,13 @@ public static class ToolExecutionPolicy
     private static readonly HashSet<string> Editing = new HashSet<string>(StringComparer.Ordinal)
     { "apply_patch", "create_file", "replace_string_in_file", "multi_replace_string_in_file", "create_directory" };
 
-    /// <summary>The tools that run something or reach the network. They share the terminal switch because they are
-    /// all side effects the same user decision covers: a command, the program it leaves running in the background,
-    /// and the request it sends to that program.</summary>
+    /// <summary>The tools that run something, reach the network, or put a window on the user's desktop. They share the
+    /// terminal switch because they are all side effects the same user decision covers: a command, the program it
+    /// leaves running in the background, the request it sends to that program, and the browser page it opens for the
+    /// user to sign in on.</summary>
     private static readonly HashSet<string> Terminal = new HashSet<string>(StringComparer.Ordinal)
     {
-        "run_powershell", "run_cmd", "run_git", "run_glab"
+        "run_powershell", "run_cmd", "run_git", "run_glab", "open_browser"
     };
 
     public static string? Refusal(string name, bool toolsEnabled, bool editingEnabled, bool terminalEnabled)

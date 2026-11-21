@@ -258,6 +258,38 @@ requests, correlate them with the log, stop it.
   send requests with `curl.exe`, treat 4xx/5xx as results, correlate a request with the log line it produced, and
   stop the program or say which shell is left running.
 
+## Opening the user's browser
+
+`open_browser` is the one way a turn reaches outside the workspace into the user's own screen: a Grafana login, a
+consent screen, a key that is shown once. It is the answer to opencode's `bash`-opening-a-browser, given a name
+instead of a shell.
+
+- **One tool, one address, and it returns at once.** `BrowserTools` (Core) validates and words the call, and
+  `BrowserLauncher` (Core) opens it. The call's answer is that the page was handed to a browser, never that the user
+  has finished with it: a blocking "wait until signed in" card was rejected, because the user's next message is the
+  only real evidence.
+- **Only http and https.** `TryParseUrl` trims, refuses whitespace/quotes/control characters, caps the address at
+  `MaxUrlLength`, and refuses `file:`, `javascript:`, `ms-settings:` and anything else. A host written without a
+  scheme is answered with the corrected address, because that is the mistake a model makes most often.
+- **Three roads, in the order a person would try them.** The Windows URL association (`UseShellExecute`), then
+  `cmd.exe /d /s /c start "" "<url>"`, then the Chrome/Edge/Firefox found under the Program Files and
+  `%LOCALAPPDATA%` folders. A broken association is exactly the failure a user cannot repair from the chat, so the
+  known browsers are the last resort; a machine where all of them fail gets the address back with what failed.
+  `BrowserEnvironment` is the test seam for both the launch and the existence check.
+- **The card is the command card's sibling.** `ChatControl.AskToOpenBrowserAsync` names the exact address (not the
+  site), offers **Skip** and **Open**, and honours `_disposed`, `AllowAllPermissions` and `ConfirmEachCommand` the
+  same way `AskToRunCommandAsync` does. A missing handler denies.
+- **Gated with the terminal tools.** `ToolExecutionPolicy.Terminal` names it, and `ExtensionServices.ToolsFor`
+  offers `BrowserTools.Definition` inside the `EnableTerminalTools` branch: opening a window on the user's desktop
+  is the same decision as running a command.
+- **What the result says is the feature.** The model is told it cannot read the tab, click in it, or use the
+  session's cookies and tokens, and that it must never ask for a password, a token or a one-time code in the chat.
+  Without that sentence an agent that watched a login page open would answer the next question as if it were signed
+  in. `AgentPrompt.BaseInstructions` carries the same rules — say what the page is for, wait for the user's
+  confirmation, then continue.
+- **The Claude backend is not this tool.** The CLI runs its own harness and its own tools; `open_browser` is
+  LiteLLM-only in the same way every other built-in tool is.
+
 ## Style
 
 - One concept per file.

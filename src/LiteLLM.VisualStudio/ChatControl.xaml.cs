@@ -184,6 +184,7 @@ public partial class ChatControl : UserControl, IAgentView
         EditTools.Confirm = AskToApplyEditAsync;
         TerminalTools.Confirm = AskToRunCommandAsync;
         McpApproval.Confirm = AskToApproveMcpToolAsync;
+        BrowserTools.Confirm = AskToOpenBrowserAsync;
         // Auto-hide is a visual detach, not a new conversation or a new turn. In particular, do not
         // replace the session underneath a running harness when the pane becomes visible again.
         if (_generation == null) await Services.RefreshSessionScopeAsync();
@@ -247,6 +248,7 @@ public partial class ChatControl : UserControl, IAgentView
         if (ReferenceEquals(EditTools.Confirm?.Target, this)) EditTools.Confirm = null;
         if (ReferenceEquals(TerminalTools.Confirm?.Target, this)) TerminalTools.Confirm = null;
         if (ReferenceEquals(McpApproval.Confirm?.Target, this)) McpApproval.Confirm = null;
+        if (ReferenceEquals(BrowserTools.Confirm?.Target, this)) BrowserTools.Confirm = null;
         if (ReferenceEquals(Current, this)) Current = null;
     }
     /// <summary>Brings back the MCP servers the user enabled. It runs for the LiteLLM backend only: the Claude CLI
@@ -1199,6 +1201,33 @@ public partial class ChatControl : UserControl, IAgentView
         body.Children.Add(new TextBox { Text = proposal.Command, IsReadOnly = true, AcceptsReturn = true, FontFamily = new FontFamily("Consolas, Courier New"), MaxHeight = 260, Margin = new Thickness(0, 8, 0, 0), VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, TextWrapping = TextWrapping.NoWrap });
         var skip = new Button { Content = "Skip" };
         var allow = new Button { Content = proposal.Background ? "Start" : "Run", Style = (Style)FindResource("PrimaryButton") };
+        body.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0), Children = { skip, allow } });
+        var card = new Border { Style = (Style)FindResource("Card"), HorizontalAlignment = HorizontalAlignment.Left, MaxWidth = 900, Child = body, Margin = new Thickness(0, 0, 0, 12) };
+        card.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.AccentMediumBrushKey);
+        var source = new TaskCompletionSource<bool>();
+        skip.Click += (s, e) => source.TrySetResult(false);
+        allow.Click += (s, e) => source.TrySetResult(true);
+        Messages.Children.Add(card); ScrollIfFollowing();
+        ApprovalWaiting(true);
+        try { using ((_generation?.Token ?? CancellationToken.None).Register(() => source.TrySetResult(false))) return await source.Task.ConfigureAwait(true); }
+        finally { ApprovalWaiting(false); Messages.Children.Remove(card); }
+    }
+
+    /// <summary>Asks before a page is put in front of the user. The card names the exact address rather than the site,
+    /// because the address is what the browser will be handed, and a card that showed "Grafana" for a link to somewhere
+    /// else would be asking the wrong question. Allow all permissions and the command-confirmation switch answer it the
+    /// same way they answer a command: one permission decision covers the turn's side effects.</summary>
+    private async Task<bool> AskToOpenBrowserAsync(BrowserProposal proposal)
+    {
+        if (_disposed) return false;
+        if (AllowAllPermissions) return true;
+        if (!Services.Settings.ConfirmEachCommand) return true;
+        var body = new StackPanel();
+        body.Children.Add(new TextBlock { Text = "Open this page in your browser?", FontWeight = FontWeights.SemiBold });
+        body.Children.Add(new TextBlock { Text = "The agent cannot read the page or anything you do on it. It is asking so you can sign in, approve something or copy a value, and then continue in the chat.", Style = (Style)FindResource("Caption"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0) });
+        body.Children.Add(new TextBox { Text = proposal.Url, IsReadOnly = true, FontFamily = new FontFamily("Consolas, Courier New"), Margin = new Thickness(0, 8, 0, 0), HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, TextWrapping = TextWrapping.NoWrap });
+        var skip = new Button { Content = "Skip" };
+        var allow = new Button { Content = "Open", Style = (Style)FindResource("PrimaryButton") };
         body.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0), Children = { skip, allow } });
         var card = new Border { Style = (Style)FindResource("Card"), HorizontalAlignment = HorizontalAlignment.Left, MaxWidth = 900, Child = body, Margin = new Thickness(0, 0, 0, 12) };
         card.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.AccentMediumBrushKey);
