@@ -72,7 +72,8 @@ public sealed class BrowserSession : IBrowserSession
     {
         _environment = environment ?? new BrowserEnvironment();
         _devtools = devtools ?? new HttpDevTools();
-        _profile = profileDirectory ?? BrowserProfile.Directory();
+        // Empty is a caller that had no path to give, not a profile at the drive root: both spellings mean the default.
+        _profile = string.IsNullOrEmpty(profileDirectory) ? BrowserProfile.Directory() : profileDirectory!;
         _timeout = timeout ?? TimeSpan.FromSeconds(20);
     }
 

@@ -41,6 +41,50 @@ public sealed class BrowserScriptsTests
         Assert.Contains(BrowserScripts.Literal("a\"b"), script, System.StringComparison.Ordinal);
     }
 
+    /// <summary>The message for a field that was not found is prose, and prose has apostrophes. It goes in as a JSON
+    /// string so one cannot end the literal it sits in — the failure that made every `type` call answer with a
+    /// syntax error about the tool instead of a sentence about the field.</summary>
+    [Fact]
+    public void Fill_PutsTheMissingElementMessageInAsAStringLiteral()
+    {
+        var script = BrowserScripts.Fill("#user", "admin");
+
+        Assert.Contains(BrowserScripts.Literal("No element matched that selector, so nothing was filled. Pass the CSS selector of the field."),
+            script, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("__NO_ELEMENT__", script, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("\\'", script, System.StringComparison.Ordinal);
+    }
+
+    /// <summary>A script that throws has to come back as the page's sentence, not its stack: the frames are the page's
+    /// and the model cannot use them, and a stack stops the reading at the first line anyway.</summary>
+    [Fact]
+    public void Script_ReportsThePagesSentenceWithoutItsStack()
+    {
+        var script = BrowserScripts.Script("null.value");
+
+        Assert.DoesNotContain("stack", script, System.StringComparison.Ordinal);
+        Assert.Contains("e.name+': '+e.message", script, System.StringComparison.Ordinal);
+    }
+
+    /// <summary>The wrapper is an expression evaluated in the page, so a helper declared after the outer function has
+    /// closed makes the whole call a syntax error — and the page then reports a token, not what the model asked.
+    /// Both helpers have to sit inside the function, before the try.</summary>
+    [Fact]
+    public void Script_IsOneWellFormedExpressionWithItsHelpersInsideIt()
+    {
+        foreach (var code in new[] { "document.title", "null.value", "const a = 1;\nreturn a" })
+        {
+            var script = BrowserScripts.Script(code);
+
+            Assert.StartsWith("(async function(){", script, System.StringComparison.Ordinal);
+            Assert.EndsWith("})()", script, System.StringComparison.Ordinal);
+            Assert.True(script.IndexOf("function pack", System.StringComparison.Ordinal) <
+                        script.IndexOf("try{var v=await", System.StringComparison.Ordinal), "pack must be inside the function");
+            Assert.True(script.IndexOf("function describe", System.StringComparison.Ordinal) <
+                        script.IndexOf("try{var v=await", System.StringComparison.Ordinal), "describe must be inside the function");
+        }
+    }
+
     /// <summary>Setting a field's value directly leaves a framework believing the field is empty; the native setter is
     /// what makes the page's own listener see the text and keep it on submit.</summary>
     [Fact]

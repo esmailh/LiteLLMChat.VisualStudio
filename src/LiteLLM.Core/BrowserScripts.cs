@@ -40,7 +40,13 @@ public static class BrowserScripts
     /// leaves a framework's state object saying the field is empty, and the form then submits nothing. The native
     /// setter is the only way to make React and its kind notice.</summary>
     public static string Fill(string target, string text) =>
-        FillTemplate.Replace("__TARGET__", Literal(target)).Replace("__VALUE__", Literal(text));
+        FillTemplate
+            .Replace("__TARGET__", Literal(target))
+            .Replace("__VALUE__", Literal(text))
+            // The message goes in as a JSON string rather than inside a single-quoted one: an apostrophe in prose is
+            // an ordinary character, and in a single-quoted literal it silently ends the string and turns the whole
+            // call into a syntax error the page reports about the tool rather than about the field.
+            .Replace("__NO_ELEMENT__", Literal("No element matched that selector, so nothing was filled. Pass the CSS selector of the field."));
 
     /// <summary>Runs the model's own JavaScript in the page. This is what makes a signed-in session usable rather than
     /// merely visible: <c>fetch('/api/…')</c> from inside the page carries the session's cookies even when they are
@@ -60,8 +66,13 @@ public static class BrowserScripts
                "if(t==='number'||t==='boolean')return v;" +
                "try{var s=JSON.stringify(v);if(s===undefined)return null;" +
                "return s.length>" + MaxResultChars.ToString() + "?s.slice(0," + MaxResultChars.ToString() + ")+'…':s}catch(e){return String(v)}}" +
+               // The page's own sentence, not its stack: a stack is the page's frames, which the model cannot use,
+               // and it is the difference between "TypeError: x is null" and a paragraph it stops reading.
+               "function describe(e){if(!e)return String(e);" +
+               "var s=(e.name&&e.message)?e.name+': '+e.message:String((e&&e.message)||e);" +
+               "return s.split('\\n')[0].slice(0,400)}" +
                "try{var v=await " + body + ";return{ok:true,value:pack(v)}}" +
-               "catch(e){return{ok:false,error:String((e&&e.stack)||e)}}}" +
+               "catch(e){return{ok:false,error:describe(e)}}}" +
                ")()";
     }
 
@@ -146,7 +157,7 @@ public static class BrowserScripts
     private const string FillTemplate =
         "(function(){" +
         "var el=null;try{el=document.querySelector(__TARGET__)}catch(e){el=null}" +
-        "if(!el)return{ok:false,error:'No element matched that selector, so nothing was filled. Pass the field\'s CSS selector.'};" +
+        "if(!el)return{ok:false,error:__NO_ELEMENT__};" +
         "var v=__VALUE__;" +
         "try{el.scrollIntoView({block:'center'});el.focus()}catch(e){}" +
         "try{if(el.tagName==='INPUT'||el.tagName==='TEXTAREA'){" +
