@@ -1520,12 +1520,7 @@ public partial class ChatControl : UserControl, IAgentView
         SendButton.Visibility = value ? Visibility.Collapsed : Visibility.Visible;
         SendButton.IsEnabled = !value && Composer.Text.Trim().Length > 0;
         RefreshDeleteButton(value);
-        // The placeholder is this method's own, so it is this method that takes it down: an outcome ("Stopped",
-        // an error) is written before the turn's finally runs, and a turn that ends without one — /compact is
-        // the one that sends no request and so has no reply to report — would otherwise leave the window saying
-        // Generating… while nothing is running.
         if (value) StateText.Text = "Generating…";
-        else if (StateText.Text == "Generating…") StateText.Text = string.Empty;
     }
     /// <summary>Starts a new conversation. Everything belonging to the message being written goes with it: a draft and
     /// its attachments carried into a fresh session would look like they belonged to it.</summary>

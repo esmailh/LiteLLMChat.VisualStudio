@@ -401,11 +401,7 @@ take them lightly:
 - auto-compaction and the overflow fold are both skipped when `IgnoreHistory` is on: that request is
   already this turn only, so there is nothing a checkpoint could stand in for. `/compact` still folds
   the whole conversation, on the LiteLLM backend only, through `AgentHarness.CompactNowAsync`: it
-  opens a turn of its own for the row, sends nothing, and the chat stays idle until the next message.
-  A fold with nothing to fold is answered with a row and no call — the newest messages already fit
-  inside "Keep beside the checkpoint (tokens)", so the setting is what to lower — and the window's
-  "Generating…" is `SetBusy`'s own placeholder, which `SetBusy(false)` takes down while leaving an
-  outcome it did not write (`Stopped`, an error) in place;
+  opens a turn of its own for the row, sends nothing, and the chat stays idle until the next message;
 - automatic verification is two checks, and the second depends on the first: the build
   (`SolutionBuild`) and then, only once that has come back clean in **this** round, the tests
   (`SolutionTests`). Tests are never run against assemblies from an earlier round — that reports on

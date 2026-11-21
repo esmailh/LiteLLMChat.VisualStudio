@@ -950,7 +950,7 @@ internal sealed class AgentHarness
                     ? "Nothing to compact: the newest messages already fit inside the keep the setting reserves, so no call was spent"
                     : "Context · compaction was due but there was nothing before the verbatim tail to fold into a checkpoint",
                 false, null,
-                "The tail kept word for word is \"Keep beside the checkpoint (tokens)\" in Options · Context: lower it to fold more of the conversation, or send more messages so something sits before the tail. A request that is over the ceiling with nothing foldable is shortened by the character bound instead, and the provider's own ceiling still applies.", null);
+                "The tail kept word for word is \"Keep beside the checkpoint (tokens)\". A request that is over the ceiling with nothing foldable is shortened by the character bound instead, and the provider's own ceiling still applies.", null);
         }
         return covered > 0 ? ContextCompaction.Merge(messages, covered, previous!, pinned) : messages;
     }
