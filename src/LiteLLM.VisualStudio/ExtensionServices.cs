@@ -31,6 +31,15 @@ internal sealed class ExtensionServices : IDisposable
     /// <summary>The discovered skills. Owned here because the list is shared by the chat's menu, the Dashboard and
     /// every turn, and its cache is only useful if those three read the same instance.</summary>
     internal SkillRegistry Skills { get; } = new SkillRegistry();
+    /// <summary>The shells a conversation has started and not stopped. Owned here because a shell outlives the tool
+    /// call that started it — that is the whole point of starting a server — and outlives the turn as well, so the
+    /// next message can still test what the last one brought up. Each shell remembers the conversation it belongs
+    /// to, so a notice about one ending is not delivered to a chat that never started it.</summary>
+    internal BackgroundShells Shells { get; } = new BackgroundShells();
+    /// <summary>The browser the agent drives. Owned here rather than by the window because the session outlives a turn
+    /// and a conversation: the profile is the sign-in, and a chat that swapped it for another window's would lose it.
+    /// Nothing starts until a browser tool is called, and disposing this drops the socket, never the window.</summary>
+    internal BrowserSession Browser { get; } = new BrowserSession();
     internal event EventHandler? ModelsChanged;
     internal event EventHandler? SessionsChanged;
     internal event EventHandler? UsageChanged;
@@ -96,6 +105,11 @@ internal sealed class ExtensionServices : IDisposable
         Settings.RtkOutputMode = o.RtkOutputMode;
         Settings.FallbackContextTokens = o.FallbackContextTokens;
         Settings.ModelContextOverrides = o.ModelContextOverrides;
+        Settings.AutoCompaction = o.AutoCompaction;
+        // A hand-edited or out-of-range value is clamped here, at the one place the options become settings, so
+        // neither a zeroed tail nor a buffer wider than the window can reach the loop.
+        Settings.CompactionKeepTokens = Math.Max(0, Math.Min(o.CompactionKeepTokens, 200000));
+        Settings.CompactionBufferTokens = Math.Max(0, o.CompactionBufferTokens);
         // The tests check is offered even when the build check is off; it simply never runs, because it runs
         // only against assemblies a passing build has just produced. Reading the value in either way is what
         // keeps the dialog's state and the saved state the same thing.
@@ -109,7 +123,22 @@ internal sealed class ExtensionServices : IDisposable
         Settings.EnableMcp = o.EnableMcp; Settings.McpAutoApproveReadOnly = o.McpAutoApproveReadOnly;
         Settings.McpAllowSampling = o.McpAllowSampling; Settings.McpAllowElicitation = o.McpAllowElicitation;
         Settings.McpAllowRoots = o.McpAllowRoots; Settings.McpConnectTimeoutSeconds = o.McpConnectTimeoutSeconds;
-        Settings.McpToolTimeoutSeconds = o.McpToolTimeoutSeconds; Settings.McpMaxToolsPerTurn = o.McpMaxToolsPerTurn;
+        Settings.McpToolTimeoutSeconds = o.McpToolTimeoutSeconds;
+        // The automatic MCP offer used to stop at sixteen tools, and both copies of that number still say sixteen
+        // for anyone who has ever saved: the options page keeps its own copy and settings.json the one every save
+        // wrote. Sixteen out of a real server's sixty-five is the alphabetical first sixteen, which is the bug —
+        // the tools a question actually needs were never in the request. The page is corrected and written back, so
+        // the next launch does not read the old default again; the marker in settings.json is what makes this a
+        // move rather than an override, and a sixteen chosen after it is kept.
+        var toolsPerTurn = McpToolCap.Upgrade(o.McpMaxToolsPerTurn, Settings.McpToolsPerTurnUpgraded);
+        if (toolsPerTurn != o.McpMaxToolsPerTurn)
+        {
+            o.McpMaxToolsPerTurn = toolsPerTurn;
+            try { o.SaveSettingsToStorage(); } catch { }
+        }
+        Settings.McpMaxToolsPerTurn = McpToolCap.Normalize(toolsPerTurn);
+        Settings.McpToolsPerTurnUpgraded = true;
+        Settings.McpToolsOnlyWhenMentioned = o.McpToolsOnlyWhenMentioned;
         Settings.McpLogLevel = o.McpLogLevel; Settings.McpStrictClaudeConfig = o.McpStrictClaudeConfig;
     }
     internal void Save() { ApplyOptions(); _store.Save(Settings); SettingsChanged?.Invoke(this, EventArgs.Empty); }
@@ -188,7 +217,7 @@ internal sealed class ExtensionServices : IDisposable
         IEnumerable<ToolDefinition> tools = ContextTools.Definitions;
         tools = tools.Concat(new[] { AgentPlanTool.Definition });
         if (Settings.EnableFileEditing) tools = tools.Concat(EditTools.Definitions);
-        if (Settings.EnableTerminalTools) tools = tools.Concat(TerminalTools.Definitions).Concat(new[] { GitTools.Definition, GlabTools.Definition });
+        if (Settings.EnableTerminalTools) tools = tools.Concat(TerminalTools.Definitions).Concat(new[] { GitTools.Definition, GlabTools.Definition, BrowserTools.Definition });
         // Read per request from the snapshot the turn prepared: a tools/list_changed that arrives between
         // rounds is offered on the next one, and the reverse map dispatch uses is replaced with it. A narrowed
         // turn pins its own list instead, because the selection was resolved against the snapshot it prepared.
@@ -232,6 +261,6 @@ internal sealed class ExtensionServices : IDisposable
     }
     private async Task<IVsOutputWindowPane?> GetOutputPaneAsync() { var output = (IVsOutputWindow?)await _package.GetServiceAsync(typeof(SVsOutputWindow)); if (output == null) return null; var id = PackageGuids.OutputPane; output.CreatePane(ref id, "LiteLLM", 1, 1); output.GetPane(ref id, out var pane); return pane; }
     private async Task UpdateStatusAsync() { await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(); var bar = (IVsStatusbar?)await _package.GetServiceAsync(typeof(SVsStatusbar)); if (bar != null) { var text = Models.Count > 0 ? $"LiteLLM ✓  {Models.Count} models / {Settings.Servers.Count(s => s.Enabled)} servers" : $"LiteLLM ⚠  {Settings.Servers.Count(s => s.Enabled)} servers"; bar.SetText(text); } }
-    public void Dispose() { Mcp.Dispose(); _client.Dispose(); }
+    public void Dispose() { Mcp.Dispose(); Shells.Dispose(); Browser.Dispose(); _client.Dispose(); }
 }
 internal static class PackageGuids { internal static readonly Guid OutputPane = new Guid("0D30360D-A923-465B-94C4-760E67C28B7A"); }

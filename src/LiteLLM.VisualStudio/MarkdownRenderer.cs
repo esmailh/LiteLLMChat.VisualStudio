@@ -17,17 +17,19 @@ internal static class MarkdownRenderer
     /// <param name="resolveSymbol">Turns a name the reply mentioned into the declaration this solution has for it,
     /// or null when it has none. Nothing is linked unless it resolves, so a word that only looks like a symbol stays
     /// ordinary text.</param>
-    internal static FrameworkElement Render(string markdown, Action<FileReference>? openFile = null, Func<string, SymbolLocation?>? resolveSymbol = null, Action<SymbolLocation>? openSymbol = null)
+    /// <param name="fileExists">Whether a candidate file name exists, so a name written inside a sentence is linked
+    /// without the word in front of it. Null leaves every match exactly as the text spells it.</param>
+    internal static FrameworkElement Render(string markdown, Action<FileReference>? openFile = null, Func<string, SymbolLocation?>? resolveSymbol = null, Action<SymbolLocation>? openSymbol = null, Func<string, bool>? fileExists = null)
     {
         var panel = new StackPanel(); var lines = (markdown ?? "").Replace("\r\n", "\n").Split('\n'); var text = new System.Text.StringBuilder();
         for (var i = 0; i < lines.Length; i++)
         {
-            if (lines[i].StartsWith("```")) { Flush(panel, text, openFile, resolveSymbol, openSymbol); var language = lines[i].Substring(3).Trim(); var code = new System.Text.StringBuilder(); while (++i < lines.Length && !lines[i].StartsWith("```")) code.AppendLine(lines[i]); panel.Children.Add(CodeBlock(code.ToString().TrimEnd(), language)); }
+            if (lines[i].StartsWith("```")) { Flush(panel, text, openFile, resolveSymbol, openSymbol, fileExists); var language = lines[i].Substring(3).Trim(); var code = new System.Text.StringBuilder(); while (++i < lines.Length && !lines[i].StartsWith("```")) code.AppendLine(lines[i]); panel.Children.Add(CodeBlock(code.ToString().TrimEnd(), language)); }
             else text.AppendLine(lines[i]);
         }
-        Flush(panel, text, openFile, resolveSymbol, openSymbol); return panel;
+        Flush(panel, text, openFile, resolveSymbol, openSymbol, fileExists); return panel;
     }
-    private static void Flush(Panel panel, System.Text.StringBuilder value, Action<FileReference>? openFile, Func<string, SymbolLocation?>? resolveSymbol, Action<SymbolLocation>? openSymbol)
+    private static void Flush(Panel panel, System.Text.StringBuilder value, Action<FileReference>? openFile, Func<string, SymbolLocation?>? resolveSymbol, Action<SymbolLocation>? openSymbol, Func<string, bool>? fileExists)
     {
         if (value.Length == 0) return;
         var content = value.ToString().TrimEnd();
@@ -55,18 +57,18 @@ internal static class MarkdownRenderer
                 direction = lineDirection;
             }
             else paragraph.Inlines.Add(new LineBreak());
-            AddLine(paragraph, lines[i], openFile, resolveSymbol, openSymbol);
+            AddLine(paragraph, lines[i], openFile, resolveSymbol, openSymbol, fileExists);
         }
         if (paragraph != null) paragraph.Margin = new Thickness(1, paragraph.Margin.Top, 1, 2);
         panel.Children.Add(Selectable(blocks)); value.Clear();
     }
 
     /// <summary>Adds one line's bold, inline code and file links to the paragraph that owns its direction.</summary>
-    private static void AddLine(Paragraph paragraph, string line, Action<FileReference>? openFile, Func<string, SymbolLocation?>? resolveSymbol, Action<SymbolLocation>? openSymbol)
+    private static void AddLine(Paragraph paragraph, string line, Action<FileReference>? openFile, Func<string, SymbolLocation?>? resolveSymbol, Action<SymbolLocation>? openSymbol, Func<string, bool>? fileExists)
     {
         foreach (var part in Regex.Split(line, "(`[^`]+`|\\*\\*[^*]+\\*\\*|\\[[^\\]]+\\]\\([^)]+\\))"))
             if (part.StartsWith("`") && part.EndsWith("`") && part.Length >= 2)
-                AddReferences(paragraph.Inlines, part.Substring(1, part.Length - 2), openFile, resolveSymbol, openSymbol, true);
+                AddReferences(paragraph.Inlines, part.Substring(1, part.Length - 2), openFile, resolveSymbol, openSymbol, true, fileExists);
             else if (part.StartsWith("**") && part.EndsWith("**") && part.Length >= 4)
                 paragraph.Inlines.Add(new Bold(new Run(part.Substring(2, part.Length - 4))));
             else
@@ -75,12 +77,12 @@ internal static class MarkdownRenderer
                 FileReference target;
                 if (link.Success && FileReferenceParser.TryParse(link.Groups[2].Value, out target) && openFile != null)
                     paragraph.Inlines.Add(CreateLink(link.Groups[1].Value, target, openFile, false));
-                else AddReferences(paragraph.Inlines, part, openFile, resolveSymbol, openSymbol, false);
+                else AddReferences(paragraph.Inlines, part, openFile, resolveSymbol, openSymbol, false, fileExists);
             }
     }
-    private static void AddReferences(InlineCollection inlines, string text, Action<FileReference>? openFile, Func<string, SymbolLocation?>? resolveSymbol, Action<SymbolLocation>? openSymbol, bool code)
+    private static void AddReferences(InlineCollection inlines, string text, Action<FileReference>? openFile, Func<string, SymbolLocation?>? resolveSymbol, Action<SymbolLocation>? openSymbol, bool code, Func<string, bool>? fileExists)
     {
-        var matches = FileReferenceParser.Find(text); var offset = 0;
+        var matches = FileReferenceParser.Find(text, fileExists); var offset = 0;
         foreach (var match in matches)
         {
             if (match.Index > offset) AddSymbols(inlines, text.Substring(offset, match.Index - offset), resolveSymbol, openSymbol, code);

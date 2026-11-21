@@ -37,27 +37,42 @@ public sealed class McpToolListing
     public List<JObject> Tools { get; set; } = new List<JObject>();
 }
 
-/// <summary>An immutable view of every MCP tool offered this turn: the definitions sent to the model and the reverse
-/// map dispatch resolves a call through.
+/// <summary>An immutable view of every MCP tool this turn knows about: the reverse map dispatch resolves a call
+/// through, and the definitions, all of them, a selection can reach.
 ///
-/// The cap exists because every definition costs prompt space on every round; when it cuts the list, <see cref="Note"/>
-/// says how many were left out rather than letting the model believe the list is complete.</summary>
+/// The cap is on the <em>automatic</em> offer, not on the list. A message that names no tool is sent
+/// <see cref="AutomaticDefinitions"/> — every definition costs prompt space on every round, so that offer is
+/// bounded and <see cref="Note"/> says how many were left out. A tool the message names is always offered, however
+/// far down the server's list it sits: an alphabetical prefix is the worst possible way to choose sixteen tools out
+/// of a real server's sixty-five, and hiding the named one makes the extension answer that the tool does not exist.
+/// </summary>
 public sealed class McpToolSnapshot
 {
+    /// <summary>How many definitions a turn that names no tool is offered unless the setting says otherwise. A
+    /// whole ordinary server fits inside it, so "use the Grafana MCP" can actually reach Prometheus and Loki.</summary>
+    public const int DefaultAutomaticTools = 128;
+
     private readonly Dictionary<string, McpToolInfo> _byName;
 
-    internal McpToolSnapshot(List<McpToolInfo> tools, List<ToolDefinition> definitions, int omitted, int skipped)
+    internal McpToolSnapshot(List<McpToolInfo> tools, List<ToolDefinition> definitions, int automaticTools,
+        int skipped)
     {
         Tools = tools;
         Definitions = definitions;
-        Omitted = omitted;
+        AutomaticCount = Math.Max(0, Math.Min(automaticTools, Math.Min(tools.Count, definitions.Count)));
         Skipped = skipped;
         _byName = tools.ToDictionary(tool => tool.ExposedName, StringComparer.Ordinal);
 
+        var automatic = new List<ToolDefinition>(AutomaticCount);
+        for (var index = 0; index < AutomaticCount; index++) automatic.Add(definitions[index]);
+        AutomaticDefinitions = automatic;
+
+        var omitted = Omitted;
         var notes = new List<string>();
         if (omitted > 0)
-            notes.Add("only the first " + tools.Count + " MCP tools were offered; " + omitted + " more " +
-                      (omitted == 1 ? "was" : "were") + " left out by the per-turn cap");
+            notes.Add("only the first " + AutomaticCount + " MCP tools are offered to a message that names none; " +
+                      omitted + " more " + (omitted == 1 ? "is" : "are") +
+                      " left out by the per-turn cap and can be named with #");
         if (skipped > 0)
             notes.Add(skipped + (skipped == 1
                 ? " MCP tool entry had no name and was ignored"
@@ -65,11 +80,21 @@ public sealed class McpToolSnapshot
         Note = notes.Count == 0 ? null : string.Join("; ", notes);
     }
 
+    /// <summary>Every tool the connected servers listed, in listing order. Selection and dispatch read this, so a
+    /// name is resolvable even when the automatic offer does not include it.</summary>
     public IReadOnlyList<McpToolInfo> Tools { get; }
+
+    /// <summary>The definition of every tool in <see cref="Tools"/>, index for index.</summary>
     public IReadOnlyList<ToolDefinition> Definitions { get; }
 
-    /// <summary>Tools the cap left out.</summary>
-    public int Omitted { get; }
+    /// <summary>How many definitions the automatic offer carries.</summary>
+    public int AutomaticCount { get; }
+
+    /// <summary>What a turn that named no tool is sent: the first <see cref="AutomaticCount"/> definitions.</summary>
+    public IReadOnlyList<ToolDefinition> AutomaticDefinitions { get; }
+
+    /// <summary>Tools the automatic offer left out.</summary>
+    public int Omitted => Math.Max(0, Tools.Count - AutomaticCount);
 
     /// <summary>Listed entries that could not be offered at all because they had no usable name.</summary>
     public int Skipped { get; }
@@ -108,10 +133,10 @@ public sealed class McpToolSnapshot
         return result;
     }
 
-    public static McpToolSnapshot Build(IEnumerable<McpToolListing> listings, int maxTools = 16)
+    public static McpToolSnapshot Build(IEnumerable<McpToolListing> listings,
+        int maxTools = DefaultAutomaticTools)
     {
         var tools = new List<McpToolInfo>();
-        var omitted = 0;
         var skipped = 0;
 
         foreach (var listing in listings)
@@ -127,11 +152,6 @@ public sealed class McpToolSnapshot
                 if (listing.Server.DisabledTools.Any(disabled =>
                         string.Equals(disabled, name, StringComparison.Ordinal)))
                     continue;
-                if (tools.Count >= Math.Max(0, maxTools))
-                {
-                    omitted++;
-                    continue;
-                }
 
                 var annotations = entry["annotations"] as JObject;
                 var title = entry["title"]?.Type == JTokenType.String
@@ -164,7 +184,7 @@ public sealed class McpToolSnapshot
         for (var index = 0; index < tools.Count; index++) tools[index].ExposedName = refs[index].ExposedName;
 
         var definitions = tools.Select(Define).ToList();
-        return new McpToolSnapshot(tools, definitions, omitted, skipped);
+        return new McpToolSnapshot(tools, definitions, maxTools, skipped);
     }
 
     private static ToolDefinition Define(McpToolInfo tool)

@@ -96,6 +96,9 @@ public partial class ChatControl
         AddToolNote("project", "Project added · " + ProjectName(root) + " (" + root + ")", true, null,
             "Files in this folder are addressed as " + ProjectName(root) + "/path, and the agent may read and change them. Commands still run from the solution directory; the automatic build and test check covers the solution only.", null);
         StateText.Text = "Added " + ProjectName(root) + " to this conversation";
+        // The reference list is keyed on the roots, so this is what makes the new folder's files clickable at once
+        // rather than after the next turn.
+        _ = EnsureReferencesAsync();
     }
 
     private void RemoveProject(string root)
@@ -113,6 +116,9 @@ public partial class ChatControl
         RefreshProjectChip();
         AddToolNote("project", "Project removed · " + ProjectName(existing) + " is no longer reachable in this conversation", true);
         StateText.Text = "Removed " + ProjectName(existing);
+        // The reply that named a file in that folder keeps saying the name, but the list no longer offers it: the
+        // redraw after this read drops the link instead of leaving one that opens a file the conversation gave up.
+        _ = EnsureReferencesAsync();
     }
 
     private static bool PickProjectFolder(out string path)

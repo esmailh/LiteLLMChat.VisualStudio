@@ -98,6 +98,26 @@ public sealed class ContextBudgetTests
     }
 
     [Fact]
+    public void ContextBudget_ShortensEvenWhenTheHeadIsWhatPutsItOver()
+    {
+        // The largest message in a request is its system prompt, and it sits at the head. Walking the transcript
+        // from the newest end, the sum can go over on that message — which may not be shortened — and stopping
+        // there left every result in full and the request over its bound.
+        var messages = new List<ChatMessage> { new ChatMessage { Role = "system", Content = new string('s', 8000) }, User("q") };
+        for (var round = 1; round <= 4; round++)
+        {
+            messages.Add(Assistant("reading", ("c" + round, "read_file", "{\"path\":\"src/File" + round + ".cs\"}")));
+            messages.Add(Result("c" + round, "read_file", new string('x', 1000)));
+        }
+
+        var trimmed = ContextBudget.Trim(messages, 5000, 2, out var shortened);
+
+        Assert.Equal(2, shortened);   // the two rounds older than the ones being worked in
+        Assert.Contains("dropped to save context", trimmed[3].Content);
+        Assert.Equal(new string('x', 1000), trimmed.Single(m => m.ToolCallId == "c4").Content);
+    }
+
+    [Fact]
     public void ContextBudget_NamesTheToolWhenItsArgumentsAreGone()
     {
         // A result whose call is not in the transcript at all - a hand-edited session, or a round cut in half.

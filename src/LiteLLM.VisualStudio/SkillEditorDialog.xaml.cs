@@ -155,7 +155,7 @@ public partial class SkillEditorDialog : Window
             var request = SkillGeneration.Request(name, description, ExamplesBox.Text, ConventionsBox.Text,
                 existingContent.Length == 0 ? null : existingContent);
             var answer = await Services.CompleteInternalAsync(model, request,
-                ContextSummary.UtilitySettings(Services.Settings), _generation.Token);
+                ContextCompaction.UtilitySettings(Services.Settings), _generation.Token);
             var draft = SkillGeneration.Extract(answer.Content, name, description);
             if (draft.Content.Length > 0) ContentBox.Text = draft.Content;
             if (draft.IsValid)

@@ -22,8 +22,22 @@ $msbuild = (Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio\*\*\MSBui
     Where-Object { $_.FullName -notmatch '\\amd64\\' } | Select-Object -First 1).FullName
 if (-not $msbuild) { throw 'MSBuild.exe was not found under Program Files.' }
 
+# The generated manifest is what Visual Studio reads as the installed version, and the packaging pass writes it by
+# detokenizing source.extension.vsixmanifest into $(IntermediateOutputPath). Those paths are evaluated when
+# Microsoft.VsSDK.targets is imported from the project file — before the SDK's own targets have defined
+# IntermediateOutputPath — so the file name comes out as a bare "extension.vsixmanifest", the intermediate copy is never
+# rewritten, and a stale one from an earlier release is packed instead: the VSIX then installs as the previous version,
+# with the DLL and source manifest on one version and extension.vsixmanifest, manifest.json and catalog.json on another.
+# Passing the path below is what makes the command line behave like the IDE build; the delete covers a machine where an
+# earlier run of this script wrote the old copy. The copy beside the project file is generated too, and is left alone:
+# with IntermediateOutputPath set, nothing in the container reads it.
+$intermediateDir = Join-Path $root "src\LiteLLM.VisualStudio\obj\$Configuration\net48"
+$staleManifest = Join-Path $intermediateDir 'extension.vsixmanifest'
+if (Test-Path $staleManifest) { Remove-Item $staleManifest -Force }
+
 & $msbuild $project '/t:Build;CreateVsixContainer' `
     "/p:Configuration=$Configuration" `
+    "/p:IntermediateOutputPath=obj/$Configuration/net48/" `
     "/p:TemplateOutputDirectory=$intermediate/" `
     "/p:FileManifest=$intermediate/files.json" `
     "/p:TemplateFileManifest=$intermediate/templateFiles.json" `

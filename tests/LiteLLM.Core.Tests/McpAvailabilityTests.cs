@@ -121,6 +121,20 @@ public sealed class McpAvailabilityTests
         Assert.Equal(McpInactiveReason.FeatureOff, reason);
     }
 
+    /// <summary>A turn that ran without the servers' tools says nothing in the transcript, so the chip's tooltip is
+    /// where the user finds out why — and how to offer them on every turn instead.</summary>
+    [Fact]
+    public void Detail_SaysWhenToolsAreOfferedOnlyToAMessageThatNamesOne()
+    {
+        var settings = Settings(Server("files"));
+        Assert.True(settings.McpToolsOnlyWhenMentioned);
+        Assert.Contains("names one with #", McpAvailability.For(settings, null).Detail, System.StringComparison.Ordinal);
+
+        settings.McpToolsOnlyWhenMentioned = false;
+        Assert.DoesNotContain("names one with #", McpAvailability.For(settings, null).Detail,
+            System.StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Fingerprint_ChangesWhenAServerIsToggled()
     {

@@ -27,10 +27,11 @@ public sealed class McpToolSelection
 
     private readonly HashSet<string> _allowed;
 
-    private McpToolSelection(bool narrows, IReadOnlyList<McpToolInfo> selected,
+    private McpToolSelection(bool narrows, bool suppressed, IReadOnlyList<McpToolInfo> selected,
         IReadOnlyList<ToolDefinition> definitions, string? hint, IReadOnlyList<McpTurnRow> rows)
     {
         Narrows = narrows;
+        Suppressed = suppressed;
         Selected = selected;
         Definitions = definitions;
         Hint = hint;
@@ -38,12 +39,35 @@ public sealed class McpToolSelection
         _allowed = new HashSet<string>(selected.Select(tool => tool.ExposedName), StringComparer.Ordinal);
     }
 
-    /// <summary>The message named no tool: every connected tool is offered, exactly as before this feature.</summary>
-    public static McpToolSelection Automatic { get; } = new McpToolSelection(false,
+    /// <summary>The message named no tool: the connected tools are offered, subject only to the automatic offer's
+    /// own bound (<see cref="McpToolSnapshot.AutomaticDefinitions"/>), exactly as before this feature.</summary>
+    public static McpToolSelection Automatic { get; } = new McpToolSelection(false, false,
         Array.Empty<McpToolInfo>(), Array.Empty<ToolDefinition>(), null, Array.Empty<McpTurnRow>());
+
+    /// <summary>The turn offered no MCP tool at all because the message did not mention MCP.
+    ///
+    /// Every offered tool is a schema with a description in every request of every round, so a chat that never
+    /// asks for one pays for the servers' payload before the model can start answering — which is a turn that
+    /// looks slow for no visible reason. The prompt is told, so the model does not wonder why a tool it can see in
+    /// the Dashboard is not in its hand; the user is told by the composer's MCP chip, which is where a state that
+    /// lasts longer than one turn belongs — a row on every message would be the same sentence repeated.</summary>
+    public static McpToolSelection WithoutTools() => new McpToolSelection(false, true,
+        Array.Empty<McpToolInfo>(), Array.Empty<ToolDefinition>(),
+        "MCP tools\nThis message did not ask for an MCP tool, so none are offered this turn. The MCP servers are " +
+        "still connected, and a message that names a tool with # — or mentions MCP — offers them again. Do not " +
+        "claim to have run an MCP tool, and do not describe what one would have returned.\n",
+        Array.Empty<McpTurnRow>());
 
     /// <summary>True when at least one explicit mention resolved. Only then is the offer narrowed.</summary>
     public bool Narrows { get; }
+
+    /// <summary>True when the message did not mention MCP and the turn therefore offers none of its tools.</summary>
+    public bool Suppressed { get; }
+
+    /// <summary>The definitions this turn must send instead of the live snapshot: the selected tools when the
+    /// message narrowed, or an empty list when it said nothing about MCP. Null sends the snapshot, which is the
+    /// turn that did not narrow and still offers every connected tool.</summary>
+    public IReadOnlyList<ToolDefinition>? PinnedDefinitions => Narrows || Suppressed ? Definitions : null;
 
     public IReadOnlyList<McpToolInfo> Selected { get; }
 
@@ -59,15 +83,25 @@ public sealed class McpToolSelection
     public IReadOnlyList<McpTurnRow> Rows { get; }
 
     /// <summary>Whether this turn may call the named MCP tool. A turn with no resolved selection allows everything,
-    /// because a typo must not strip the user of every MCP tool.</summary>
+    /// because a typo must not strip the user of every MCP tool; a turn whose message said nothing about MCP allows
+    /// none, because none were offered and a call for one has to be answered rather than run.</summary>
     public bool Allows(string exposedName) =>
-        !Narrows || (!string.IsNullOrEmpty(exposedName) && _allowed.Contains(exposedName));
+        !Suppressed && (!Narrows || (!string.IsNullOrEmpty(exposedName) && _allowed.Contains(exposedName)));
 
+    /// <param name="offerWhenUnmentioned">False offers nothing to a message that says nothing about MCP. A message
+    /// that mentions MCP in any shape — a <c>#</c> token, a backticked name, the word itself — takes the same path
+    /// as before, so neither an unknown name nor a prose request can leave the turn with no tool at all.</param>
     public static McpToolSelection Resolve(McpToolSnapshot? snapshot, string? message,
-        int maxTools = MaxSelectedTools, IReadOnlyCollection<string>? explained = null)
+        int maxTools = MaxSelectedTools, IReadOnlyCollection<string>? explained = null,
+        bool offerWhenUnmentioned = true)
     {
         snapshot = snapshot ?? McpToolSnapshot.Empty;
         var mentions = McpToolMentions.Parse(message);
+        // Nothing is suppressed when there is nothing to offer: the composer's MCP chip already answers "no server
+        // is enabled", and a sentence about tools that do not exist would be a second, worse answer.
+        if (mentions.Count == 0 && !offerWhenUnmentioned && snapshot.Tools.Count > 0 &&
+            !McpToolMentions.SaysMcp(message))
+            return WithoutTools();
         if (mentions.Count == 0) return Automatic;
 
         var limit = Math.Max(1, Math.Min(maxTools <= 0 ? MaxSelectedTools : maxTools, MaxSelectedTools));
@@ -147,7 +181,7 @@ public sealed class McpToolSelection
                          "the cap in Tools ▸ Options ▸ LiteLLM ▸ MCP."
             });
 
-        return new McpToolSelection(narrows, selected, definitions,
+        return new McpToolSelection(narrows, false, selected, definitions,
             BuildHint(narrows, anyExplicit, selected, problems, hinted, capped, limit), rows);
     }
 
@@ -231,9 +265,12 @@ public sealed class McpToolSelection
         }
         else if (anyExplicit)
         {
+            // A name that resolves is always offered — the snapshot holds every tool the servers listed and the
+            // automatic cap never removes one from it — so the only way to reach this branch is a name no connected
+            // server offers. Saying it might be past a cap would send the model looking for a knob instead of
+            // answering the user.
             text.Append("MCP tools\nThe user's current message named an MCP tool that is not offered. The MCP tools " +
-                        "offered this turn remain available; the named one may be beyond the per-turn cap. Say " +
-                        "plainly that the named tool is unavailable; do not " +
+                        "offered this turn remain available. Say plainly that the named tool is unavailable; do not " +
                         "substitute a different tool, and do not claim one ran.\n");
         }
 

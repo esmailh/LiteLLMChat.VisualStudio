@@ -76,27 +76,52 @@ public sealed class McpToolDefinitionsTests
     }
 
     [Fact]
-    public void Build_ReportsTheToolsTheCapLeftOut()
+    public void Build_KeepsEveryToolButBoundsWhatAnUnnamedTurnIsOffered()
     {
         var snapshot = McpToolSnapshot.Build(new[]
         {
             Listing("Files", Tool("one", ""), Tool("two", ""), Tool("three", ""))
         }, maxTools: 2);
 
-        Assert.Equal(2, snapshot.Tools.Count);
+        // The cap is on the automatic offer, not on the snapshot: a tool the message names must still exist.
+        Assert.Equal(3, snapshot.Tools.Count);
+        Assert.Equal(3, snapshot.Definitions.Count);
+        Assert.Equal(2, snapshot.AutomaticDefinitions.Count);
+        Assert.Equal(2, snapshot.AutomaticCount);
         Assert.Equal(1, snapshot.Omitted);
-        Assert.Contains("1 more was left out", snapshot.Note!, System.StringComparison.Ordinal);
+        Assert.Contains("1 more is left out", snapshot.Note!, System.StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Build_DefaultsToSixteenToolsPerTurn()
+    public void Build_KeepsAToolPastTheAutomaticBoundResolvableAndCallable()
     {
-        // The default is the prompt cost of every round, so it is small on purpose. Pinned here because
-        // changing it silently changes how long a turn waits before the model starts answering.
-        var tools = Enumerable.Range(1, 17).Select(index => Tool("tool" + index, "")).ToArray();
+        // The failing case this covers: Grafana lists 65 tools, the cap kept the alphabetical first 16, and the
+        // read tools the user asked for were all past it — so the model said the tool did not exist.
+        var tools = Enumerable.Range(1, 20).Select(index => Tool("tool" + index, "")).ToArray();
+        var snapshot = McpToolSnapshot.Build(new[] { Listing("Grafana", tools) }, maxTools: 16);
+
+        var last = snapshot.Tools[19];
+        Assert.Equal("tool20", last.Name);
+        Assert.True(snapshot.TryResolve(last.ExposedName, out var resolved));
+        Assert.Equal("tool20", resolved.Name);
+
+        var definitions = snapshot.DefinitionsFor(new[] { last.ExposedName });
+        Assert.Equal(last.ExposedName, Assert.Single(definitions).Function["name"]!.Value<string>());
+        Assert.DoesNotContain(definitions[0], snapshot.AutomaticDefinitions);
+    }
+
+    [Fact]
+    public void Build_DefaultsTheAutomaticOfferToAWholeOrdinaryServer()
+    {
+        // The default is the prompt cost of every round, so it is a real bound. Pinned here because changing it
+        // silently changes how much a turn that asks for MCP carries before the model starts answering — and
+        // because sixteen kept a real sixty-five-tool server's useful half out of the request entirely.
+        Assert.Equal(128, McpToolSnapshot.DefaultAutomaticTools);
+        var tools = Enumerable.Range(1, 129).Select(index => Tool("tool" + index, "")).ToArray();
         var snapshot = McpToolSnapshot.Build(new[] { Listing("Files", tools) });
 
-        Assert.Equal(16, snapshot.Tools.Count);
+        Assert.Equal(129, snapshot.Tools.Count);
+        Assert.Equal(128, snapshot.AutomaticDefinitions.Count);
         Assert.Equal(1, snapshot.Omitted);
         Assert.Contains("per-turn cap", snapshot.Note!, System.StringComparison.Ordinal);
     }

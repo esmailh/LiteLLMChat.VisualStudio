@@ -13,6 +13,9 @@ public sealed class FileReferenceParserTests
     [InlineData("src/Foo.cs#L42", "src/Foo.cs", 42, null)]
     [InlineData("src/Foo.cs#L42C7", "src/Foo.cs", 42, 7)]
     [InlineData(@"C:\work\Foo.cs:12:3", @"C:\work\Foo.cs", 12, 3)]
+    // A folder of the user's own can contain a space — "New folder (3) - Copy" — and an absolute path that is cut
+    // at that space names a file that does not exist.
+    [InlineData(@"F:\New folder (3) - Copy\src\App\StoreGroupService.cs:1896", @"F:\New folder (3) - Copy\src\App\StoreGroupService.cs", 1896, null)]
     public void ParsesSupportedReferences(string text, string path, int? line, int? column)
     {
         var match = Assert.Single(FileReferenceParser.Find(text));
@@ -54,5 +57,44 @@ public sealed class FileReferenceParserTests
         Assert.Equal("src/My File.cs", reference.Path);
         Assert.Equal(5, reference.Line);
         Assert.Equal(2, reference.Column);
+    }
+
+    /// <summary>A name may contain a space, so a bare name in a sentence is matched with the word in front of it.
+    /// When the disk is asked, the link covers the name the disk has rather than the words around it — the bug
+    /// where "the check in Foo.cs:12" reported that the referenced file was not found.</summary>
+    [Fact]
+    public void DropsProseBeforeABareNameThatOnlyExistsWithoutIt()
+    {
+        const string text = "the check in StoreGroupService.cs:1896 returns";
+        var match = Assert.Single(FileReferenceParser.Find(text, path => path == "StoreGroupService.cs"));
+        Assert.Equal("StoreGroupService.cs", match.Reference.Path);
+        Assert.Equal(1896, match.Reference.Line);
+        Assert.Equal("StoreGroupService.cs:1896", text.Substring(match.Index, match.Length));
+    }
+
+    [Fact]
+    public void KeepsASpacedFileNameThatIsTheOneOnDisk()
+    {
+        const string text = "see My File.cs:3 first";
+        var match = Assert.Single(FileReferenceParser.Find(text, path => path == "My File.cs"));
+        Assert.Equal("My File.cs", match.Reference.Path);
+        Assert.Equal(3, match.Reference.Line);
+        Assert.Equal("My File.cs:3", text.Substring(match.Index, match.Length));
+    }
+
+    [Fact]
+    public void KeepsTheMatchAsWrittenWhenNoCandidateExists()
+    {
+        const string text = "see Missing.cs:4";
+        var match = Assert.Single(FileReferenceParser.Find(text, _ => false));
+        Assert.Equal("see Missing.cs", match.Reference.Path);
+        Assert.Equal("see Missing.cs:4", text.Substring(match.Index, match.Length));
+    }
+
+    [Fact]
+    public void DoesNotShortenAPathWithAFolder()
+    {
+        var match = Assert.Single(FileReferenceParser.Find("see src/Services/My File.cs:3", path => path == "My File.cs"));
+        Assert.Equal("src/Services/My File.cs", match.Reference.Path);
     }
 }

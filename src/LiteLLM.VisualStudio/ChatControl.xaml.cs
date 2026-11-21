@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -80,6 +80,12 @@ public partial class ChatControl : UserControl, IAgentView
     private SymbolIndex? _symbolIndex;
     private string? _symbolIndexRoot;
     private bool _symbolIndexBuilding;
+    /// <summary>The files this conversation can reach, by the name a reply writes for them. Built once per set of
+    /// folders and per edit, off the UI thread, because a reply is redrawn for every streamed chunk and a click
+    /// that joined a bare name to the solution root alone reported "not found" for every file inside a folder.</summary>
+    private FileReferenceResolver? _references;
+    private string? _referencesKey;
+    private bool _referencesBuilding;
 
     private sealed class FileMentionEntry
     {
@@ -105,11 +111,18 @@ public partial class ChatControl : UserControl, IAgentView
         /// <summary>Set when the row is a skill. Under <c>/skill</c> choosing it completes the name word; in the
         /// plain <c>/</c> list choosing it selects (or unselects) the skill for this conversation at once.</summary>
         public SkillInfo? Skill { get; set; }
+        /// <summary>Set when the row is one of this extension's own commands rather than a server's prompt:
+        /// choosing it writes this word into the composer, which is then sent like anything else. Choosing a prompt
+        /// opens its dialog; a command has nothing to fill in.</summary>
+        public string? Command { get; set; }
     }
 
     internal ChatControl() { InitializeComponent(); VsTheme.Apply(this); Current = this; Loaded += OnLoaded; Unloaded += OnUnloaded; SizeChanged += OnSizeChanged; }
     /// <summary>Below this the whole header row of controls cannot sit beside the brand any more.</summary>
     private const double NarrowWidth = 820;
+    /// <summary>How many files the reference list holds. Past it a link still opens when the reply wrote a path
+    /// that exists; only a bare name is left to the folders that were read.</summary>
+    private const int MaxReferenceFiles = 20000;
     private double _toolsWidth;
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e) => ApplyLayout(e.NewSize.Width);
@@ -163,6 +176,7 @@ public partial class ChatControl : UserControl, IAgentView
             Services.SettingsChanged += SettingsChanged;
             Services.Mcp.ToolsChanged += McpToolsChanged;
             Services.Mcp.ServerClosed += McpServerClosed;
+            Services.Shells.Completed += ShellCompleted;
             _eventSubscriptionsActive = true;
         }
         // The edit tools ask the chat, rather than a modal dialog, because the question belongs in the conversation
@@ -170,6 +184,7 @@ public partial class ChatControl : UserControl, IAgentView
         EditTools.Confirm = AskToApplyEditAsync;
         TerminalTools.Confirm = AskToRunCommandAsync;
         McpApproval.Confirm = AskToApproveMcpToolAsync;
+        BrowserTools.Confirm = AskToUseBrowserAsync;
         // Auto-hide is a visual detach, not a new conversation or a new turn. In particular, do not
         // replace the session underneath a running harness when the pane becomes visible again.
         if (_generation == null) await Services.RefreshSessionScopeAsync();
@@ -193,6 +208,9 @@ public partial class ChatControl : UserControl, IAgentView
         // The replies already on screen gain their class and method links when this finishes; until then they are
         // plain text, so nothing about the window's readiness depends on it.
         _ = EnsureSymbolIndexAsync();
+        // The same for the file names a reply carries: until the folders are read, a bare name is drawn as the
+        // parser found it, and the redraw once the list is ready is what turns it into a link that opens.
+        _ = EnsureReferencesAsync();
         ReloadPermissionMode();
         RefreshAutoContextButton();
         await WatchEditorAsync(loadVersion);
@@ -224,11 +242,13 @@ public partial class ChatControl : UserControl, IAgentView
             Services.SettingsChanged -= SettingsChanged;
             Services.Mcp.ToolsChanged -= McpToolsChanged;
             Services.Mcp.ServerClosed -= McpServerClosed;
+            Services.Shells.Completed -= ShellCompleted;
             _eventSubscriptionsActive = false;
         }
         if (ReferenceEquals(EditTools.Confirm?.Target, this)) EditTools.Confirm = null;
         if (ReferenceEquals(TerminalTools.Confirm?.Target, this)) TerminalTools.Confirm = null;
         if (ReferenceEquals(McpApproval.Confirm?.Target, this)) McpApproval.Confirm = null;
+        if (ReferenceEquals(BrowserTools.Confirm?.Target, this)) BrowserTools.Confirm = null;
         if (ReferenceEquals(Current, this)) Current = null;
     }
     /// <summary>Brings back the MCP servers the user enabled. It runs for the LiteLLM backend only: the Claude CLI
@@ -264,6 +284,27 @@ public partial class ChatControl : UserControl, IAgentView
     }
     private void ModelsChanged(object sender, EventArgs e) => Dispatcher.Invoke(ReloadModels);
     private void SessionsChanged(object sender, EventArgs e) => Dispatcher.Invoke(ReloadSessions);
+
+    /// <summary>One row when a background shell ends. It is drawn only for the conversation that started it: a fact
+    /// about another chat's server belongs in that chat, and the model is told there by the request instead.
+    ///
+    /// Nothing else happens on purpose. The shell is not restarted and no turn is started: the user asked for a
+    /// program, and a program that stops is news for the next message, not a reason to spend a model call the user
+    /// did not make. The row is what keeps it from being silent.</summary>
+    private void ShellCompleted(object? sender, ShellCompletion completion)
+    {
+        if (_disposed) return;
+        if (!string.Equals(Services.ActiveSession.Id.ToString(), completion.Owner, StringComparison.Ordinal)) return;
+        _ = Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (_disposed) return;
+            AddToolNote("shell",
+                "Shell · " + completion.Id + " (pid " + completion.ProcessId + ") ended with exit " +
+                (completion.ExitCode?.ToString() ?? "unknown") + " after " + completion.Duration.TotalSeconds.ToString("0.#") + "s",
+                completion.ExitCode == 0, null,
+                "Its output is in " + completion.LogPath + ". The model is told the shell ended and reads the log from its end with read_file.", null);
+        }));
+    }
     /// <summary>The event fires on whatever thread changed the snapshot, so the refresh is marshalled. If the tool
     /// list under an open popup changed, the next refresh shows the new one; a row that vanished cannot be chosen.</summary>
     private void McpToolsChanged(object? sender, EventArgs e)
@@ -351,6 +392,15 @@ public partial class ChatControl : UserControl, IAgentView
         {
             lines.Add(availability.Headline);
             lines.Add(tools.Count == 1 ? "1 tool is offered right now." : tools.Count + " tools are offered right now.");
+            // The per-chat state said in a message, in the place that already describes what this turn is offered:
+            // it lasts, so it is read here at any time rather than repeated as a row every turn, and the tooltip
+            // carries the sentence that clears it so the state cannot become a trap.
+            if (Services.ActiveSession.McpEveryTurn &&
+                !string.Equals(Services.ActiveSession.ExecutionBackend, "claude", StringComparison.OrdinalIgnoreCase))
+            {
+                lines.Add("· This chat is offered MCP tools on every turn — asked for in a message.");
+                lines.Add("  Say \"don't use MCP in this chat anymore\" to stop.");
+            }
             foreach (var server in availability.EnabledServers)
             {
                 var status = Services.Mcp.StatusOf(server.Id);
@@ -401,10 +451,10 @@ public partial class ChatControl : UserControl, IAgentView
             if (turn.Build != null) AddToolNote("build", turn.Build.Summary, turn.Build.Errors == 0, null, turn.Build.Detail);
             // After the build row, because that is the order they were drawn in a live turn.
             if (turn.Tests != null) AddToolNote("tests", turn.Tests.Summary, turn.Tests.Errors == 0, null, turn.Tests.Detail);
-            // Same reasoning as the build row: the briefing is the model's own text standing in for messages that
+            // Same reasoning as the build row: the checkpoint is the model's own text standing in for messages that
             // are still here, so it is replayed from the turn rather than re-derived, and the rows come back in
             // the order they were drawn in a live turn.
-            foreach (var summary in turn.Summaries) AddContextSummaryNote(summary);
+            foreach (var summary in turn.Summaries) AddCompactionNote(summary);
             // Last, as it was drawn last. A turn stored by a build that did not count usage has none.
             if (turn.Usage != null) AddToolNote("", turn.Usage.Line, true, null, null, null);
         }
@@ -660,6 +710,7 @@ public partial class ChatControl : UserControl, IAgentView
         // Started before the first reply so the links exist by the time it is drawn; the turn itself never waits for
         // the index, and a solution opened after the window loaded is picked up here.
         _ = EnsureSymbolIndexAsync();
+        _ = EnsureReferencesAsync();
         input = await ApplySkillCommandAsync(input);
         if (input == null || _disposed) return;
         var editsBefore = EditTools.Revisions;
@@ -667,11 +718,19 @@ public partial class ChatControl : UserControl, IAgentView
         {
             await SendClaudeAsync(input);
             // The CLI edits its own files; a declaration it added or removed makes the index stale for the next reply.
-            if (EditTools.Revisions > editsBefore) _symbolIndex = null;
+            if (EditTools.Revisions > editsBefore) { _symbolIndex = null; _ = EnsureReferencesAsync(); }
             return;
         }
         if (!(ModelBox.SelectedItem is ModelInfo model)) return;
         input = input.Trim();
+        // "/compact" is this backend's own command: it folds the conversation now and sends nothing, so the chat
+        // stays idle until the next message — which then opens with the checkpoint. The Claude backend's own
+        // /compact is the CLI's, which is why this comes after that branch.
+        if (string.Equals(input, "/compact", StringComparison.OrdinalIgnoreCase))
+        {
+            await CompactNowAsync(model).ConfigureAwait(true);
+            return;
+        }
         ComposerHint.Visibility = Visibility.Collapsed;
         Composer.Clear(); EmptyState.Visibility = Visibility.Collapsed;
         _history.Add(new ChatMessage { Role = "user", Content = input }); ScrollToSent(AddMessage("You", input, false));
@@ -692,7 +751,7 @@ public partial class ChatControl : UserControl, IAgentView
             // turn is a piece of work rather than a view update, and this control is only what it reads and
             // draws through. What stays here is what belongs to the window — the composer, the token, the
             // outcome — and the harness draws through the IAgentView this control implements.
-            await new AgentHarness(this, Services, model).RunAsync(token).ConfigureAwait(true);
+            await new AgentHarness(this, Services, model, Services.ActiveSession).RunAsync(token).ConfigureAwait(true);
         }
         catch (OperationCanceledException) { if (_activeTurn != null) { _activeTurn.Status = ChatTurnStatus.Cancelled; _activeTurn.CompletedUtc = DateTime.UtcNow; } SaveSession(); StateText.Text = "Stopped"; }
         catch (Exception ex)
@@ -705,6 +764,49 @@ public partial class ChatControl : UserControl, IAgentView
             Services.Log(detail);
         }
         finally { if (_activeTurn != null) CaptureTurnChanges(_activeTurn.Id, editsBefore); _ticker?.Stop(); _ticker = null; if (_live != null) FinishStatus(_live); _live = null; _generation.Dispose(); _generation = null; SetBusy(false); _activeTurn = null; if (IsVisible && !_disposed) Composer.Focus(); if (EditTools.Revisions > editsBefore) _symbolIndex = null; }
+        // A turn that changed files changed what a name means, so the list is read again: the reply that names what
+        // it has just written is then a link, and the files it deleted stop being one.
+        if (EditTools.Revisions > editsBefore) _ = EnsureReferencesAsync();
+    }
+
+    /// <summary>"/compact": one checkpoint written now, with no request sent and no answer awaited. It opens a turn
+    /// of its own so the row has somewhere to live — a turn the session keeps even with no messages — and that
+    /// turn is what a reloaded window replays the row from.</summary>
+    private async Task CompactNowAsync(ModelInfo model)
+    {
+        if (_generation != null) return;
+        if (_history.Count == 0)
+        {
+            AddToolNote("", "Nothing to compact: this conversation has no messages yet.", false);
+            Composer.Clear();
+            return;
+        }
+        ComposerHint.Visibility = Visibility.Collapsed;
+        Composer.Clear();
+        var turn = new ChatTurnState { ModelKey = model.Key, Status = ChatTurnStatus.Streaming, StartedUtc = DateTime.UtcNow };
+        _activeTurn = turn;
+        Services.ActiveSession.Turns.Add(turn); SaveSession();
+        SetBusy(true); _generation = new CancellationTokenSource(); var token = _generation.Token;
+        try
+        {
+            await new AgentHarness(this, Services, model, Services.ActiveSession).CompactNowAsync(token).ConfigureAwait(true);
+            turn.Status = ChatTurnStatus.Complete; turn.CompletedUtc = DateTime.UtcNow;
+        }
+        catch (OperationCanceledException) { turn.Status = ChatTurnStatus.Cancelled; turn.CompletedUtc = DateTime.UtcNow; StateText.Text = "Stopped"; }
+        catch (Exception ex)
+        {
+            turn.Status = ChatTurnStatus.Failed; turn.Error = ex.Message; turn.CompletedUtc = DateTime.UtcNow;
+            AddToolNote("error", ex.Message, false, (ex as LiteLlmException)?.Exchange, (ex as LiteLlmException)?.TechnicalDetails ?? ex.ToString());
+            StateText.Text = ex.Message;
+            Services.Log(ex.ToString());
+        }
+        finally
+        {
+            SaveSession();
+            _generation.Dispose(); _generation = null;
+            SetBusy(false); _activeTurn = null;
+            if (IsVisible && !_disposed) Composer.Focus();
+        }
     }
 
     /// <summary>What <see cref="AgentHarness"/> may ask of this window. Explicit rather than making the methods
@@ -723,7 +825,7 @@ public partial class ChatControl : UserControl, IAgentView
     void IAgentView.SetContent(Bubble bubble, ChatMessage message) => SetContent(bubble, message);
     void IAgentView.FinishStatus(Bubble bubble) => FinishStatus(bubble);
     void IAgentView.AddToolNote(string name, string summary, bool ok, HttpExchange? exchange, string? detail, AppliedEdit? edit) => AddToolNote(name, summary, ok, exchange, detail, edit);
-    void IAgentView.AddContextSummaryNote(ContextSummaryReport report) => AddContextSummaryNote(report);
+    void IAgentView.AddCompactionNote(CompactionReport report) => AddCompactionNote(report);
     void IAgentView.AddUndoAllNote(IReadOnlyList<AppliedEdit> edits) => AddToolNote("", edits.Count == 1
         ? "Edited 1 file this turn — right-click to undo it"
         : "Edited " + edits.Count + " files this turn — right-click to undo them all", true, null, null, null, edits);
@@ -731,7 +833,13 @@ public partial class ChatControl : UserControl, IAgentView
     Task IAgentView.InvokeAsync(Action action) => Dispatcher.InvokeAsync(action).Task;
     Task<string?> IAgentView.SolutionRootAsync() => SolutionRootAsync();
     string? IAgentView.ReadAttachedText(string path) => ReadAttachedText(path);
-    void IAgentView.SaveSession() => SaveSession();
+    void IAgentView.SaveSession()
+    {
+        SaveSession();
+        // A per-chat MCP state is set by the turn itself, from a sentence in the message (<see cref="McpChatInstruction"/>),
+        // so the chip has to be redrawn when the conversation's answer changes rather than only when the settings do.
+        DrawMcpChip();
+    }
 
     /// <summary>Copilot Chat's "Continue to iterate?" checkpoint, rendered in the transcript rather than a modal
     /// dialog so the conversation stays readable while the turn waits. Resolves true to continue with the raised
@@ -819,19 +927,19 @@ public partial class ChatControl : UserControl, IAgentView
         ScrollIfFollowing();
     }
 
-    /// <summary>A context briefing, drawn as a row that can be opened. A tool row keeps its detail in a tooltip,
+    /// <summary>A compaction, drawn as a row that can be opened. A tool row keeps its detail in a tooltip,
     /// which is enough for "which file was read" and not enough for "part of your conversation was folded away":
-    /// what the fold covered and what the model was given instead have to be readable in the transcript itself,
-    /// or the user cannot tell a housekeeping step from lost work. Collapsed by default, so a turn that
-    /// summarized several times still fits on the screen.</summary>
-    private void AddContextSummaryNote(ContextSummaryReport report)
+    /// what the fold covered and the checkpoint the model was given instead have to be readable in the transcript
+    /// itself, or the user cannot tell a housekeeping step from lost work. Collapsed by default, so a turn that
+    /// compacted several times still fits on the screen.</summary>
+    private void AddCompactionNote(CompactionReport report)
     {
         var body = new StackPanel { Margin = new Thickness(0, 8, 0, 2) };
         body.Children.Add(new TextBlock
         {
             Text = report.Covered.Length > 0
                 ? report.Covered
-                : "The opening messages of this conversation now travel to the model as one briefing.",
+                : "The opening messages of this conversation now travel to the model as one checkpoint.",
             Style = (Style)FindResource("Caption"),
             TextWrapping = TextWrapping.Wrap
         });
@@ -848,7 +956,7 @@ public partial class ChatControl : UserControl, IAgentView
         // thrown away: the fold is of the request, not of the chat.
         body.Children.Add(new TextBlock
         {
-            Text = "Nothing was removed from this chat: the transcript and the saved conversation keep every message. Only the request sent to the model carries this briefing in their place.",
+            Text = "Nothing was removed from this chat: the transcript and the saved conversation keep every message. Only the request sent to the model carries this checkpoint in their place.",
             Style = (Style)FindResource("Caption"),
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 8, 0, 0)
@@ -860,7 +968,7 @@ public partial class ChatControl : UserControl, IAgentView
             Content = body,
             IsExpanded = false,
             HorizontalAlignment = HorizontalAlignment.Stretch,
-            // Direction from the briefing, like a reply: the coverage line is the extension's own sentence, but
+            // Direction from the checkpoint, like a reply: the coverage line is the extension's own sentence, but
             // the text the user opened the row to read is the model's, and it decides the direction here.
             FlowDirection = TextDirection.For(report.Detail.Length > 0 ? report.Detail : report.Covered)
         };
@@ -878,7 +986,7 @@ public partial class ChatControl : UserControl, IAgentView
         border.SetResourceReference(Border.BorderBrushProperty, CommonDocumentColors.ListItemBorderBrushKey);
         border.ContextMenu = Menu(
             Item("Copy what it covered", () => Copy(report.Covered, "Coverage"), report.Covered.Length > 0),
-            Item("Copy briefing", () => Copy(report.Detail, "Briefing"), report.Detail.Length > 0),
+            Item("Copy checkpoint", () => Copy(report.Detail, "Checkpoint"), report.Detail.Length > 0),
             null,
             Item("Copy whole conversation", () => Copy(Transcript(), "Conversation"), _history.Count > 0));
         border.ToolTip = report.Summary;
@@ -1087,10 +1195,62 @@ public partial class ChatControl : UserControl, IAgentView
         if (AllowAllPermissions) return true;
         if (!Services.Settings.ConfirmEachCommand) return true;
         var body = new StackPanel();
-        body.Children.Add(new TextBlock { Text = "Run " + proposal.Shell + " command?", FontWeight = FontWeights.SemiBold });
+        body.Children.Add(new TextBlock { Text = (proposal.Background ? "Start and leave running: " : "Run ") + proposal.Shell + " command?", FontWeight = FontWeights.SemiBold });
+        if (proposal.Background)
+            body.Children.Add(new TextBlock { Text = "It keeps running after this call until it ends by itself, is stopped, or Visual Studio closes. Its output goes to a log file the model reads.", Style = (Style)FindResource("Caption"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0) });
         body.Children.Add(new TextBox { Text = proposal.Command, IsReadOnly = true, AcceptsReturn = true, FontFamily = new FontFamily("Consolas, Courier New"), MaxHeight = 260, Margin = new Thickness(0, 8, 0, 0), VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, TextWrapping = TextWrapping.NoWrap });
         var skip = new Button { Content = "Skip" };
-        var allow = new Button { Content = "Run", Style = (Style)FindResource("PrimaryButton") };
+        var allow = new Button { Content = proposal.Background ? "Start" : "Run", Style = (Style)FindResource("PrimaryButton") };
+        body.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0), Children = { skip, allow } });
+        var card = new Border { Style = (Style)FindResource("Card"), HorizontalAlignment = HorizontalAlignment.Left, MaxWidth = 900, Child = body, Margin = new Thickness(0, 0, 0, 12) };
+        card.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.AccentMediumBrushKey);
+        var source = new TaskCompletionSource<bool>();
+        skip.Click += (s, e) => source.TrySetResult(false);
+        allow.Click += (s, e) => source.TrySetResult(true);
+        Messages.Children.Add(card); ScrollIfFollowing();
+        ApprovalWaiting(true);
+        try { using ((_generation?.Token ?? CancellationToken.None).Register(() => source.TrySetResult(false))) return await source.Task.ConfigureAwait(true); }
+        finally { ApprovalWaiting(false); Messages.Children.Remove(card); }
+    }
+
+    /// <summary>Asks before the agent touches its browser. The card names the action, the address and the part the model
+    /// wrote — the selector, the field's value or the script — because the decision is not "may the agent use a browser"
+    /// but "may it do this, here". The caption says the one thing a user cannot be expected to infer: this window is a
+    /// profile of its own, not the Chrome they are signed in to. Allow all permissions and the command-confirmation
+    /// switch answer it the same way they answer a command: one permission decision covers the turn's side effects.</summary>
+    private async Task<bool> AskToUseBrowserAsync(BrowserProposal proposal)
+    {
+        if (_disposed) return false;
+        if (AllowAllPermissions) return true;
+        if (!Services.Settings.ConfirmEachCommand) return true;
+        var body = new StackPanel();
+        body.Children.Add(new TextBlock
+        {
+            Text = proposal.Ask.Length > 0 ? proposal.Ask : "Use the agent's browser?",
+            FontWeight = FontWeights.SemiBold,
+            TextWrapping = TextWrapping.Wrap
+        });
+        body.Children.Add(new TextBlock
+        {
+            Text = "It is the agent's own browser window: a separate profile from your normal browser, kept between turns so a sign-in done there stays signed in. It can read and act on that page and on nothing else.",
+            Style = (Style)FindResource("Caption"),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 4, 0, 0)
+        });
+        if (proposal.Url.Length > 0)
+            body.Children.Add(new TextBox { Text = proposal.Url, IsReadOnly = true, FontFamily = new FontFamily("Consolas, Courier New"), Margin = new Thickness(0, 8, 0, 0), HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, TextWrapping = TextWrapping.NoWrap });
+        if (proposal.Detail.Length > 0)
+            body.Children.Add(new TextBox { Text = proposal.Detail, IsReadOnly = true, AcceptsReturn = true, FontFamily = new FontFamily("Consolas, Courier New"), MaxHeight = 220, Margin = new Thickness(0, 8, 0, 0), VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, TextWrapping = TextWrapping.NoWrap });
+        var label = proposal.Action switch
+        {
+            "open" => "Open",
+            "click" => "Click",
+            "type" => "Fill",
+            "script" => "Run",
+            _ => "Allow"
+        };
+        var skip = new Button { Content = "Skip" };
+        var allow = new Button { Content = label, Style = (Style)FindResource("PrimaryButton") };
         body.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0), Children = { skip, allow } });
         var card = new Border { Style = (Style)FindResource("Card"), HorizontalAlignment = HorizontalAlignment.Left, MaxWidth = 900, Child = body, Margin = new Thickness(0, 0, 0, 12) };
         card.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.AccentMediumBrushKey);
@@ -1283,11 +1443,22 @@ public partial class ChatControl : UserControl, IAgentView
     {
         var openFile = new Action<FileReference>(reference => OpenLater(() => OpenReferenceAsync(reference)));
         var index = _symbolIndex;
+        var exists = ExistingFiles();
         var rendered = index == null
-            ? MarkdownRenderer.Render(text, openFile)
-            : MarkdownRenderer.Render(text, openFile, index.Find, location => OpenLater(() => OpenSymbolAsync(location)));
+            ? MarkdownRenderer.Render(text, openFile, null, null, exists)
+            : MarkdownRenderer.Render(text, openFile, index.Find, location => OpenLater(() => OpenSymbolAsync(location)), exists);
         rendered.FlowDirection = TextDirection.For(text);
         return rendered;
+    }
+
+    /// <summary>The folders this conversation may reach, as a question the renderer may ask about a name. The
+    /// answer comes from the list read once for this workspace, not from the disk: this is called while a reply is
+    /// being drawn, which happens again for every streamed chunk. Null until that list is ready, which leaves the
+    /// links exactly as the parser alone reads them until the redraw that follows it.</summary>
+    private Func<string, bool>? ExistingFiles()
+    {
+        var resolver = _references;
+        return resolver == null ? null : resolver.Exists;
     }
 
     /// <summary>Opens through Visual Studio's editor without making the drawing of a reply wait for it. Both open
@@ -1349,7 +1520,12 @@ public partial class ChatControl : UserControl, IAgentView
         SendButton.Visibility = value ? Visibility.Collapsed : Visibility.Visible;
         SendButton.IsEnabled = !value && Composer.Text.Trim().Length > 0;
         RefreshDeleteButton(value);
+        // The placeholder is this method's own, so it is this method that takes it down: an outcome ("Stopped",
+        // an error) is written before the turn's finally runs, and a turn that ends without one — /compact is
+        // the one that sends no request and so has no reply to report — would otherwise leave the window saying
+        // Generating… while nothing is running.
         if (value) StateText.Text = "Generating…";
+        else if (StateText.Text == "Generating…") StateText.Text = string.Empty;
     }
     /// <summary>Starts a new conversation. Everything belonging to the message being written goes with it: a draft and
     /// its attachments carried into a fresh session would look like they belonged to it.</summary>
@@ -1591,6 +1767,7 @@ public partial class ChatControl : UserControl, IAgentView
         _ = RefreshSessionScopeAndRenderAsync();
         // This is also how a solution opened after the window was loaded gets its index built.
         _ = EnsureSymbolIndexAsync();
+        _ = EnsureReferencesAsync();
     }
 
     private async Task RefreshSessionScopeAndRenderAsync()
@@ -1769,8 +1946,16 @@ public partial class ChatControl : UserControl, IAgentView
         {
             var workspace = Services.WorkspaceFor(await SolutionRootAsync());
             if (workspace.Roots.Count == 0) { StateText.Text = "Open a solution first"; return; }
-            var path = workspace.Resolve(reference.Path);
-            if (!File.Exists(path)) { StateText.Text = "Referenced file was not found"; return; }
+            // An absolute path names the one place the model meant, and it is never swapped for a file of the same
+            // name elsewhere; one outside every folder this conversation holds is said rather than reported as
+            // missing, because it is not the same answer.
+            if (Path.IsPathRooted(reference.Path) && workspace.Owner(reference.Path) == null)
+            { StateText.Text = "Referenced file is outside the open projects"; return; }
+            // A reply names a file, not a path — "StoreGroupService.cs" for one three folders down — so the click
+            // asks the same list the link was drawn from. Joining the name to the solution root alone is what
+            // answered "not found" for a file that is right there.
+            var path = (await ReferencesAsync(workspace))?.Find(reference.Path);
+            if (path == null) { StateText.Text = "Referenced file was not found"; return; }
 
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
             var dte = (DTE?)await LiteLlmPackage.Instance.GetServiceAsync(typeof(DTE));
@@ -1858,6 +2043,79 @@ public partial class ChatControl : UserControl, IAgentView
             }
         }
         catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { }
+        return files;
+    }
+
+    /// <summary>The file list behind every reference link, built on first use and reused while the folders and the
+    /// edit count stay the same. A file a turn creates bumps <see cref="EditTools.Revisions"/>, so a reply that names
+    /// what it has just written is a cache miss rather than a second attempt at the click.</summary>
+    private async Task EnsureReferencesAsync()
+    {
+        string? root;
+        try { root = await SolutionRootAsync(); }
+        catch (Exception ex) { Services.Log("File reference index could not start: " + ex); return; }
+        var workspace = Services.WorkspaceFor(root);
+        if (workspace.Roots.Count == 0) return;
+
+        var before = _references;
+        var built = await ReferencesAsync(workspace);
+        // A list that was already current costs nothing to have asked for, and redrawing a whole conversation for it
+        // would take the live bubble away from a turn that is still writing into it.
+        if (built == null || ReferenceEquals(built, before)) return;
+        if (IsLoaded && _generation == null) RenderSession();
+    }
+
+    /// <summary>The list for this workspace, read when it is missing or when the folders or the edit count moved on.
+    /// A name it does not know is not retried against the disk on every click: the key already covers a file this
+    /// conversation created, so a miss is a wrong name.</summary>
+    private async Task<FileReferenceResolver?> ReferencesAsync(Workspace workspace)
+    {
+        var key = ReferencesKey(workspace);
+        var known = _references;
+        if (known != null && string.Equals(key, _referencesKey, StringComparison.OrdinalIgnoreCase)) return known;
+        return await BuildReferencesAsync(workspace, key);
+    }
+
+    private static string ReferencesKey(Workspace workspace) =>
+        string.Join("|", workspace.Roots) + "#" + EditTools.Revisions;
+
+    private async Task<FileReferenceResolver?> BuildReferencesAsync(Workspace workspace, string key)
+    {
+        if (_referencesBuilding) return _references;
+        _referencesBuilding = true;
+        FileReferenceResolver? built = null;
+        try { built = await Task.Run(() => new FileReferenceResolver(workspace, ReferenceFiles(workspace))); }
+        catch (Exception ex) { Services.Log("File reference index could not be built: " + ex); }
+        finally { _referencesBuilding = false; }
+
+        if (built == null) return _references;
+        _references = built;
+        _referencesKey = key;
+        return built;
+    }
+
+    /// <summary>Every file the conversation can reach, named the way a reply names it. The parser knows more
+    /// extensions than the <c>@</c> list offers and a link may name any of them, so this does not filter by
+    /// extension; only bin, obj, .git and .vs are dropped, because a link into a generated copy opens a file the
+    /// user does not edit.</summary>
+    private static IReadOnlyList<string> ReferenceFiles(Workspace workspace)
+    {
+        var files = new List<string>();
+        foreach (var root in workspace.Roots)
+        {
+            if (!Directory.Exists(root)) continue;
+            try
+            {
+                foreach (var path in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+                {
+                    if (ContextTools.IsNoise(path)) continue;
+                    files.Add(workspace.Relative(path));
+                    if (files.Count >= MaxReferenceFiles) return files;
+                }
+            }
+            // An unreadable folder costs the names below it and not the links that were already found.
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { }
+        }
         return files;
     }
 
@@ -2184,8 +2442,16 @@ public partial class ChatControl : UserControl, IAgentView
         rows.AddRange(SkillSuggestions(filter));
         if (!claude)
         {
-            // The LiteLLM backend has no CLI slash commands of its own, so "/" is where its servers' prompts live.
+            // The LiteLLM backend has no CLI slash commands of its own, so "/" is where its servers' prompts live —
+            // and the one command this backend does add, which folds the conversation into a checkpoint.
             _promptMode = true;
+            if (Matches(filter, "/compact", "compact", "context", "checkpoint", "summarize"))
+                rows.Add(new PromptSuggestion
+                {
+                    Name = "/compact",
+                    Description = "Fold the older part of this conversation into a checkpoint now",
+                    Command = "/compact"
+                });
             rows.AddRange(Services.Mcp.Prompts
                 .Where(prompt => Matches(filter, prompt.DisplayName, prompt.Name, prompt.Server.Name))
                 .Take(100)
@@ -2370,6 +2636,21 @@ public partial class ChatControl : UserControl, IAgentView
         if (_promptMode)
         {
             if (!(SlashCommandList.SelectedItem is PromptSuggestion suggestion)) return;
+            // A command row writes its own word: there is nothing to fill in, and the next Enter sends it.
+            if (suggestion.Command != null)
+            {
+                _picking = true;
+                try
+                {
+                    Composer.Text = ClaudeSlashCommands.ReplaceToken(Composer.Text, _slashTokenStart,
+                        MentionSpanLength(), suggestion.Command);
+                    Composer.CaretIndex = Math.Min(Composer.Text.Length, _slashTokenStart + suggestion.Command.Length + 1);
+                    SlashCommandPopup.IsOpen = false;
+                }
+                finally { _picking = false; }
+                Composer.Focus();
+                return;
+            }
             var dialog = new McpPromptDialog(suggestion.Prompt, Services.Mcp) { Owner = System.Windows.Window.GetWindow(this) };
             if (dialog.ShowDialog() == true)
             {

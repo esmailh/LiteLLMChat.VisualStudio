@@ -66,6 +66,17 @@ public sealed class UserSettings
     public RtkMode RtkOutputMode { get; set; } = RtkMode.Auto;
     public int FallbackContextTokens { get; set; } = 128000;
     public string ModelContextOverrides { get; set; } = "";
+    /// <summary>Compact a conversation as it nears the model's ceiling, without being asked. The ceiling is the
+    /// window minus a buffer, and the decision is made from the provider's measured prompt count plus what has
+    /// changed since. Off leaves compaction to the <c>/compact</c> command, a provider's "too long" rejection
+    /// included — the switch is the one opencode exposes as <c>compaction.auto</c>.</summary>
+    public bool AutoCompaction { get; set; } = true;
+    /// <summary>Tokens of the newest conversation kept verbatim beside the checkpoint. The rest of the folded
+    /// span is what the checkpoint stands for.</summary>
+    public int CompactionKeepTokens { get; set; } = ContextCompaction.DefaultKeepTokens;
+    /// <summary>Tokens kept free below the model's window before automatic compaction. Zero is the opencode
+    /// default: the larger of 15% of the window and 16 000 tokens. A count that would leave no room is ignored.</summary>
+    public int CompactionBufferTokens { get; set; }
     /// <summary>Tool-calling rounds allowed before the chat asks whether to continue.</summary>
     public int MaxToolRounds { get; set; } = ChatStateLimits.DefaultToolRounds;
     /// <summary>Model the extension uses for its own calls — summarizing a long conversation's older messages
@@ -90,10 +101,20 @@ public sealed class UserSettings
     public bool McpAllowRoots { get; set; } = true;
     public int McpConnectTimeoutSeconds { get; set; } = 30;
     public int McpToolTimeoutSeconds { get; set; } = 120;
-    /// <summary>Every tool offered is a schema in every request, so this is the main lever on how long a
-    /// turn takes before the model starts answering. A lower cap keeps that prompt small; a tool named with
-    /// # beyond the cap is not offered, so the turn must say how many were left out.</summary>
-    public int McpMaxToolsPerTurn { get; set; } = 16;
+    /// <summary>Every tool offered is a schema in every request, so this bounds what a message that names no tool
+    /// is offered — it is the main lever on how long a turn takes before the model starts answering. It never hides
+    /// a tool the message named: a <c>#server.tool</c> is offered however long the server's list is, because the
+    /// alphabetical prefix this used to keep held sixteen tools out of sixty-five and the useful ones were not in
+    /// it.</summary>
+    public int McpMaxToolsPerTurn { get; set; } = McpToolSnapshot.DefaultAutomaticTools;
+    /// <summary>Written by the first load after the automatic offer grew from sixteen tools, so a file that still
+    /// says sixteen keeps meaning "the old default" only once. See <see cref="SettingsStore"/>.</summary>
+    public bool McpToolsPerTurnUpgraded { get; set; }
+    /// <summary>Offer a turn only the MCP tools its own message asked for. On, a message that says nothing about
+    /// MCP is sent with no MCP tool at all — no schema, no description, and no round trip to re-read a list that
+    /// has not changed — and the turn says so. Off is the older behaviour: every connected tool rides on every
+    /// request, and the model may call one the user never mentioned.</summary>
+    public bool McpToolsOnlyWhenMentioned { get; set; } = true;
     public string McpLogLevel { get; set; } = "info";
     /// <summary>Only the generated --mcp-config is given to the Claude CLI. Off also loads the user's own Claude
     /// MCP configuration, which can add tools the Dashboard does not show.</summary>

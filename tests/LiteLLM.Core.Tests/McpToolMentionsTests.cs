@@ -33,6 +33,29 @@ public sealed class McpToolMentionsTests
         Assert.Empty(McpToolMentions.Parse("foo#bar"));
     }
 
+    /// <summary>The word decides only whether a turn offers the servers' tools. A message saying "MCP" in prose is
+    /// asking for them as plainly as a <c>#token</c> is, and a sample of a configuration pasted into a fenced block
+    /// is not asking for anything.</summary>
+    [Theory]
+    [InlineData("استفاده کن از mcp برای این تیکت", true)]
+    [InlineData("Check MCP for the ticket", true)]
+    [InlineData("Use mcp-atlassian here", true)]
+    [InlineData("Use #orders.search", true)]
+    [InlineData("Use `search_customers`", true)]
+    [InlineData("Summarize the readme", false)]
+    [InlineData("The mcps are unrelated", false)]
+    [InlineData("Nothing here", false)]
+    public void SaysMcp_ReadsTheWordAndTheGrammar(string message, bool expected) =>
+        Assert.Equal(expected, McpToolMentions.SaysMcp(message));
+
+    [Fact]
+    public void SaysMcp_IgnoresAFencedSample()
+    {
+        const string message = "Why does this config fail?\n```json\n{ \"mcpServers\": {} }\n```";
+
+        Assert.False(McpToolMentions.SaysMcp(message));
+    }
+
     [Fact]
     public void Parse_IgnoresAHashFollowedByWhitespace()
     {

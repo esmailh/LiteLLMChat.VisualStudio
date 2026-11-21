@@ -201,6 +201,11 @@ public sealed class McpClientTests
             var report = await client.PrepareTurnAsync(settings, null, CancellationToken.None);
 
             Assert.Equal(2, client.ToolDefinitions.Count);
+            // The cap bounds the automatic offer only: the third tool is still in the snapshot, resolvable, and
+            // offered when a message names it. Losing it from the snapshot is what made "the tool is not
+            // available in this environment" true for every tool past the alphabetical first sixteen.
+            Assert.Equal(3, client.Tools.Count);
+            Assert.True(client.TryResolveTool(client.Tools[2].ExposedName, out _));
             var row = Assert.Single(report.Rows);
             Assert.Contains("1 more", row.Summary);
             Assert.False(row.Ok);
@@ -330,6 +335,55 @@ public sealed class McpClientTests
             Assert.False(transport.Disposed);
         }
     }
+
+    /// <summary>A list is a round trip to the server, and a remote one answers it over the network. Reading every
+    /// list on every turn is what used to make a turn that never mentions MCP wait before the model was asked
+    /// anything; the session keeps what it read until something says it changed.</summary>
+    [Fact]
+    public async Task Prepare_ReadsTheServersListsOncePerSession()
+    {
+        var server = Server("files");
+        FakeTransport transport = null!;
+        using (var client = new McpClient(transportFactory: (configuration, log) =>
+                   transport = new FakeTransport { Tools = { Tool("read") } }))
+        {
+            var settings = Settings(server);
+            var first = await client.PrepareTurnAsync(settings, null, CancellationToken.None);
+            var second = await client.PrepareTurnAsync(settings, null, CancellationToken.None);
+
+            Assert.Empty(first.Rows);
+            Assert.Empty(second.Rows);
+            Assert.Equal(1, Sent(transport, "tools/list"));
+            Assert.Equal(1, Sent(transport, "resources/list"));
+            Assert.Equal(1, Sent(transport, "resources/templates/list"));
+            Assert.Equal(1, Sent(transport, "prompts/list"));
+            Assert.Single(client.Tools);
+        }
+    }
+
+    /// <summary>A server that changes its list says so. That notification is the one thing that re-reads it, so a
+    /// cached list is never a list the server has already replaced.</summary>
+    [Fact]
+    public async Task AChangedToolListIsReadAgainAndOffered()
+    {
+        var server = Server("files");
+        FakeTransport transport = null!;
+        using (var client = new McpClient(transportFactory: (configuration, log) =>
+                   transport = new FakeTransport { Tools = { Tool("read") } }))
+        {
+            await client.PrepareTurnAsync(Settings(server), null, CancellationToken.None);
+            Assert.Single(client.Tools);
+
+            transport.Tools.Add(Tool("write"));
+            transport.Enqueue(McpJsonRpc.Notification("notifications/tools/list_changed"));
+
+            await WaitForAsync(() => client.Tools.Count == 2);
+            Assert.Contains(client.Tools, tool => tool.Name == "write");
+        }
+    }
+
+    private static int Sent(FakeTransport transport, string method) =>
+        transport.Sent.Count(message => message["method"]?.Value<string>() == method);
 
     [Fact]
     public async Task ConnectEnabled_ConnectsOnlyEnabledServers()
@@ -685,7 +739,7 @@ public sealed class McpClientTests
             }
         }
 
-        private void Enqueue(JObject message)
+        public void Enqueue(JObject message)
         {
             _inbox.Enqueue(message);
             _incoming.Release();

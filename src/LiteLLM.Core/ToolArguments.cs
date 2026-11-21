@@ -70,6 +70,24 @@ public static class ToolArguments
         return false;
     }
 
+    /// <summary>A true/false argument. A boolean written as the string "true" is refused for the same reason a
+    /// number sent as a string is: the schema says boolean, and a reading that accepts both leaves the model unable
+    /// to tell which of its calls were understood.</summary>
+    public static bool TryFlag(JObject? args, string name, bool fallback, out bool value, out string error)
+    {
+        value = fallback;
+        error = "";
+        var token = args?[name];
+        if (token == null || token.Type == JTokenType.Null) return true;
+        if (token.Type == JTokenType.Boolean)
+        {
+            value = token.Value<bool>();
+            return true;
+        }
+        error = "`" + name + "` must be true or false; it arrived as " + Kind(token) + ".";
+        return false;
+    }
+
     /// <summary>What arrived, in the words the message needs. The model reads this to find its own mistake, so
     /// "an array" tells it more than "invalid".</summary>
     private static string Kind(JToken token) => token.Type switch
