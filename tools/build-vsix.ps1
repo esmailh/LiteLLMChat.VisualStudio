@@ -35,8 +35,15 @@ $intermediateDir = Join-Path $root "src\LiteLLM.VisualStudio\obj\$Configuration\
 $staleManifest = Join-Path $intermediateDir 'extension.vsixmanifest'
 if (Test-Path $staleManifest) { Remove-Item $staleManifest -Force }
 
-& $msbuild $project '/t:Build;CreateVsixContainer' `
+# GeneratePkgDef is not part of Build, so a container built from this script packed whatever pkgdef an earlier
+# build had left in obj, and the pkgdef is what registers the options page's GUID. Type.GUID is decided by the
+# compilation, so the packed value named a page the new assembly no longer answers for, and Tools > Options showed
+# "An error occurred loading this property page" while automation (which names the page) still worked. Running the
+# target between the build and the packaging, in the same invocation so the reference items are still resolved,
+# is what keeps the two in step. The check below refuses a container whose pkgdef predates the assembly.
+& $msbuild $project '/t:Build;GeneratePkgDef;CreateVsixContainer' `
     "/p:Configuration=$Configuration" `
+    "/p:CreatePkgDefAssemblyToProcess=$(Join-Path $root "src\LiteLLM.VisualStudio\bin\$Configuration\net48\LiteLLM.VisualStudio.dll")" `
     "/p:IntermediateOutputPath=obj/$Configuration/net48/" `
     "/p:TemplateOutputDirectory=$intermediate/" `
     "/p:FileManifest=$intermediate/files.json" `
@@ -48,6 +55,18 @@ if (Test-Path $staleManifest) { Remove-Item $staleManifest -Force }
     "/p:TargetVsixContainer=$container" `
     /v:m /nologo
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+$intermediate = Join-Path $root "src\LiteLLM.VisualStudio\obj\$Configuration\net48"
+$generated = Join-Path $intermediate 'LiteLLM.VisualStudio.latest.pkgdef'
+$packed = Join-Path $intermediate 'LiteLLM.VisualStudio.pkgdef'
+foreach ($file in @($generated, $packed)) {
+    if (-not (Test-Path $file)) { throw ("The build did not produce " + $file + ", so the container could not register anything.") }
+}
+# CopyIfChanged leaves the packed copy alone when the text is unchanged, so its timestamp says nothing. Comparing the
+# text is what proves the container carries the pkgdef of the assembly this run built.
+if ([IO.File]::ReadAllText($generated) -ne [IO.File]::ReadAllText($packed)) {
+    throw ("The pkgdef the container would carry is not the one generated from this build (" + $packed + "), so the installed page GUID would not match the package.")
+}
 
 $built = Join-Path (Split-Path -Parent $project) $container | Resolve-Path
 $target = Join-Path $root 'LiteLLM.VisualStudio.vsix'

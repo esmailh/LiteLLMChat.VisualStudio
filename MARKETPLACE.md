@@ -33,9 +33,17 @@ Bring an OpenAI-compatible AI assistant — or your Claude Code CLI — into Vis
 - **Readable compaction**: a **Compacted** row opens to show what the checkpoint replaced, the structured checkpoint the model was given instead, and that the chat keeps every message; `/compact` writes one on demand.
 - **Agent Skills** with Dashboard management, manual selection and optional model-directed loading on LiteLLM.
 
-This guide describes **1.8.15**. The installer is **LiteLLM.VisualStudio.vsix**, with versioning inside the project/manifest. Features are not a claim of live validation against every provider, OAuth host or IDE project system.
+This guide describes **1.8.16**. The installer is **LiteLLM.VisualStudio.vsix**, with versioning inside the project/manifest. Features are not a claim of live validation against every provider, OAuth host or IDE project system.
 
-## Current release — 1.8.15 (2026-11-21)
+## Current release — 1.8.16 (2026-11-21)
+
+Version **1.8.16** fixes the settings page. **Tools → Options → LiteLLM → General** answered *An error occurred loading this property page*, while the same page's values were still readable through automation — the misleading half that made the page itself look fine.
+
+The page was fine. The registration was not. A pkgdef is generated from the compiled assembly and records, under `ToolsOptionsPages\LiteLLM\General`, the GUID of the page class; the settings host asks the package for that GUID when the page is opened. `tools/build-vsix.ps1` built the container without ever running the `GeneratePkgDef` target, so the VSIX packed whatever pkgdef an earlier build had left in `obj` — a GUID the new assembly no longer answers for. Automation kept working because it names the category and page instead of the GUID.
+
+The script now generates the pkgdef as part of packaging, in the same invocation that builds and packs, and refuses a container whose pkgdef predates the assembly it registers. The page class also carries a fixed `[Guid]`, so the registration cannot drift from the code again. Verified in a clean instance with the same DLL both ways: the old GUID in the pkgdef produces the error pane, the new one loads the page — that difference alone.
+
+## Previously — 1.8.15 (2026-11-21)
 
 Version **1.8.15** answers the sentence 1.8.14 left in place: «من امکان دیدن یا کلیک‌کردن داخل تب مرورگر و دسترسی به نشست حساب شما را ندارم». It was true of the old tool, and it is now false for the window the agent opens. **`browser`** drives a real Chromium window — Chrome or Edge — with a profile of its own under `%LOCALAPPDATA%\LiteLLM.VisualStudio\browser`. Sign in once in that window and the session is still there on the next message and after a restart.
 

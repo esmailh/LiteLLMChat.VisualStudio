@@ -1,8 +1,14 @@
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using LiteLLM.Core;
 using Microsoft.VisualStudio.Shell;
 
 namespace LiteLLM.VisualStudio;
+// The pkgdef registers this page's GUID under ToolsOptionsPages, and the host asks the package for that GUID when
+// the page is opened. Without [Guid] the value is whatever Type.GUID invents for this compilation, so a pkgdef
+// generated from an earlier build names a page the package cannot answer for — and Tools → Options shows
+// "An error occurred loading this property page" while automation, which names the page, still works.
+[Guid("5B68B3C0-4B54-472A-A71A-8424B4244782")]
 public sealed class LiteLlmOptionsPage : DialogPage
 {
     [Category("Chat"), DisplayName("Request timeout (seconds)"), DefaultValue(120)] public int RequestTimeoutSeconds { get; set; } = 120;
