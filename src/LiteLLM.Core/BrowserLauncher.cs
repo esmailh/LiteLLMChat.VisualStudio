@@ -19,15 +19,34 @@ public sealed class BrowserLaunch
     public string Error { get; set; } = "";
 }
 
-/// <summary>The two things opening a browser does, kept behind a seam so a test can watch the road taken.
+/// <summary>The three things opening a browser does, kept behind a seam so a test can watch the road taken.
 ///
-/// <see cref="Start"/> is the launch itself and <see cref="Exists"/> is how a known browser is found on disk. Both are
-/// ordinary functions with the system's own behaviour as the default: a test replaces them, production uses them as
-/// they are.</summary>
+/// <see cref="Start"/> is the launch itself, <see cref="Exists"/> is how a known browser is found on disk, and
+/// <see cref="ReadText"/> is how the profile's own <c>DevToolsActivePort</c> is read — a file another process is
+/// writing, so a failed read is "not yet" rather than an error. All three are ordinary functions with the system's own
+/// behaviour as the default: a test replaces them, production uses them as they are.</summary>
 public sealed class BrowserEnvironment
 {
     public Func<ProcessStartInfo, int?> Start { get; set; } = StartProcess;
     public Func<string, bool> Exists { get; set; } = File.Exists;
+    public Func<string, string?> ReadText { get; set; } = ReadIfAny;
+
+    private static string? ReadIfAny(string path)
+    {
+        // Shared for reading and writing, because the browser writes this file while it starts and a strict open would
+        // throw for a file that is about to be readable. Anything else — a vanished file, a locked one — is null.
+        try
+        {
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (var reader = new StreamReader(stream))
+                return reader.ReadToEnd();
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
 
     private static int? StartProcess(ProcessStartInfo info)
     {
@@ -43,11 +62,13 @@ public sealed class BrowserEnvironment
     }
 }
 
-/// <summary>Opens one web address in whatever browser the user has.
+/// <summary>Opens one web address in whatever browser the user has, without any way to see or act on it.
 ///
-/// This exists because the tools' whole world is the workspace: a sign-in, a consent screen or a key that is only
-/// shown once on a page is something the agent can ask for but cannot do. shelling out to a command would work and
-/// was what opencode did, but it drags the command card, a shell and its output into a step that has none of them.
+/// This is not the agent's browser — <see cref="BrowserSession"/> is — and it is reached only when no Chromium browser
+/// is installed to be the agent's. It is still worth having: a machine with only Firefox can be shown the page, and a
+/// sentence saying it cannot be read is better than a sign-in step that cannot happen at all. It is also what keeps
+/// the tool honest about the two different things: one window the agent drives, and one it merely put in front of
+/// someone.
 ///
 /// Three roads, in the order a person would try them: the URL association Windows holds (the user's default browser),
 /// <c>cmd /c start</c> which goes through the same association by a different door, and finally the browsers this
@@ -68,7 +89,7 @@ public static class BrowserLauncher
         var value = (text ?? "").Trim();
         if (value.Length == 0)
         {
-            error = "open_browser needs a page to open. Call it again with an absolute http or https address, for example https://example.com/login.";
+            error = "Opening a page needs an address. Call browser again with action \"open\" and an absolute http or https url, for example https://example.com/login.";
             return false;
         }
         if (value.Length > MaxUrlLength)
@@ -94,7 +115,7 @@ public static class BrowserLauncher
             // branch. Anything without "://" is the far more common mistake: a host the model wrote bare.
             error = value.IndexOf("://", StringComparison.Ordinal) >= 0
                 ? "Only http and https addresses can be opened in the browser, and that one uses another scheme. Pass the page's http or https address instead."
-                : "open_browser needs the full address including its scheme. Call it again with https:// in front, for example https://" + value.Trim('/') + ".";
+                : "Opening a page needs the full address including its scheme. Call browser again with https:// in front, for example https://" + value.Trim('/') + ".";
             return false;
         }
         if (!Uri.TryCreate(value, UriKind.Absolute, out var parsed) || parsed.Host.Length == 0)
@@ -154,6 +175,23 @@ public static class BrowserLauncher
             if (!seen.Add(pair.Value)) continue;
             if (environment.Exists(pair.Value)) yield return pair;
         }
+    }
+
+    /// <summary>The Chromium browser that will be the agent's own, or null when the machine has none.
+    ///
+    /// Only Chromium speaks the protocol <see cref="BrowserSession"/> drives. Firefox has a debugging protocol of its
+    /// own, so offering it here would promise a page nothing could then read or click.</summary>
+    public static string? FindChromium(BrowserEnvironment? environment = null)
+    {
+        environment ??= new BrowserEnvironment();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in Installed())
+        {
+            if (string.Equals(pair.Key, "firefox", StringComparison.Ordinal)) continue;
+            if (!seen.Add(pair.Value)) continue;
+            if (environment.Exists(pair.Value)) return pair.Value;
+        }
+        return null;
     }
 
     private static IEnumerable<KeyValuePair<string, string>> Installed()

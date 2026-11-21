@@ -104,9 +104,9 @@ internal static class ContextTools
         }
         if (BrowserTools.Handles(name))
         {
-            // The card and the window are this project's; the address check, the launch and the sentence the model
-            // reads are Core's. Awaiting the confirmation on this thread is the point: the card belongs to it.
-            var browser = await BrowserTools.ExecuteAsync(args, token).ConfigureAwait(true);
+            // The card and the window are this project's; the address check, the profile, the script and the sentence
+            // the model reads are Core's. Awaiting the confirmation on this thread is the point: the card belongs to it.
+            var browser = await BrowserTools.ExecuteAsync(args, token, LiteLlmPackage.Instance.Services.Browser).ConfigureAwait(true);
             return new ToolResult { Content = browser.Content, Summary = browser.Summary, Ok = browser.Ok };
         }
 

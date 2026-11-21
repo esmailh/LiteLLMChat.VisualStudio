@@ -258,37 +258,71 @@ requests, correlate them with the log, stop it.
   send requests with `curl.exe`, treat 4xx/5xx as results, correlate a request with the log line it produced, and
   stop the program or say which shell is left running.
 
-## Opening the user's browser
+## The agent's browser
 
-`open_browser` is the one way a turn reaches outside the workspace into the user's own screen: a Grafana login, a
-consent screen, a key that is shown once. It is the answer to opencode's `bash`-opening-a-browser, given a name
-instead of a shell.
+`browser` is the one way a turn reaches outside the workspace into a window: a Grafana login, a consent screen, a key
+that is shown once — and, unlike what shipped in 1.8.14, everything that comes after it. The page it opens is a page
+the agent can read, the buttons it sees are buttons it can press, and the session it signs in to is a session it can
+use. It is the answer to opencode's `bash`-opening-a-browser, given a protocol instead of a shell.
 
-- **One tool, one address, and it returns at once.** `BrowserTools` (Core) validates and words the call, and
-  `BrowserLauncher` (Core) opens it. The call's answer is that the page was handed to a browser, never that the user
-  has finished with it: a blocking "wait until signed in" card was rejected, because the user's next message is the
-  only real evidence.
+- **One tool, five actions.** `BrowserTools` (Core) words the call and `BrowserSession` (Core) drives the page:
+  `open` (url), `read`, `click` (target), `type` (target, text), `script` (code). One definition rather than five keeps
+  the prompt small and the card honest — the card says which action it is, with the address and the model's own
+  selector or script on it. Every action answers with the page afterwards: address, title, visible text, clipped and
+  said to be clipped.
+- **The profile is the feature.** `BrowserProfile` starts Chromium with `--user-data-dir` under
+  `%LOCALAPPDATA%\LiteLLM.VisualStudio\browser` and `--remote-debugging-port=0`. So a sign-in done in that window is
+  still signed in on the next message and after a restart, and nothing here can see or change the browser the user
+  browses in — Chromium holds one profile per directory. Driving the user's own profile was refused: it is locked
+  while their Chrome runs, and reaching into it would expose every site they are signed in to, not the one page this
+  turn was given.
+- **Port 0, and the file that names it.** The browser picks a free port and writes it, with its browser-level socket
+  path, to `DevToolsActivePort` in the profile. `DevToolsEndpoint` parses it, builds `/json/version`, `/json/list` and
+  `/json/new`, and decides which target a call means — the tab this session was driving, then the address it asked
+  for, then the first real page rather than a blank one. The socket path in that file is what proves a port still
+  belongs to this profile; a probe that answers with a different path means another process owns it, so the session
+  starts its own window instead of talking to a stranger. Reuse is what makes the second turn cheap; a stale file is
+  what makes a launch necessary, and neither is a failure.
+- **The protocol is hand-rolled on purpose.** `ClientWebSocket` in the framework, JSON in and JSON out, requests
+  numbered and answered by number: no SDK, no new package, for the same reason MCP is hand-rolled — a net48 VSIX in a
+  Visual Studio process cannot afford the binding conflicts. `ICdpConnection` and `IDevTools` are the test seams; the
+  three HTTP endpoints are `HttpDevTools`, and every fake in the tests answers the JSON a browser would.
+- **A page is read, never a cookie store.** The extension's only reach into the session is the page: `script` runs in
+  the page's own origin, so `await fetch('/api/…', {credentials:'same-origin'})` carries the cookies the browser holds
+  — including the HttpOnly ones no client can read — and CORS never applies. That is how an account is used without
+  its password ever reaching the chat, and it is why nothing here parses Chrome's encrypted cookie database.
+- **A page is a document, so actions are serial.** One gate per session, and one action at a time: two calls racing
+  on one document would mean the second reading a page the first was replacing.
+- **Waiting is bounded and stated.** `WaitForReadyAsync` polls `document.readyState` (the context is destroyed by the
+  navigation that just started, so a refusal is "ask again") and then settles briefly, because a single-page app says
+  "complete" with an empty shell. Twenty seconds, one constructor argument, then the page is read anyway and the note
+  says it was read early. The browser's own start has the same bound, and a launch that never reports an endpoint says
+  which profile to close.
+- **Every failure keeps its own sentence.** A page that refused the script answers with the page's own first line
+  (`BrowserScripts.Describe`), not a protocol number; an element that is not there says so; a click that was found but
+  threw says that instead. A failed call drops the socket so the next one attaches again rather than failing on a
+  connection that will never answer.
 - **Only http and https.** `TryParseUrl` trims, refuses whitespace/quotes/control characters, caps the address at
   `MaxUrlLength`, and refuses `file:`, `javascript:`, `ms-settings:` and anything else. A host written without a
   scheme is answered with the corrected address, because that is the mistake a model makes most often.
-- **Three roads, in the order a person would try them.** The Windows URL association (`UseShellExecute`), then
-  `cmd.exe /d /s /c start "" "<url>"`, then the Chrome/Edge/Firefox found under the Program Files and
-  `%LOCALAPPDATA%` folders. A broken association is exactly the failure a user cannot repair from the chat, so the
-  known browsers are the last resort; a machine where all of them fail gets the address back with what failed.
-  `BrowserEnvironment` is the test seam for both the launch and the existence check.
-- **The card is the command card's sibling.** `ChatControl.AskToOpenBrowserAsync` names the exact address (not the
-  site), offers **Skip** and **Open**, and honours `_disposed`, `AllowAllPermissions` and `ConfirmEachCommand` the
-  same way `AskToRunCommandAsync` does. A missing handler denies.
+- **A machine with no Chromium still gets the page.** `BrowserLauncher` is unchanged and is now only the fallback:
+  association, `cmd /c start`, then the installed browsers. The result says plainly that this window is the user's own
+  and no tool can read it — the sentence 1.8.14 had for every launch is now true only of this one.
+- **The card is the command card's sibling.** `ChatControl.AskToUseBrowserAsync` names the action, the address and the
+  model's selector, value or script, offers **Skip** and the action's own button, and honours `_disposed`,
+  `AllowAllPermissions` and `ConfirmEachCommand` the same way `AskToRunCommandAsync` does. A missing handler denies.
+  Its caption says the one thing a user cannot infer: this is a profile of its own, not the Chrome they are signed in
+  to. Every action asks, not only the first: acting inside a window is the side effect being approved.
 - **Gated with the terminal tools.** `ToolExecutionPolicy.Terminal` names it, and `ExtensionServices.ToolsFor`
-  offers `BrowserTools.Definition` inside the `EnableTerminalTools` branch: opening a window on the user's desktop
-  is the same decision as running a command.
-- **What the result says is the feature.** The model is told it cannot read the tab, click in it, or use the
-  session's cookies and tokens, and that it must never ask for a password, a token or a one-time code in the chat.
-  Without that sentence an agent that watched a login page open would answer the next question as if it were signed
-  in. `AgentPrompt.BaseInstructions` carries the same rules — say what the page is for, wait for the user's
-  confirmation, then continue.
-- **The Claude backend is not this tool.** The CLI runs its own harness and its own tools; `open_browser` is
-  LiteLLM-only in the same way every other built-in tool is.
+  offers `BrowserTools.Definition` inside the `EnableTerminalTools` branch: driving a window on the user's desktop is
+  the same decision as running a command. `ExtensionServices.Browser` owns the one session, and `Dispose` drops the
+  socket and never the window — closing Visual Studio must not close a browser the user is working in.
+- **The prompt carries the rules, the result carries the facts.** `AgentPrompt` says what the browser is for, that the
+  sign-in done in it is kept, that `script` is how the session is used, and that a password, cookie or token never
+  goes into the chat. `/compact` and the rest of the loop are untouched; nothing about the browser is stored in a
+  session.
+- **The Claude backend is not this tool.** The CLI runs its own harness and its own tools; `browser` is LiteLLM-only
+  in the same way every other built-in tool is.
 
 ## Style
 

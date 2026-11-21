@@ -160,4 +160,25 @@ public sealed class BrowserLauncherTests
         Assert.False(launch.Opened);
         Assert.DoesNotContain("chrome", launch.Error, StringComparison.Ordinal);
     }
+
+    /// <summary>The agent's own browser has to be a Chromium one: it is the only family that answers the protocol the
+    /// session drives, so Firefox is never offered as a window that could be read.</summary>
+    [Fact]
+    public void FindChromium_TakesChromeWhenItIsThere()
+    {
+        var environment = new BrowserEnvironment { Exists = path => path.EndsWith("msedge.exe", StringComparison.OrdinalIgnoreCase) };
+
+        var found = BrowserLauncher.FindChromium(environment);
+
+        Assert.NotNull(found);
+        Assert.EndsWith("msedge.exe", found, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void FindChromium_DoesNotOfferFirefox()
+    {
+        var environment = new BrowserEnvironment { Exists = path => path.EndsWith("firefox.exe", StringComparison.OrdinalIgnoreCase) };
+
+        Assert.Null(BrowserLauncher.FindChromium(environment));
+    }
 }

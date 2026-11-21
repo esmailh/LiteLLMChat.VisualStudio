@@ -36,6 +36,10 @@ internal sealed class ExtensionServices : IDisposable
     /// next message can still test what the last one brought up. Each shell remembers the conversation it belongs
     /// to, so a notice about one ending is not delivered to a chat that never started it.</summary>
     internal BackgroundShells Shells { get; } = new BackgroundShells();
+    /// <summary>The browser the agent drives. Owned here rather than by the window because the session outlives a turn
+    /// and a conversation: the profile is the sign-in, and a chat that swapped it for another window's would lose it.
+    /// Nothing starts until a browser tool is called, and disposing this drops the socket, never the window.</summary>
+    internal BrowserSession Browser { get; } = new BrowserSession();
     internal event EventHandler? ModelsChanged;
     internal event EventHandler? SessionsChanged;
     internal event EventHandler? UsageChanged;
@@ -257,6 +261,6 @@ internal sealed class ExtensionServices : IDisposable
     }
     private async Task<IVsOutputWindowPane?> GetOutputPaneAsync() { var output = (IVsOutputWindow?)await _package.GetServiceAsync(typeof(SVsOutputWindow)); if (output == null) return null; var id = PackageGuids.OutputPane; output.CreatePane(ref id, "LiteLLM", 1, 1); output.GetPane(ref id, out var pane); return pane; }
     private async Task UpdateStatusAsync() { await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(); var bar = (IVsStatusbar?)await _package.GetServiceAsync(typeof(SVsStatusbar)); if (bar != null) { var text = Models.Count > 0 ? $"LiteLLM ✓  {Models.Count} models / {Settings.Servers.Count(s => s.Enabled)} servers" : $"LiteLLM ⚠  {Settings.Servers.Count(s => s.Enabled)} servers"; bar.SetText(text); } }
-    public void Dispose() { Mcp.Dispose(); Shells.Dispose(); _client.Dispose(); }
+    public void Dispose() { Mcp.Dispose(); Shells.Dispose(); Browser.Dispose(); _client.Dispose(); }
 }
 internal static class PackageGuids { internal static readonly Guid OutputPane = new Guid("0D30360D-A923-465B-94C4-760E67C28B7A"); }

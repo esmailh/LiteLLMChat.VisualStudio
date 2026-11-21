@@ -184,7 +184,7 @@ public partial class ChatControl : UserControl, IAgentView
         EditTools.Confirm = AskToApplyEditAsync;
         TerminalTools.Confirm = AskToRunCommandAsync;
         McpApproval.Confirm = AskToApproveMcpToolAsync;
-        BrowserTools.Confirm = AskToOpenBrowserAsync;
+        BrowserTools.Confirm = AskToUseBrowserAsync;
         // Auto-hide is a visual detach, not a new conversation or a new turn. In particular, do not
         // replace the session underneath a running harness when the pane becomes visible again.
         if (_generation == null) await Services.RefreshSessionScopeAsync();
@@ -1213,21 +1213,44 @@ public partial class ChatControl : UserControl, IAgentView
         finally { ApprovalWaiting(false); Messages.Children.Remove(card); }
     }
 
-    /// <summary>Asks before a page is put in front of the user. The card names the exact address rather than the site,
-    /// because the address is what the browser will be handed, and a card that showed "Grafana" for a link to somewhere
-    /// else would be asking the wrong question. Allow all permissions and the command-confirmation switch answer it the
-    /// same way they answer a command: one permission decision covers the turn's side effects.</summary>
-    private async Task<bool> AskToOpenBrowserAsync(BrowserProposal proposal)
+    /// <summary>Asks before the agent touches its browser. The card names the action, the address and the part the model
+    /// wrote — the selector, the field's value or the script — because the decision is not "may the agent use a browser"
+    /// but "may it do this, here". The caption says the one thing a user cannot be expected to infer: this window is a
+    /// profile of its own, not the Chrome they are signed in to. Allow all permissions and the command-confirmation
+    /// switch answer it the same way they answer a command: one permission decision covers the turn's side effects.</summary>
+    private async Task<bool> AskToUseBrowserAsync(BrowserProposal proposal)
     {
         if (_disposed) return false;
         if (AllowAllPermissions) return true;
         if (!Services.Settings.ConfirmEachCommand) return true;
         var body = new StackPanel();
-        body.Children.Add(new TextBlock { Text = "Open this page in your browser?", FontWeight = FontWeights.SemiBold });
-        body.Children.Add(new TextBlock { Text = "The agent cannot read the page or anything you do on it. It is asking so you can sign in, approve something or copy a value, and then continue in the chat.", Style = (Style)FindResource("Caption"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0) });
-        body.Children.Add(new TextBox { Text = proposal.Url, IsReadOnly = true, FontFamily = new FontFamily("Consolas, Courier New"), Margin = new Thickness(0, 8, 0, 0), HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, TextWrapping = TextWrapping.NoWrap });
+        body.Children.Add(new TextBlock
+        {
+            Text = proposal.Ask.Length > 0 ? proposal.Ask : "Use the agent's browser?",
+            FontWeight = FontWeights.SemiBold,
+            TextWrapping = TextWrapping.Wrap
+        });
+        body.Children.Add(new TextBlock
+        {
+            Text = "It is the agent's own browser window: a separate profile from your normal browser, kept between turns so a sign-in done there stays signed in. It can read and act on that page and on nothing else.",
+            Style = (Style)FindResource("Caption"),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 4, 0, 0)
+        });
+        if (proposal.Url.Length > 0)
+            body.Children.Add(new TextBox { Text = proposal.Url, IsReadOnly = true, FontFamily = new FontFamily("Consolas, Courier New"), Margin = new Thickness(0, 8, 0, 0), HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, TextWrapping = TextWrapping.NoWrap });
+        if (proposal.Detail.Length > 0)
+            body.Children.Add(new TextBox { Text = proposal.Detail, IsReadOnly = true, AcceptsReturn = true, FontFamily = new FontFamily("Consolas, Courier New"), MaxHeight = 220, Margin = new Thickness(0, 8, 0, 0), VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, TextWrapping = TextWrapping.NoWrap });
+        var label = proposal.Action switch
+        {
+            "open" => "Open",
+            "click" => "Click",
+            "type" => "Fill",
+            "script" => "Run",
+            _ => "Allow"
+        };
         var skip = new Button { Content = "Skip" };
-        var allow = new Button { Content = "Open", Style = (Style)FindResource("PrimaryButton") };
+        var allow = new Button { Content = label, Style = (Style)FindResource("PrimaryButton") };
         body.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0), Children = { skip, allow } });
         var card = new Border { Style = (Style)FindResource("Card"), HorizontalAlignment = HorizontalAlignment.Left, MaxWidth = 900, Child = body, Margin = new Thickness(0, 0, 0, 12) };
         card.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.AccentMediumBrushKey);
