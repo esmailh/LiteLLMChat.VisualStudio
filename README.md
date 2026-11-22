@@ -7,7 +7,7 @@ See [MARKETPLACE.md](MARKETPLACE.md) for the complete user-facing feature guide,
 
 A native WPF VSIX for chatting with any OpenAI-compatible LiteLLM gateway without leaving Visual Studio. It supports multiple servers, model discovery, streaming, reasoning display, read and edit tools, a browser window the agent drives and stays signed in to, VS Code–style context attachments, project folders a conversation can reach beyond the solution, MCP servers, Agent Skills, a Claude Code backend, diagnostics, DPAPI-protected API keys, and a local conversation history.
 
-## Current release — 1.8.16 (2026-11-21)
+## Current release — 1.8.16 (2026-11-22)
 
 Version **1.8.16** fixes the settings page. **Tools → Options → LiteLLM → General** answered *An error occurred loading this property page*, while the same page's values were still readable through automation — the misleading half that made the page itself look fine.
 
@@ -87,7 +87,7 @@ The current installer is **`LiteLLM.VisualStudio.vsix`**. Version numbers are ma
 - Retains the 300000-character maximum; a smaller model can receive a lower estimated allowance after reserving response space and headroom.
 - Includes optional RTK Git-output filtering, local EXE MCP imports, confirmed Git/GitLab workflows, Claude progress/authentication diagnostics and the reliability fixes described below.
 
-**Install or update:** close Visual Studio, run `LiteLLM.VisualStudio.vsix`, complete the VSIX Installer and reopen Visual Studio. Verify **1.8.14** under **Extensions > Manage Extensions > Installed**. Do not choose an older filename-suffixed copy. Updating the installer does not update a running IDE automatically.
+**Install or update:** close Visual Studio, run `LiteLLM.VisualStudio.vsix`, complete the VSIX Installer and reopen Visual Studio. Verify **1.8.16** under **Extensions > Manage Extensions > Installed**. Do not choose an older filename-suffixed copy. Updating the installer does not update a running IDE automatically.
 
 ## Requirements
 
@@ -96,7 +96,7 @@ The current installer is **`LiteLLM.VisualStudio.vsix`**. Version numbers are ma
 
 Building from source additionally needs the **Visual Studio extension development** workload and MSBuild from that Visual Studio installation; `dotnet build` does not build the extension projects.
 
-The VSIX is produced below `src\LiteLLM.VisualStudio\bin\Release`. Run it to install, then restart Visual Studio. F5 from the extension project launches the experimental instance.
+The VSIX is produced by `tools\build-vsix.ps1`, which builds, regenerates the pkgdef, packs the container, checks it with `tools\verify-vsix.ps1` and copies it to the repository root as `LiteLLM.VisualStudio.vsix`; a copy stays below `src\LiteLLM.VisualStudio\bin\Release`. Run the root copy to install, then restart Visual Studio. F5 from the extension project launches the experimental instance. `PUBLISHING.md` has the release steps.
 
 ## Use
 
@@ -116,6 +116,8 @@ The header and the composer reflow with the pane. Below about 820px the conversa
 
 ## Recent improvements
 
+- **The settings page opens again:** **Tools > Options > LiteLLM** answered *An error occurred loading this property page* whenever the packaged registration came from an earlier build, while automation that names the page kept working. Packaging now regenerates the registration and a check refuses a container whose registration is not the one that build produced; the page class carries a fixed `[Guid]`, so it cannot drift from the code again.
+- **Every MCP tool a server lists, and the ones a message asks for:** **Maximum tools per turn** bounds what an ordinary message is *offered*, never the list the extension holds; a tool the message names — `#server.tool`, or an exposed name only one server offers — is sent however far down that list it sits. With **Offer tools only when the message asks** on, a message that says nothing about MCP carries no MCP schema at all, and a chat can be told once, in a sentence that names MCP and a scope, to use its tools on every turn.
 - **A browser the agent drives, with the session it signed in to:** `browser` opens a real Chrome or Edge window on a profile of its own (`%LOCALAPPDATA%\LiteLLM.VisualStudio\browser`), so a Grafana sign-in done there is still signed in next message. It can then read the page, click the button by its text, fill a field with the page's own input event, and run JavaScript in the page — which is how `await fetch('/api/…', {credentials:'same-origin'})` reaches the site's API with the session's cookies, HttpOnly ones included, without a token entering the chat. Every action asks first, on a card that names the action, the address and the model's selector or script; the prompt is explicit that a password, token or one-time code is never typed into the chat.
 - **Readable compaction:** the **Compacted** row opens to show what the checkpoint replaced — how many of your messages, replies and tool results, and which tools — the checkpoint text the model received instead, and the statement that the chat and the saved conversation keep every message. `/compact` writes one now, and the three **Context** options decide when and how much stays verbatim.
 - **Project folders beyond the solution:** the **Project** button in the chat header adds a folder to this conversation only; its files are addressed as `Folder/src/Foo.cs` and are reachable from `@`, `#`, the picker and every file tool, while commands, Git, and the automatic build and test check stay on the solution.
@@ -129,7 +131,7 @@ The header and the composer reflow with the pane. Below about 820px the conversa
 - **Verification and safety:** explicit build outcomes, same-round test gating, dispatch-time permission checks, fail-closed approvals and linked-path rejection for workspace file tools.
 - **Session reliability:** saving a running turn no longer cancels it; interrupted-turn recovery occurs on load.
 
-These describe the **1.8.14** source/release. The installer keeps the stable name **LiteLLM.VisualStudio.vsix**; its version is recorded in the project and manifest. Builds and unit tests do not replace manual IDE, OAuth or provider checks.
+These describe the **1.8.16** source/release. The installer keeps the stable name **LiteLLM.VisualStudio.vsix**; its version is recorded in the project and manifest, and the Release build is checked by `tools\verify-vsix.ps1` before it is copied out — the version the project, the source manifest and the package agree on, the assembly's own file version, and the options page GUID the package registers. Builds and unit tests do not replace manual IDE, OAuth or provider checks.
 
 ## Model-aware request budgeting (LiteLLM)
 
@@ -286,6 +288,7 @@ Diagnostics appear in **View > Output > LiteLLM**. The status bar reports discov
 
 ## Troubleshooting
 
+- **Tools > Options > LiteLLM shows "An error occurred loading this property page":** the installed build predates 1.8.16, whose package carried a registration written by an earlier build. Closing Visual Studio and installing the current `LiteLLM.VisualStudio.vsix` replaces it; if the page still fails after that, the installed folder is still the older one — check the version under **Extensions > Manage Extensions > Installed**.
 - **Request context exceeds the safety budget:** the final serialized messages and tool schemas exceed the model-aware estimate or the 300000-character ceiling. No request is sent. Start a new chat, remove attachments or select fewer MCP tools with `#`; verify capacity metadata/fallback/overrides before raising an assumed limit. Compaction cannot shrink fixed instructions or protected recent rounds indefinitely.
 - **RTK is not visible:** open **Tools > Options > LiteLLM > General**, category **Terminal**. There is no RTK Dashboard tab, and Claude/short/unsupported commands do not use this filter.
 - **A file in another project is not found:** check the **Project** button in the header. A folder has to be added to *this* conversation, and its files are addressed with the folder's name in front (`OtherApp/src/Foo.cs`); an unprefixed path is looked for in the solution first, and a name the solution already has resolves there.
@@ -304,7 +307,7 @@ The chat behavior adapts public VS Code concepts—session/request/response stat
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for build and test instructions. Report security issues privately as described in [SECURITY.md](SECURITY.md), never in a public issue.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build and test instructions, and [PUBLISHING.md](PUBLISHING.md) for the release steps: where the version is written, what the build and its package check refuse, and how the Marketplace gets the file. Report security issues privately as described in [SECURITY.md](SECURITY.md), never in a public issue.
 
 ## License
 

@@ -35,7 +35,7 @@ Bring an OpenAI-compatible AI assistant — or your Claude Code CLI — into Vis
 
 This guide describes **1.8.16**. The installer is **LiteLLM.VisualStudio.vsix**, with versioning inside the project/manifest. Features are not a claim of live validation against every provider, OAuth host or IDE project system.
 
-## Current release — 1.8.16 (2026-11-21)
+## Current release — 1.8.16 (2026-11-22)
 
 Version **1.8.16** fixes the settings page. **Tools → Options → LiteLLM → General** answered *An error occurred loading this property page*, while the same page's values were still readable through automation — the misleading half that made the page itself look fine.
 
@@ -113,7 +113,7 @@ Version **1.8.12** is what lets a turn actually run the project and test its ser
 
 Version **1.8.12** also compacts a long conversation the way opencode does. When the prompt size the last response reported, plus an estimate of what has changed since, reaches the model's context window minus a buffer (the larger of 15% of the window and 16 000 tokens, or **Compaction buffer (tokens)** when that leaves room), the older part of the conversation is no longer replaced by a prose summary: it is folded into a structured checkpoint written to opencode's template — objective, requirements, decisions, work state (completed, active, blocked), next move, relevant files, important context — and the newest **Keep beside the checkpoint (tokens)** stay word for word beside it; 15 000 is the opencode default. An existing checkpoint is updated rather than replaced, so a requirement recorded three compactions ago is still in the request, and a reply that ignores the template gets one reminder before the earlier checkpoint is kept. The checkpoint travels as one `user` message wrapping `<conversation-checkpoint>`, in the request copy only — the chat and the saved conversation keep every message — and the message the turn is answering is pinned in front of the kept rounds, so a fold can cost the thread but never the question. A provider that rejects a round as too long no longer ends the turn: the conversation is folded further below the size that was refused and the same round is sent again, up to four times. **`/compact`** on the LiteLLM backend folds the conversation now, sends nothing and leaves the chat idle until the next message; it is also a row in the `/` menu. **Compact automatically** under **Tools > Options > LiteLLM > Context** can be turned off, in which case only `/compact` compacts.
 
-For installation use **`LiteLLM.VisualStudio.vsix`**. Close Visual Studio, run the installer, reopen and confirm **1.8.14** under **Extensions > Manage Extensions > Installed**. Older filename-suffixed installers are not current output; replacing a VSIX does not update a running IDE.
+For installation use **`LiteLLM.VisualStudio.vsix`**. Close Visual Studio, run the installer, reopen and confirm **1.8.16** under **Extensions > Manage Extensions > Installed**. Older filename-suffixed installers are not current output; replacing a VSIX does not update a running IDE.
 
 ## Requirements
 
@@ -380,6 +380,10 @@ API keys and MCP secrets are protected with Windows DPAPI for the current Window
 - Your configured LiteLLM gateway, model provider, MCP servers, and the Claude Code service may retain or process requests according to their own policies. Review those policies before sending confidential source code.
 
 ## Troubleshooting
+
+### Tools > Options > LiteLLM shows an error instead of its settings
+
+*An error occurred loading this property page* means the installed package carries a registration written by an earlier build: the page's class GUID in it is not one the installed assembly answers for. It was fixed in **1.8.16**, which regenerates that registration while packing and refuses a container whose registration is not the one that build produced. Close Visual Studio and install the current `LiteLLM.VisualStudio.vsix`; the version under **Extensions > Manage Extensions > Installed** has to say **1.8.16** before the page can open. Nothing is lost by the update — the settings file is separate from the extension folder.
 
 ### No models appear
 
