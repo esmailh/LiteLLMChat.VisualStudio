@@ -40,7 +40,8 @@ if (Test-Path $staleManifest) { Remove-Item $staleManifest -Force }
 # compilation, so the packed value named a page the new assembly no longer answers for, and Tools > Options showed
 # "An error occurred loading this property page" while automation (which names the page) still worked. Running the
 # target between the build and the packaging, in the same invocation so the reference items are still resolved,
-# is what keeps the two in step. The check below refuses a container whose pkgdef predates the assembly.
+# is what keeps the two in step. The check below refuses a container whose pkgdef is not the one this build generated;
+# verify-vsix.ps1 then checks the copy that gets installed, which is the file a user uploads.
 & $msbuild $project '/t:Build;GeneratePkgDef;CreateVsixContainer' `
     "/p:Configuration=$Configuration" `
     "/p:CreatePkgDefAssemblyToProcess=$(Join-Path $root "src\LiteLLM.VisualStudio\bin\$Configuration\net48\LiteLLM.VisualStudio.dll")" `
@@ -74,3 +75,9 @@ Copy-Item $built $target -Force
 
 $file = Get-Item $target
 Write-Host ("wrote " + $file.FullName + "  " + $file.Length + " bytes")
+
+# The copy above is the file a user installs, so it is the one that gets checked: the version three files have to
+# agree on, the assembly and the registration the container actually carries. A build that produced a package nobody
+# may upload should say so here rather than at the Marketplace.
+& (Join-Path $PSScriptRoot 'verify-vsix.ps1') -Path $target -Configuration $Configuration
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

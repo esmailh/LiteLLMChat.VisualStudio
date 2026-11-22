@@ -51,6 +51,10 @@ $vstest = (Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio\*\*\Common
 anywhere; it locates MSBuild itself. A plain Release `Build` does not create the container from the
 command line, because the VS SDK targets are evaluated before the SDK has assigned its output paths.
 
+The same script generates the pkgdef and then runs `tools\verify-vsix.ps1` on the copy it wrote, so a
+package whose version or registration disagrees with the code fails the build instead of shipping.
+`PUBLISHING.md` has the rest of the release steps.
+
 ## Pull requests
 
 - Keep one concept per file, and match the surrounding style. Comments explain *why*, not *what*.
